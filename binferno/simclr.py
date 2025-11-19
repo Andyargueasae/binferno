@@ -266,7 +266,7 @@ class SimCLR(object):
         logging.info(f"Start SimCLR training for {self.args.epochs} epochs.")
         # logging.info(f"Training with cpu: {self.args.disable_cuda}.")
         if self.args.kmer_model_path == "empty":
-            kmer_len = 136
+            kmer_len = 538
         else:
             kmer_len = 128
         logging.info("kmer_len:\t" + str(kmer_len) + "\n")
