@@ -42,4 +42,6 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry.group.dev.dependencies]
 black = "^25.11.0"
+pytest = "^9.0.1"
+coverage = "^7.12.0"
 
