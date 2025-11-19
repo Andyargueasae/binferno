@@ -194,11 +194,14 @@ def arguments():
                                            help='n_views for generating augmentation data.')
     generate_aug_data_subparsers.add_argument('--bam_file_path', type=str, help=("The path to access the bam files."))
 
-
+    generate_aug_data_subparsers.add_argument("--plastid", type=bool, default=False, help="Whether to generate augmentation data for plastid contigs.")
     generate_aug_data_subparsers.add_argument('--contig_len', default = 1000, type=int, metavar='N',
                                        help='mininum contig length for augmentation')
     generate_aug_data_subparsers.add_argument('--num_threads', default=10, type=int,
                                               help='num_threads for generating augmentation data.')
+    generate_aug_data_subparsers.add_argument("--corgi_checkpoint", type=str, default=None, help="The path to the Corgi pretrained model checkpoint.")
+    generate_aug_data_subparsers.add_argument("--corgi_venv", type=str, default=None, help="The path to the Corgi conda environment.")
+    
 
     #############################################################################################
     ############################################ cluster #####################################
@@ -214,6 +217,7 @@ def arguments():
 
     clustering_subparsers.add_argument('--cluster_num', default=0, type=int,
                                        help='Add cluster number to run partial seed method (default: 0)')
+    clustering_subparsers.add_argument("--plastid", type=bool, default=False, help="Whether to process plastid contigs.")
 
     clustering_subparsers.add_argument('--not_run_infomap', action='store_true',
                                        help='Do not run infomap.')
@@ -246,6 +250,7 @@ def arguments():
 
     get_result_subparsers.add_argument('--bac_mg_table', type=str, help=("bac_mg_table (bacteria marker gene information)"))
     get_result_subparsers.add_argument('--ar_mg_table', type=str, help=("ar_mg_table (archea marker gene information)"))
+    get_result_subparsers.add_argument("--plastid", type=bool, default=False, help="Whether to process plastid contigs.")
     get_result_subparsers.add_argument('--checkm_database', type=str, default=None,
                                        help=("The database to use for marker genes. Default is 'default'."))
 
@@ -296,7 +301,10 @@ def main():
         from utils import gen_seed
 
         num_threads = args.num_threads
-        _ = gen_seed(logger, args.contig_file, num_threads, args.contig_len, marker_name="pltd_marker", quarter="2quarter")
+        if args.plastid:
+            _ = gen_seed(logger, args.contig_file, num_threads, args.contig_len, marker_name="pltd_marker", quarter="2quarter")
+        else:
+            _ = gen_seed(logger, args.contig_file, num_threads, args.contig_len, marker_name="bacar_marker", quarter="2quarter")
 
         cluster(logger, args)
 
@@ -362,7 +370,10 @@ def main():
         from get_final_result import run_get_final_result
 
         num_threads = args.num_threads
-        seed_num = gen_seed(logger, args.contig_file, num_threads, args.contig_len, marker_name="pltd_marker", quarter="2quarter")
+        if args.plastid:
+            seed_num = gen_seed(logger, args.contig_file, num_threads, args.contig_len, marker_name="pltd_marker", quarter="2quarter")
+        else:
+            seed_num = gen_seed(logger, args.contig_file, num_threads, args.contig_len, marker_name="bacar_marker", quarter="2quarter")
 
         run_get_final_result(logger, args, seed_num, num_threads, ignore_kmeans_res=True)
 

@@ -263,20 +263,24 @@ def run_get_final_result(logger, args, seed_num: int, num_threads: int = 40,
         if not (os.path.exists(output_dir)):
             make_sure_path_exists(output_dir)
             profile = Profile(num_threads)
-            profile.Profile_setup(args.checkm_database)
+            if args.checkm_database:
+                profile.Profile_setup(args.checkm_database)
             profile.run_pltd(bin_dirs,
                         output_dir)
 
-        # bac_mg_table = output_dir + '/binning_methods/' + res_name + '/checkm_bac/marker_gene_table.tsv'
-        # ar_mg_table = output_dir + '/binning_methods/' + res_name + '/checkm_ar/marker_gene_table.tsv'
+        bac_mg_table = output_dir + '/binning_methods/' + res_name + '/checkm_bac/marker_gene_table.tsv'
+        ar_mg_table = output_dir + '/binning_methods/' + res_name + '/checkm_ar/marker_gene_table.tsv'
         pltd_mg_table = output_dir + '/binning_methods/' + res_name + '/checkm_pltd/marker_gene_table.tsv'
     else:
-        # bac_mg_table = args.bac_mg_table
-        # ar_mg_table = args.ar_mg_table
+        bac_mg_table = args.bac_mg_table
+        ar_mg_table = args.ar_mg_table
         pltd_mg_table = args.pltd_mg_table
 
-    best_method = estimate_bins_quality_nobins_pltd(pltd_mg_table, args.output_path + '/cluster_res/',ignore_kmeans_res=ignore_kmeans_res)
+    if args.plastid:    
+        best_method = estimate_bins_quality_nobins_pltd(pltd_mg_table, args.output_path + '/cluster_res/',ignore_kmeans_res=ignore_kmeans_res)
 
+    else: 
+        best_method = estimate_bins_quality_nobins(bac_mg_table, ar_mg_table, args.output_path + '/cluster_res/',ignore_kmeans_res=ignore_kmeans_res)
     logger.info('Final result:\t'+args.output_path + '/cluster_res/'+best_method)
     filter_small_bins(logger, args.contig_file, args.output_path + '/cluster_res/'+best_method, args)
 

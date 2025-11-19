@@ -81,6 +81,10 @@ def run_gen_bedtools_out(bam_file_path: str, out: str, logger, num_process: int 
 
     namelist.sort()
 
+    if all(os.path.exists(os.path.join(out, f"{name}_depth.txt")) for name in namelist):
+        logger.info("All bedtools output files already exist. Skipping bedtools coverage generation.")
+        return
+
     os.makedirs(out, exist_ok=True)
 
     pool = LoggingPool(num_process) if num_process != 0 else LoggingPool()
@@ -214,7 +218,7 @@ def modify_depth_file(depth_file: str, contig_ids: list):
 
 
 def gen_cov_from_bedout(logger, out_path: str, depth_file_path: str, contig_ids: list=None,
-                        num_process: int = 10, num_aug: int = 5, edge: int = 0, contig_len: int = 1000):
+                        num_process: int = 10, num_aug: int = 5, edge: int = 0, contig_len: int = 1000, plastid: bool=False):
     """
     Generate coverage data from bedtools output for original and augmented sequences.
 
@@ -240,7 +244,8 @@ def gen_cov_from_bedout(logger, out_path: str, depth_file_path: str, contig_ids:
     ##generate coverage for original data
     for i in range(len(namelist)):
         depth_file = depth_file_path + namelist[i]
-        modify_depth_file(depth_file, contig_ids)
+        if plastid:
+            modify_depth_file(depth_file, contig_ids)
         pool.apply_async(
             calculate_coverage,
             args=(depth_file, logger, edge, contig_len),
@@ -274,7 +279,8 @@ def gen_cov_from_bedout(logger, out_path: str, depth_file_path: str, contig_ids:
         for nameid in range(len(namelist)):
             depth_file = depth_file_path + namelist[nameid]
             # add a step to prefilter depth file per sample and save to the original depth_file.
-            modify_depth_file(depth_file, contig_ids)
+            if plastid:
+                modify_depth_file(depth_file, contig_ids)
             pool.apply_async(
                 calculate_coverage_samplebyindex,
                 args=(depth_file, 'aug' + str(i + 1), aug_seq_info_dict, logger, edge, contig_len),

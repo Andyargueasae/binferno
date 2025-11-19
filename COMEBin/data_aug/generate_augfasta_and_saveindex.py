@@ -102,11 +102,15 @@ def run_gen_augfasta(logger, args):
     contig_len = args.contig_len
 
     outdir = out_path + '/aug0'
+    if os.path.exists(outdir):
+        return
     os.makedirs(outdir)
     out_file = outdir + '/sequences_aug0.fasta'
     shutil.copyfile(fasta_file, out_file)
 
     from .gen_kmer import run_gen_kmer
+    from .gen_corgi import run_corgi
+    # run_corgi(corgi_venv=args.corgi_venv, input_fasta=out_file, min_length=0, model_path=args.corgi_checkpoint)
     run_gen_kmer(out_file, 0, 4)
 
     for i in range(num_aug):
@@ -119,3 +123,4 @@ def run_gen_augfasta(logger, args):
         out_file = outdir + '/sequences_aug' + str(i + 1) + '.fasta'
         gen_augfasta(seqs, 'aug' + str(i + 1), out_file, p=p, contig_len=contig_len)
         run_gen_kmer(out_file, 0, 4)
+        # run_corgi(corgi_venv=args.corgi_venv, input_fasta=out_file, min_length=0, model_path=args.corgi_checkpoint)
