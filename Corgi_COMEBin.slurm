@@ -81,7 +81,7 @@ echo "Tau(temperature): ${temperature}"
 ##########################################################################################################
 folder=${output_dir}/comebin_res
 keyword="embeddings.tsv"
-cd ./Corgi_MLP_CL/COMEBin
+cd ./binferno/
 
 # note: the GPU may be oom due to large batch size. 1024 -> 512.
 if [ -d "$folder" ]; then
