@@ -8,20 +8,26 @@ import torch
 from utils import get_kmerMetric_emb
 from sklearn.preprocessing import normalize
 
-def read_embeddings(embeddings_path: Union[Path, str], embeddings_index: Optional[Path] = None, merge: bool = True) -> Tuple[np.ndarray, List[str]]:
+
+def read_embeddings(
+    embeddings_path: Union[Path, str],
+    embeddings_index: Optional[Path] = None,
+    merge: bool = True,
+) -> Tuple[np.ndarray, List[str]]:
     """
     Read embeddings from a memmap file.
     """
     embeddings_path = Path(embeddings_path)
-    index_path = embeddings_index or embeddings_path.with_suffix('.index')
+    index_path = embeddings_index or embeddings_path.with_suffix(".index")
     index_path = Path(index_path)
     assert index_path.exists(), f"Index file '{index_path}' does not exist."
     index_with_tabs = Path(index_path).read_text().strip().splitlines()
-    
+
     embeddings = read_memmap(embeddings_path, len(index_with_tabs))
 
     if merge:
         import pandas as pd
+
         df = pd.DataFrame(embeddings)
         df["index_with_tabs"] = index_with_tabs
 
@@ -36,40 +42,57 @@ def read_embeddings(embeddings_path: Union[Path, str], embeddings_index: Optiona
 
     return embeddings, index
 
-def read_memmap(path, count, dtype:str="float16") -> np.memmap:
+
+def read_memmap(path, count, dtype: str = "float16") -> np.memmap:
     file_size = os.path.getsize(path)
     dtype_size = np.dtype(dtype).itemsize
     num_elements = file_size // dtype_size
     # embedding size may vary according to num_elements.
     embedding_size = num_elements // count
-    shape = (count, embedding_size) # embedding size fluctuates because of different contig subsequencing. 
-    return np.memmap(path, dtype=dtype, mode='r', shape=shape)
+    shape = (
+        count,
+        embedding_size,
+    )  # embedding size fluctuates because of different contig subsequencing.
+    return np.memmap(path, dtype=dtype, mode="r", shape=shape)
 
-def get_Corgi_coverage(data_path: str, n_views: int = 2,
-                        cov_meannormalize: bool = False,
-                        cov_minmaxnormalize: bool = False,
-                        cov_standardization: bool = False,
-                        addvars: bool = False, vars_sqrt: bool = False, corgi_l2_normalize: bool = False):
+
+def get_Corgi_coverage(
+    data_path: str,
+    n_views: int = 2,
+    cov_meannormalize: bool = False,
+    cov_minmaxnormalize: bool = False,
+    cov_standardization: bool = False,
+    addvars: bool = False,
+    vars_sqrt: bool = False,
+    corgi_l2_normalize: bool = False,
+):
     """
     Get the coverage features and CORGI generated features (length 538).
     """
-    namelist = pd.read_csv(data_path + 'aug0_datacoverage_mean.tsv', sep='\t', usecols=range(1)).values[:, 0]
+    namelist = pd.read_csv(
+        data_path + "aug0_datacoverage_mean.tsv", sep="\t", usecols=range(1)
+    ).values[:, 0]
     mapObj = dict(zip(namelist, range(len(namelist))))
     for view in range(n_views):
-        cov_file = data_path + 'aug' + str(view) + '_datacoverage_mean.tsv'
-        corgi_file = glob.glob(data_path + 'aug' + str(view) + '/*.npy')[0]
-        corgi_index = glob.glob(data_path + 'aug' + str(view) + '/*.index')[0]
+        cov_file = data_path + "aug" + str(view) + "_datacoverage_mean.tsv"
+        corgi_file = glob.glob(data_path + "aug" + str(view) + "/*.npy")[0]
+        corgi_index = glob.glob(data_path + "aug" + str(view) + "/*.index")[0]
 
-        covHeader = pd.read_csv(cov_file, sep='\t', nrows=1)
-        shuffled_covMat = pd.read_csv(cov_file, sep='\t', usecols=range(1, covHeader.shape[1])).values
-        shuffled_namelist = pd.read_csv(cov_file, sep='\t', usecols=range(1)).values[:, 0]
+        covHeader = pd.read_csv(cov_file, sep="\t", nrows=1)
+        shuffled_covMat = pd.read_csv(
+            cov_file, sep="\t", usecols=range(1, covHeader.shape[1])
+        ).values
+        shuffled_namelist = pd.read_csv(cov_file, sep="\t", usecols=range(1)).values[
+            :, 0
+        ]
 
         covIdxArr = np.empty(len(mapObj), dtype=np.int)
         for contigIdx in range(len(shuffled_namelist)):
-            if shuffled_namelist[contigIdx].split('_aug')[0] in mapObj:
-                covIdxArr[mapObj[shuffled_namelist[contigIdx].split('_aug')[0]]] = contigIdx
+            if shuffled_namelist[contigIdx].split("_aug")[0] in mapObj:
+                covIdxArr[mapObj[shuffled_namelist[contigIdx].split("_aug")[0]]] = (
+                    contigIdx
+                )
         covMat = shuffled_covMat[covIdxArr]
-
 
         corgi_emb, corgi_index = read_embeddings(corgi_file, corgi_index, merge=True)
         shuffled_corgiMat = corgi_emb
@@ -80,21 +103,29 @@ def get_Corgi_coverage(data_path: str, n_views: int = 2,
 
         covIdxArr = np.empty(len(mapObj), dtype=np.int)
         for contigIdx in range(len(shuffled_namelist)):
-            if shuffled_namelist[contigIdx].split('_aug')[0] in mapObj:
-                covIdxArr[mapObj[shuffled_namelist[contigIdx].split('_aug')[0]]] = contigIdx
+            if shuffled_namelist[contigIdx].split("_aug")[0] in mapObj:
+                covIdxArr[mapObj[shuffled_namelist[contigIdx].split("_aug")[0]]] = (
+                    contigIdx
+                )
         corgiMat = shuffled_corgiMat[covIdxArr]
 
         if addvars:
-            vars_file = data_path+'aug'+str(view)+'_datacoverage_var.tsv'
+            vars_file = data_path + "aug" + str(view) + "_datacoverage_var.tsv"
 
-            varsHeader = pd.read_csv(vars_file, sep='\t', nrows=1)
-            shuffled_varsMat = pd.read_csv(vars_file, sep='\t', usecols=range(1, varsHeader.shape[1])).values
-            shuffled_namelist = pd.read_csv(vars_file, sep='\t', usecols=range(1)).values[:, 0]
+            varsHeader = pd.read_csv(vars_file, sep="\t", nrows=1)
+            shuffled_varsMat = pd.read_csv(
+                vars_file, sep="\t", usecols=range(1, varsHeader.shape[1])
+            ).values
+            shuffled_namelist = pd.read_csv(
+                vars_file, sep="\t", usecols=range(1)
+            ).values[:, 0]
 
             covIdxArr = np.empty(len(mapObj), dtype=np.int)
             for contigIdx in range(len(shuffled_namelist)):
-                if shuffled_namelist[contigIdx].split('_aug')[0] in mapObj:
-                    covIdxArr[mapObj[shuffled_namelist[contigIdx].split('_aug')[0]]] = contigIdx
+                if shuffled_namelist[contigIdx].split("_aug")[0] in mapObj:
+                    covIdxArr[mapObj[shuffled_namelist[contigIdx].split("_aug")[0]]] = (
+                        contigIdx
+                    )
             varsMat = shuffled_varsMat[covIdxArr]
 
         if view == 0:
@@ -110,7 +141,7 @@ def get_Corgi_coverage(data_path: str, n_views: int = 2,
 
     # use cov_maxnormalize
     covMats = covMats + 1e-5
-        
+
     if vars_sqrt:
         varsMats = np.sqrt(varsMats)
         varsMats = varsMats + 1e-5
@@ -119,13 +150,21 @@ def get_Corgi_coverage(data_path: str, n_views: int = 2,
         if addvars:
             varsMats = varsMats / varsMats.mean(axis=0)[None, :]
     elif cov_minmaxnormalize:
-        covMats = (covMats - covMats.min(axis=0)[None, :])/ (covMats.max(axis=0)[None, :] - covMats.min(axis=0)[None, :] )
+        covMats = (covMats - covMats.min(axis=0)[None, :]) / (
+            covMats.max(axis=0)[None, :] - covMats.min(axis=0)[None, :]
+        )
         if addvars:
-            varsMats = (varsMats - varsMats.min(axis=0)[None, :])/ (varsMats.max(axis=0)[None, :] - varsMats.min(axis=0)[None, :] )
+            varsMats = (varsMats - varsMats.min(axis=0)[None, :]) / (
+                varsMats.max(axis=0)[None, :] - varsMats.min(axis=0)[None, :]
+            )
     elif cov_standardization:
-        covMats = (covMats - covMats.mean(axis=0)[None, :])/ covMats.std(axis=0)[None, :]
+        covMats = (covMats - covMats.mean(axis=0)[None, :]) / covMats.std(axis=0)[
+            None, :
+        ]
         if addvars:
-            varsMats = (varsMats - varsMats.mean(axis=0)[None, :])/ varsMats.std(axis=0)[None, :]
+            varsMats = (varsMats - varsMats.mean(axis=0)[None, :]) / varsMats.std(
+                axis=0
+            )[None, :]
     else:
         covMats = covMats / covMats.max(axis=0)[None, :]
         if addvars:
@@ -138,10 +177,21 @@ def get_Corgi_coverage(data_path: str, n_views: int = 2,
 
     return list(torch.split(torch.from_numpy(X_ts).float(), len(namelist))), namelist
 
-def get_kmer_coverage(data_path: str, n_views: int = 2, kmer_model_path: str = 'empty',
-                      device = torch.device('cpu'), nokmer: bool = False, cov_meannormalize: bool = False,
-                      cov_minmaxnormalize: bool = False, cov_standardization: bool = False, addvars: bool = False,
-                      vars_sqrt: bool = False, kmer_l2_normalize: bool = False, kmerMetric_notl2normalize: bool = False):
+
+def get_kmer_coverage(
+    data_path: str,
+    n_views: int = 2,
+    kmer_model_path: str = "empty",
+    device=torch.device("cpu"),
+    nokmer: bool = False,
+    cov_meannormalize: bool = False,
+    cov_minmaxnormalize: bool = False,
+    cov_standardization: bool = False,
+    addvars: bool = False,
+    vars_sqrt: bool = False,
+    kmer_l2_normalize: bool = False,
+    kmerMetric_notl2normalize: bool = False,
+):
     """
     Get features
 
@@ -160,47 +210,66 @@ def get_kmer_coverage(data_path: str, n_views: int = 2, kmer_model_path: str = '
 
     :return: A list of preprocessed data and a list of contig names.
     """
-    namelist = pd.read_csv(data_path + 'aug0_datacoverage_mean.tsv', sep='\t', usecols=range(1)).values[:, 0]
+    namelist = pd.read_csv(
+        data_path + "aug0_datacoverage_mean.tsv", sep="\t", usecols=range(1)
+    ).values[:, 0]
 
     mapObj = dict(zip(namelist, range(len(namelist))))
     for view in range(n_views):
-        cov_file = data_path + 'aug' + str(view) + '_datacoverage_mean.tsv'
+        cov_file = data_path + "aug" + str(view) + "_datacoverage_mean.tsv"
         if not nokmer:
-            com_file = data_path + 'aug' + str(view) + '/kmer_4_f0.csv'
+            com_file = data_path + "aug" + str(view) + "/kmer_4_f0.csv"
 
-        covHeader = pd.read_csv(cov_file, sep='\t', nrows=1)
-        shuffled_covMat = pd.read_csv(cov_file, sep='\t', usecols=range(1, covHeader.shape[1])).values
-        shuffled_namelist = pd.read_csv(cov_file, sep='\t', usecols=range(1)).values[:, 0]
+        covHeader = pd.read_csv(cov_file, sep="\t", nrows=1)
+        shuffled_covMat = pd.read_csv(
+            cov_file, sep="\t", usecols=range(1, covHeader.shape[1])
+        ).values
+        shuffled_namelist = pd.read_csv(cov_file, sep="\t", usecols=range(1)).values[
+            :, 0
+        ]
 
         covIdxArr = np.empty(len(mapObj), dtype=np.int)
         for contigIdx in range(len(shuffled_namelist)):
-            if shuffled_namelist[contigIdx].split('_aug')[0] in mapObj:
-                covIdxArr[mapObj[shuffled_namelist[contigIdx].split('_aug')[0]]] = contigIdx
+            if shuffled_namelist[contigIdx].split("_aug")[0] in mapObj:
+                covIdxArr[mapObj[shuffled_namelist[contigIdx].split("_aug")[0]]] = (
+                    contigIdx
+                )
         covMat = shuffled_covMat[covIdxArr]
 
-
         if not nokmer:
-            compositHeader = pd.read_csv(com_file, sep=',', nrows=1)
-            shuffled_compositMat = pd.read_csv(com_file, sep=',', usecols=range(1, compositHeader.shape[1])).values
-            shuffled_namelist = pd.read_csv(com_file, sep=',', usecols=range(1)).values[:, 0]
+            compositHeader = pd.read_csv(com_file, sep=",", nrows=1)
+            shuffled_compositMat = pd.read_csv(
+                com_file, sep=",", usecols=range(1, compositHeader.shape[1])
+            ).values
+            shuffled_namelist = pd.read_csv(com_file, sep=",", usecols=range(1)).values[
+                :, 0
+            ]
 
             covIdxArr = np.empty(len(mapObj), dtype=np.int)
             for contigIdx in range(len(shuffled_namelist)):
-                if shuffled_namelist[contigIdx].split('_aug')[0] in mapObj:
-                    covIdxArr[mapObj[shuffled_namelist[contigIdx].split('_aug')[0]]] = contigIdx
+                if shuffled_namelist[contigIdx].split("_aug")[0] in mapObj:
+                    covIdxArr[mapObj[shuffled_namelist[contigIdx].split("_aug")[0]]] = (
+                        contigIdx
+                    )
             compositMat = shuffled_compositMat[covIdxArr]
 
         if addvars:
-            vars_file = data_path+'aug'+str(view)+'_datacoverage_var.tsv'
+            vars_file = data_path + "aug" + str(view) + "_datacoverage_var.tsv"
 
-            varsHeader = pd.read_csv(vars_file, sep='\t', nrows=1)
-            shuffled_varsMat = pd.read_csv(vars_file, sep='\t', usecols=range(1, varsHeader.shape[1])).values
-            shuffled_namelist = pd.read_csv(vars_file, sep='\t', usecols=range(1)).values[:, 0]
+            varsHeader = pd.read_csv(vars_file, sep="\t", nrows=1)
+            shuffled_varsMat = pd.read_csv(
+                vars_file, sep="\t", usecols=range(1, varsHeader.shape[1])
+            ).values
+            shuffled_namelist = pd.read_csv(
+                vars_file, sep="\t", usecols=range(1)
+            ).values[:, 0]
 
             covIdxArr = np.empty(len(mapObj), dtype=np.int)
             for contigIdx in range(len(shuffled_namelist)):
-                if shuffled_namelist[contigIdx].split('_aug')[0] in mapObj:
-                    covIdxArr[mapObj[shuffled_namelist[contigIdx].split('_aug')[0]]] = contigIdx
+                if shuffled_namelist[contigIdx].split("_aug")[0] in mapObj:
+                    covIdxArr[mapObj[shuffled_namelist[contigIdx].split("_aug")[0]]] = (
+                        contigIdx
+                    )
             varsMat = shuffled_varsMat[covIdxArr]
 
         if view == 0:
@@ -230,14 +299,22 @@ def get_kmer_coverage(data_path: str, n_views: int = 2, kmer_model_path: str = '
             varsMats = varsMats / varsMats.mean(axis=0)[None, :]
 
     elif cov_minmaxnormalize:
-        covMats = (covMats - covMats.min(axis=0)[None, :])/ (covMats.max(axis=0)[None, :] - covMats.min(axis=0)[None, :] )
+        covMats = (covMats - covMats.min(axis=0)[None, :]) / (
+            covMats.max(axis=0)[None, :] - covMats.min(axis=0)[None, :]
+        )
         if addvars:
-            varsMats = (varsMats - varsMats.min(axis=0)[None, :])/ (varsMats.max(axis=0)[None, :] - varsMats.min(axis=0)[None, :] )
+            varsMats = (varsMats - varsMats.min(axis=0)[None, :]) / (
+                varsMats.max(axis=0)[None, :] - varsMats.min(axis=0)[None, :]
+            )
 
     elif cov_standardization:
-        covMats = (covMats - covMats.mean(axis=0)[None, :])/ covMats.std(axis=0)[None, :]
+        covMats = (covMats - covMats.mean(axis=0)[None, :]) / covMats.std(axis=0)[
+            None, :
+        ]
         if addvars:
-            varsMats = (varsMats - varsMats.mean(axis=0)[None, :])/ varsMats.std(axis=0)[None, :]
+            varsMats = (varsMats - varsMats.mean(axis=0)[None, :]) / varsMats.std(
+                axis=0
+            )[None, :]
     else:
         covMats = covMats / covMats.max(axis=0)[None, :]
         if addvars:
@@ -248,8 +325,10 @@ def get_kmer_coverage(data_path: str, n_views: int = 2, kmer_model_path: str = '
         compositMats = compositMats / compositMats.sum(axis=1)[:, None]
         if kmer_l2_normalize:
             compositMats = normalize(compositMats)
-        if kmer_model_path != 'empty':
-            compositMats = get_kmerMetric_emb(kmer_model_path, compositMats, device,kmerMetric_notl2normalize)
+        if kmer_model_path != "empty":
+            compositMats = get_kmerMetric_emb(
+                kmer_model_path, compositMats, device, kmerMetric_notl2normalize
+            )
 
     if not nokmer:
         X_ts = np.hstack((covMats, compositMats))
@@ -262,10 +341,20 @@ def get_kmer_coverage(data_path: str, n_views: int = 2, kmer_model_path: str = '
     return list(torch.split(torch.from_numpy(X_ts).float(), len(namelist))), namelist
 
 
-def get_ContrastiveLearningDataset(data_path: str, n_views: int = 2, kmer_model_path: str = 'empty',
-                                   device=torch.device('cpu'), nokmer: bool = False, cov_meannormalize: bool = False,
-                                   cov_minmaxnormalize: bool = False, cov_standardization: bool = False, addvars: bool = False,
-                                   vars_sqrt: bool = False, kmer_l2_normalize: bool = False, kmerMetric_notl2normalize: bool = False):
+def get_ContrastiveLearningDataset(
+    data_path: str,
+    n_views: int = 2,
+    kmer_model_path: str = "empty",
+    device=torch.device("cpu"),
+    nokmer: bool = False,
+    cov_meannormalize: bool = False,
+    cov_minmaxnormalize: bool = False,
+    cov_standardization: bool = False,
+    addvars: bool = False,
+    vars_sqrt: bool = False,
+    kmer_l2_normalize: bool = False,
+    kmerMetric_notl2normalize: bool = False,
+):
     """
     Get a Contrastive Learning dataset based on input parameters.
 
@@ -284,23 +373,52 @@ def get_ContrastiveLearningDataset(data_path: str, n_views: int = 2, kmer_model_
 
     :return: A tuple containing the dataset and a list of names.
     """
-    if not data_path.endswith('/'):
-        data_path = data_path + '/'
-    dataset, namelist = get_kmer_coverage(data_path, n_views, kmer_model_path, device, nokmer, cov_meannormalize, cov_minmaxnormalize, cov_standardization,addvars,vars_sqrt,kmer_l2_normalize,kmerMetric_notl2normalize)
+    if not data_path.endswith("/"):
+        data_path = data_path + "/"
+    dataset, namelist = get_kmer_coverage(
+        data_path,
+        n_views,
+        kmer_model_path,
+        device,
+        nokmer,
+        cov_meannormalize,
+        cov_minmaxnormalize,
+        cov_standardization,
+        addvars,
+        vars_sqrt,
+        kmer_l2_normalize,
+        kmerMetric_notl2normalize,
+    )
     return dataset, namelist
 
-def GetCorgiContrastiveDataset(data_path: str, n_views: int = 2,
-                                   cov_meannormalize: bool = False,
-                                   cov_minmaxnormalize: bool = False, cov_standardization: bool = False, addvars: bool = False,
-                                   vars_sqrt: bool = False, corgi_l2_normalize: bool = False):
-    '''
+
+def GetCorgiContrastiveDataset(
+    data_path: str,
+    n_views: int = 2,
+    cov_meannormalize: bool = False,
+    cov_minmaxnormalize: bool = False,
+    cov_standardization: bool = False,
+    addvars: bool = False,
+    vars_sqrt: bool = False,
+    corgi_l2_normalize: bool = False,
+):
+    """
     data_path: str, n_views: int = 2,
                         cov_meannormalize: bool = False,
                         cov_minmaxnormalize: bool = False,
                         cov_standardization: bool = False,
                         addvars: bool = False, vars_sqrt: bool = False, corgi_l2_normalize: bool = False
-    '''
-    if not data_path.endswith('/'):
-        data_path = data_path + '/'
-    dataset, namelist = get_Corgi_coverage(data_path=data_path, n_views=n_views, cov_meannormalize=cov_meannormalize, cov_minmaxnormalize=cov_minmaxnormalize, cov_standardization=cov_standardization, addvars=addvars, vars_sqrt=vars_sqrt, corgi_l2_normalize=corgi_l2_normalize)
+    """
+    if not data_path.endswith("/"):
+        data_path = data_path + "/"
+    dataset, namelist = get_Corgi_coverage(
+        data_path=data_path,
+        n_views=n_views,
+        cov_meannormalize=cov_meannormalize,
+        cov_minmaxnormalize=cov_minmaxnormalize,
+        cov_standardization=cov_standardization,
+        addvars=addvars,
+        vars_sqrt=vars_sqrt,
+        corgi_l2_normalize=corgi_l2_normalize,
+    )
     return dataset, namelist

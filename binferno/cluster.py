@@ -10,19 +10,26 @@ import logging
 
 from igraph import Graph
 from sklearn.preprocessing import normalize
-from sklearn.cluster._kmeans import euclidean_distances, stable_cumsum, KMeans, check_random_state, row_norms, MiniBatchKMeans
+from sklearn.cluster._kmeans import (
+    euclidean_distances,
+    stable_cumsum,
+    KMeans,
+    check_random_state,
+    row_norms,
+    MiniBatchKMeans,
+)
 
 from utils import get_length, calculateN50, save_result
 from scripts.gen_bins_from_tsv import gen_bins as gen_bins_from_tsv
 from typing import List, Optional, Union
 
 
-logger = logging.getLogger('COMEBin')
+logger = logging.getLogger("COMEBin")
 
 logger.setLevel(logging.INFO)
 
 # logging
-formatter = logging.Formatter('%(asctime)s - %(message)s')
+formatter = logging.Formatter("%(asctime)s - %(message)s")
 
 console_hdr = logging.StreamHandler()
 console_hdr.setFormatter(formatter)
@@ -30,8 +37,15 @@ console_hdr.setFormatter(formatter)
 logger.addHandler(console_hdr)
 
 
-def fit_hnsw_index(logger, features,num_threads, ef: int = 100, M: int = 16,
-                   space: str = 'l2', save_index_file: bool = False) -> hnswlib.Index:
+def fit_hnsw_index(
+    logger,
+    features,
+    num_threads,
+    ef: int = 100,
+    M: int = 16,
+    space: str = "l2",
+    save_index_file: bool = False,
+) -> hnswlib.Index:
     """
     Fit an HNSW index with the given features using the HNSWlib library; Convenience function to create HNSW graph.
 
@@ -70,12 +84,21 @@ def fit_hnsw_index(logger, features,num_threads, ef: int = 100, M: int = 16,
     if save_index_file:
         p.save_index(save_index_file)
     time_end = time.time()
-    logger.info('Time cost:\t' +str(time_end - time_start) + "s")
+    logger.info("Time cost:\t" + str(time_end - time_start) + "s")
     return p
 
 
-def seed_kmeans_full(logger, contig_file: str, namelist: List[str], out_path: str,
-                     X_mat: np.ndarray, bin_number: int, prefix: str, length_weight: np.ndarray, seed_bacar_marker_url: str):
+def seed_kmeans_full(
+    logger,
+    contig_file: str,
+    namelist: List[str],
+    out_path: str,
+    X_mat: np.ndarray,
+    bin_number: int,
+    prefix: str,
+    length_weight: np.ndarray,
+    seed_bacar_marker_url: str,
+):
     """
     Perform weighted seed-kmeans clustering with specified parameters.
 
@@ -97,19 +120,25 @@ def seed_kmeans_full(logger, contig_file: str, namelist: List[str], out_path: st
     seed_bacar_marker_idx = gen_seed_idx(seed_bacar_marker_url, contig_id_list=namelist)
     time_start = time.time()
     # run seed-kmeans; length weight
-    output_temp = out_path + '_k_' + str(
-        bin_number) + '_result.tsv'
+    output_temp = out_path + "_k_" + str(bin_number) + "_result.tsv"
     if not (os.path.exists(output_temp)):
-        km = KMeans(n_clusters=bin_number, n_jobs=-1, random_state=7, algorithm="full",
-                    init=functools.partial(partial_seed_init, seed_idx=seed_bacar_marker_idx))
+        km = KMeans(
+            n_clusters=bin_number,
+            n_jobs=-1,
+            random_state=7,
+            algorithm="full",
+            init=functools.partial(partial_seed_init, seed_idx=seed_bacar_marker_idx),
+        )
         km.fit(X_mat, sample_weight=length_weight)
         idx = km.labels_
         save_result(idx, output_temp, namelist)
 
-        gen_bins_from_tsv(contig_file, output_temp, output_temp+'_bins')
+        gen_bins_from_tsv(contig_file, output_temp, output_temp + "_bins")
 
         time_end = time.time()
-        logger.info("Running weighted seed-kmeans cost:\t"+str(time_end - time_start) + 's.')
+        logger.info(
+            "Running weighted seed-kmeans cost:\t" + str(time_end - time_start) + "s."
+        )
 
 
 def gen_seed_idx(seedURL: str, contig_id_list: List[str]) -> List[int]:
@@ -123,15 +152,17 @@ def gen_seed_idx(seedURL: str, contig_id_list: List[str]) -> List[int]:
     seed_list = []
     with open(seedURL) as f:
         for line in f:
-            if line.rstrip('\n') in contig_id_list:
-                seed_list.append(line.rstrip('\n'))
+            if line.rstrip("\n") in contig_id_list:
+                seed_list.append(line.rstrip("\n"))
     name_map = dict(zip(contig_id_list, range(len(contig_id_list))))
     seed_idx = [name_map[seed_name] for seed_name in seed_list]
     return seed_idx
 
 
 # change from sklearn.cluster.kmeans
-def partial_seed_init(X, n_clusters: int, random_state, seed_idx, n_local_trials=None) -> np.ndarray:
+def partial_seed_init(
+    X, n_clusters: int, random_state, seed_idx, n_local_trials=None
+) -> np.ndarray:
     """
     Partial initialization of KMeans centers with seeds from seed_idx.
 
@@ -173,18 +204,20 @@ def partial_seed_init(X, n_clusters: int, random_state, seed_idx, n_local_trials
 
     # Initialize list of closest distances and calculate current potential
     closest_dist_sq = euclidean_distances(
-        centers[0, np.newaxis], X, Y_norm_squared=x_squared_norms,
-        squared=True)
+        centers[0, np.newaxis], X, Y_norm_squared=x_squared_norms, squared=True
+    )
 
     for c, center_id in enumerate(seed_idx[1:], 1):
         if sp.issparse(X):
             centers[c] = X[center_id].toarray()
         else:
             centers[c] = X[center_id]
-        closest_dist_sq = np.minimum(closest_dist_sq,
-                                     euclidean_distances(
-                                         centers[c, np.newaxis], X, Y_norm_squared=x_squared_norms,
-                                         squared=True))
+        closest_dist_sq = np.minimum(
+            closest_dist_sq,
+            euclidean_distances(
+                centers[c, np.newaxis], X, Y_norm_squared=x_squared_norms, squared=True
+            ),
+        )
     current_pot = closest_dist_sq.sum()
 
     # Pick the remaining n_clusters-1 points
@@ -192,15 +225,14 @@ def partial_seed_init(X, n_clusters: int, random_state, seed_idx, n_local_trials
         # Choose center candidates by sampling with probability proportional
         # to the squared distance to the closest existing center
         rand_vals = random_state.random_sample(n_local_trials) * current_pot
-        candidate_ids = np.searchsorted(stable_cumsum(closest_dist_sq),
-                                        rand_vals)
+        candidate_ids = np.searchsorted(stable_cumsum(closest_dist_sq), rand_vals)
         # XXX: numerical imprecision can result in a candidate_id out of range
-        np.clip(candidate_ids, None, closest_dist_sq.size - 1,
-                out=candidate_ids)
+        np.clip(candidate_ids, None, closest_dist_sq.size - 1, out=candidate_ids)
 
         # Compute distances to center candidates
         distance_to_candidates = euclidean_distances(
-            X[candidate_ids], X, Y_norm_squared=x_squared_norms, squared=True)
+            X[candidate_ids], X, Y_norm_squared=x_squared_norms, squared=True
+        )
 
         # Decide which candidate is the best
         best_candidate = None
@@ -208,8 +240,7 @@ def partial_seed_init(X, n_clusters: int, random_state, seed_idx, n_local_trials
         best_dist_sq = None
         for trial in range(n_local_trials):
             # Compute potential when including center candidate
-            new_dist_sq = np.minimum(closest_dist_sq,
-                                     distance_to_candidates[trial])
+            new_dist_sq = np.minimum(closest_dist_sq, distance_to_candidates[trial])
             new_pot = new_dist_sq.sum()
 
             # Store result if it is the best local trial so far
@@ -229,12 +260,21 @@ def partial_seed_init(X, n_clusters: int, random_state, seed_idx, n_local_trials
     return centers
 
 
-def run_leiden(output_file: str, namelist: List[str],
-               ann_neighbor_indices: np.ndarray, ann_distances: np.ndarray,
-               length_weight: List[float], max_edges: int, norm_embeddings: np.ndarray,
-               bandwidth: float = 0.1, lmode: str = 'l2', initial_list: Optional[List[Union[int, None]]] = None,
-               is_membership_fixed: Optional[bool] = None, resolution_parameter: float = 1.0,
-               partgraph_ratio: int = 50):
+def run_leiden(
+    output_file: str,
+    namelist: List[str],
+    ann_neighbor_indices: np.ndarray,
+    ann_distances: np.ndarray,
+    length_weight: List[float],
+    max_edges: int,
+    norm_embeddings: np.ndarray,
+    bandwidth: float = 0.1,
+    lmode: str = "l2",
+    initial_list: Optional[List[Union[int, None]]] = None,
+    is_membership_fixed: Optional[bool] = None,
+    resolution_parameter: float = 1.0,
+    partgraph_ratio: int = 50,
+):
     """
     Run Leiden community detection algorithm and save the results.
 
@@ -256,9 +296,9 @@ def run_leiden(output_file: str, namelist: List[str],
     """
 
     sources = np.repeat(np.arange(len(norm_embeddings)), max_edges)
-    targets_indices = ann_neighbor_indices[:,1:]
+    targets_indices = ann_neighbor_indices[:, 1:]
     targets = targets_indices.flatten()
-    wei = ann_distances[:,1:]
+    wei = ann_distances[:, 1:]
     wei = wei.flatten()
 
     dist_cutoff = np.percentile(wei, partgraph_ratio)
@@ -268,11 +308,11 @@ def run_leiden(output_file: str, namelist: List[str],
     targets = targets[save_index]
     wei = wei[save_index]
 
-    if lmode == 'l1':
+    if lmode == "l1":
         wei = np.sqrt(wei)
         wei = np.exp(-wei / bandwidth)
 
-    if lmode == 'l2':
+    if lmode == "l2":
         wei = np.exp(-wei / bandwidth)
 
     index = sources > targets
@@ -283,30 +323,40 @@ def run_leiden(output_file: str, namelist: List[str],
     edgelist = list(zip(sources, targets))
     g = Graph(vcount, edgelist)
 
-    res = leidenalg.RBERVertexPartition(g,
-                                        weights=wei, initial_membership = initial_list,
-                                        resolution_parameter = resolution_parameter,node_sizes=length_weight)
+    res = leidenalg.RBERVertexPartition(
+        g,
+        weights=wei,
+        initial_membership=initial_list,
+        resolution_parameter=resolution_parameter,
+        node_sizes=length_weight,
+    )
 
     optimiser = leidenalg.Optimiser()
-    optimiser.optimise_partition(res, is_membership_fixed=is_membership_fixed,n_iterations=-1)
+    optimiser.optimise_partition(
+        res, is_membership_fixed=is_membership_fixed, n_iterations=-1
+    )
 
     part = list(res)
 
-
-    contig_labels_dict ={}
+    contig_labels_dict = {}
     # dict of communities
     numnode = 0
     rang = []
     for ci in range(len(part)):
         rang.append(ci)
-        numnode = numnode+len(part[ci])
+        numnode = numnode + len(part[ci])
         for id in part[ci]:
-            contig_labels_dict[namelist[id]] = 'group'+str(ci)
+            contig_labels_dict[namelist[id]] = "group" + str(ci)
 
     logger.info(output_file)
-    f = open(output_file, 'w')
+    f = open(output_file, "w")
     for contigIdx in range(len(contig_labels_dict)):
-        f.write(namelist[contigIdx] + "\t" + str(contig_labels_dict[namelist[contigIdx]]) + "\n")
+        f.write(
+            namelist[contigIdx]
+            + "\t"
+            + str(contig_labels_dict[namelist[contigIdx]])
+            + "\n"
+        )
     f.close()
 
 
@@ -327,11 +377,13 @@ def cluster(logger, args, prefix=None):
 
     contig_len = args.contig_len
 
-    output_path = output_path + '/cluster_res/'
+    output_path = output_path + "/cluster_res/"
 
-    embHeader = pd.read_csv(emb_file, sep='\t', nrows=1)
-    embMat = pd.read_csv(emb_file, sep='\t', usecols=range(1, embHeader.shape[1])).values
-    namelist = pd.read_csv(emb_file, sep='\t', usecols=range(1)).values[:, 0]
+    embHeader = pd.read_csv(emb_file, sep="\t", nrows=1)
+    embMat = pd.read_csv(
+        emb_file, sep="\t", usecols=range(1, embHeader.shape[1])
+    ).values
+    namelist = pd.read_csv(emb_file, sep="\t", usecols=range(1)).values[:, 0]
 
     lengths = get_length(contig_file)
     length_weight = []
@@ -339,13 +391,12 @@ def cluster(logger, args, prefix=None):
         length_weight.append(lengths[seq_id])
 
     N50 = calculateN50(length_weight)
-    logger.info('N50:\t' + str(N50))
+    logger.info("N50:\t" + str(N50))
 
     length_weight = []
 
     for seq_id in namelist:
         length_weight.append(lengths[seq_id])
-
 
     embMat = embMat[np.array(length_weight) >= contig_len]
     namelist = namelist[np.array(length_weight) >= contig_len]
@@ -356,37 +407,48 @@ def cluster(logger, args, prefix=None):
     else:
         norm_embeddings = normalize(embMat)
 
-
     # #### method1
     os.makedirs(output_path, exist_ok=True)
 
-
-    seed_namelist = pd.read_csv(seed_file, header=None, sep='\t', usecols=range(1)).values[:, 0]
+    seed_namelist = pd.read_csv(
+        seed_file, header=None, sep="\t", usecols=range(1)
+    ).values[:, 0]
     seed_num = len(np.unique(seed_namelist))
 
-    mode = 'weight_seed_kmeans'
+    mode = "weight_seed_kmeans"
     if prefix:
-        mode = mode + '_' + prefix
-    logger.info("Run weighted seed k-means for obtaining the SCG information of the contigs within a manageable time during the final step.")
+        mode = mode + "_" + prefix
+    logger.info(
+        "Run weighted seed k-means for obtaining the SCG information of the contigs within a manageable time during the final step."
+    )
     bin_nums = [seed_num]
 
     if args.cluster_num:
         bin_nums.append(args.cluster_num)
 
-    logger.info("Bin_numbers:\t"+str(bin_nums))
+    logger.info("Bin_numbers:\t" + str(bin_nums))
     for k in bin_nums:
         logger.info(k)
-        seed_kmeans_full(logger, contig_file, namelist, output_path, norm_embeddings, k, mode, length_weight, seed_file)
+        seed_kmeans_full(
+            logger,
+            contig_file,
+            namelist,
+            output_path,
+            norm_embeddings,
+            k,
+            mode,
+            length_weight,
+            seed_file,
+        )
 
     import multiprocessing
 
     num_workers = args.num_threads
 
-
     ##### #########  hnswlib_method
-    parameter_list = [1, 5,10,30,50,70, 90, 110]
-    bandwidth_list = [0.05, 0.1,0.15, 0.2,0.3]
-    partgraph_ratio_list =[50,100,80]
+    parameter_list = [1, 5, 10, 30, 50, 70, 90, 110]
+    bandwidth_list = [0.05, 0.1, 0.15, 0.2, 0.3]
+    partgraph_ratio_list = [50, 100, 80]
     max_edges_list = [100]
     for max_edges in max_edges_list:
         p = fit_hnsw_index(logger, norm_embeddings, num_workers, ef=max_edges * 10)
@@ -395,27 +457,50 @@ def cluster(logger, args, prefix=None):
         is_membership_fixed = [i in seed_bacar_marker_idx for i in initial_list]
 
         time_start = time.time()
-        ann_neighbor_indices, ann_distances = p.knn_query(norm_embeddings, max_edges+1, num_threads=num_workers)
-        #ann_distances is l2 distance's square
+        ann_neighbor_indices, ann_distances = p.knn_query(
+            norm_embeddings, max_edges + 1, num_threads=num_workers
+        )
+        # ann_distances is l2 distance's square
         time_end = time.time()
-        logger.info('knn query time cost:\t' +str(time_end - time_start) + "s")
-
+        logger.info("knn query time cost:\t" + str(time_end - time_start) + "s")
 
         with multiprocessing.Pool(num_workers) as multiprocess:
             for partgraph_ratio in partgraph_ratio_list:
                 for bandwidth in bandwidth_list:
                     for para in parameter_list:
-                        output_file = output_path + 'Leiden_bandwidth_' + str(
-                            bandwidth) + '_res_maxedges' + str(max_edges) + 'respara_'+str(para)+'_partgraph_ratio_'+str(partgraph_ratio)+'.tsv'
+                        output_file = (
+                            output_path
+                            + "Leiden_bandwidth_"
+                            + str(bandwidth)
+                            + "_res_maxedges"
+                            + str(max_edges)
+                            + "respara_"
+                            + str(para)
+                            + "_partgraph_ratio_"
+                            + str(partgraph_ratio)
+                            + ".tsv"
+                        )
 
                         if not (os.path.exists(output_file)):
-                            multiprocess.apply_async(run_leiden, (output_file, namelist, ann_neighbor_indices, ann_distances, length_weight, max_edges, norm_embeddings,
-                                                                        bandwidth, 'l2', initial_list,is_membership_fixed,
-                                                                        para, partgraph_ratio))
+                            multiprocess.apply_async(
+                                run_leiden,
+                                (
+                                    output_file,
+                                    namelist,
+                                    ann_neighbor_indices,
+                                    ann_distances,
+                                    length_weight,
+                                    max_edges,
+                                    norm_embeddings,
+                                    bandwidth,
+                                    "l2",
+                                    initial_list,
+                                    is_membership_fixed,
+                                    para,
+                                    partgraph_ratio,
+                                ),
+                            )
 
             multiprocess.close()
             multiprocess.join()
-        logger.info('multiprocess Done')
-
-
-
+        logger.info("multiprocess Done")

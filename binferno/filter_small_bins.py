@@ -15,12 +15,12 @@ def gen_bins(fastafile: str, resultfile: str, outputdir: str) -> None:
     print("Processing file:\t{}".format(fastafile))
     sequences = {}
     if fastafile.endswith("gz"):
-        with gzip.open(fastafile, 'r') as f:
+        with gzip.open(fastafile, "r") as f:
             for line in f:
                 line = str(line, encoding="utf-8")
                 if line.startswith(">"):
                     if " " in line:
-                        seq, others = line.split(' ', 1)
+                        seq, others = line.split(" ", 1)
                         sequences[seq] = ""
                     else:
                         seq = line.rstrip("\n")
@@ -28,11 +28,11 @@ def gen_bins(fastafile: str, resultfile: str, outputdir: str) -> None:
                 else:
                     sequences[seq] += line.rstrip("\n")
     else:
-        with open(fastafile, 'r') as f:
+        with open(fastafile, "r") as f:
             for line in f:
                 if line.startswith(">"):
                     if " " in line:
-                        seq, others = line.split(' ', 1)
+                        seq, others = line.split(" ", 1)
                         sequences[seq] = ""
                     else:
                         seq = line.rstrip("\n")
@@ -43,7 +43,7 @@ def gen_bins(fastafile: str, resultfile: str, outputdir: str) -> None:
     dic = {}
     with open(resultfile, "r") as f:
         for line in f:
-            contig_name, cluster_name = line.strip().split('\t')
+            contig_name, cluster_name = line.strip().split("\t")
             try:
                 dic[cluster_name].append(contig_name)
             except:
@@ -69,7 +69,9 @@ def gen_bins(fastafile: str, resultfile: str, outputdir: str) -> None:
                 bin_name += 1
 
 
-def filter_small_bins(logger, fastafile: str, resultfile: str, args, minbinsize: int = 30000) -> None:
+def filter_small_bins(
+    logger, fastafile: str, resultfile: str, args, minbinsize: int = 30000
+) -> None:
     """
     Filter small bins from the result file.
 
@@ -79,15 +81,15 @@ def filter_small_bins(logger, fastafile: str, resultfile: str, args, minbinsize:
     :param minbinsize: The minimum bin size (default: 200,000).
     :return: None
     """
-    outputdir = resultfile + '.filtersmallbins_' + str(minbinsize) + '.tsv'
+    outputdir = resultfile + ".filtersmallbins_" + str(minbinsize) + ".tsv"
 
     logger.info("Processing file:\t{}".format(fastafile))
     sequences = {}
-    with open(fastafile, 'r') as f:
+    with open(fastafile, "r") as f:
         for line in f:
             if line.startswith(">"):
                 if " " in line:
-                    seq, others = line.split(' ', 1)
+                    seq, others = line.split(" ", 1)
                     sequences[seq] = ""
                 else:
                     seq = line.rstrip("\n")
@@ -99,14 +101,14 @@ def filter_small_bins(logger, fastafile: str, resultfile: str, args, minbinsize:
     bin_size = {}
     with open(resultfile, "r") as f:
         for line in f:
-            contig_name, cluster_name = line.strip().split('\t')
+            contig_name, cluster_name = line.strip().split("\t")
             try:
                 dic[cluster_name].append(contig_name)
-                bin_size[cluster_name] += len(sequences['>' + contig_name])
+                bin_size[cluster_name] += len(sequences[">" + contig_name])
             except:
                 dic[cluster_name] = []
                 dic[cluster_name].append(contig_name)
-                bin_size[cluster_name] = len(sequences['>' + contig_name])
+                bin_size[cluster_name] = len(sequences[">" + contig_name])
 
     with open(outputdir, "w") as f:
         for cluster_name in dic:
@@ -115,5 +117,5 @@ def filter_small_bins(logger, fastafile: str, resultfile: str, args, minbinsize:
                     f.write(contigIdx + "\t" + cluster_name + "\n")
     f.close()
 
-    gen_bins(fastafile, outputdir, args.output_path + '/comebin_res_bins')
-    shutil.copy2(outputdir, args.output_path + '/comebin_res.tsv')
+    gen_bins(fastafile, outputdir, args.output_path + "/comebin_res_bins")
+    shutil.copy2(outputdir, args.output_path + "/comebin_res.tsv")

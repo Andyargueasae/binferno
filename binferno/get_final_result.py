@@ -1,15 +1,19 @@
-from scripts.unitem_profile import Profile, make_sure_path_exists # look at these modules.
+from scripts.unitem_profile import (
+    Profile,
+    make_sure_path_exists,
+)  # look at these modules.
 import copy
 import os
 
 from collections import defaultdict
 import pandas as pd
 
-from scripts.unitem_common import read_bins # the read_bins is not used here.
-from scripts.unitem_markers import Markers # finished updating to plastid.
+from scripts.unitem_common import read_bins  # the read_bins is not used here.
+from scripts.unitem_markers import Markers  # finished updating to plastid.
 from filter_small_bins import filter_small_bins
 
 from typing import List, Optional, Union, Dict
+
 
 # for each bin
 # update for checkm marker
@@ -18,6 +22,7 @@ def get_binstats(bin_contig_names, markers):
 
     return comp, cont
 
+
 def read_bins_nosequences(bin_dirs):
     """Read sequences in bins."""
 
@@ -25,9 +30,13 @@ def read_bins_nosequences(bin_dirs):
 
     contigs_in_bins = defaultdict(lambda: {})
     for method_id, bin_dir in bin_dirs.items():
-        Header = pd.read_csv(bin_dir, sep='\t', nrows=1)
-        cluster_ids = pd.read_csv(bin_dir, sep='\t',header=None, usecols=range(1, Header.shape[1])).values[:, 0]
-        namelist = pd.read_csv(bin_dir, sep='\t', header=None, usecols=range(1)).values[:, 0]
+        Header = pd.read_csv(bin_dir, sep="\t", nrows=1)
+        cluster_ids = pd.read_csv(
+            bin_dir, sep="\t", header=None, usecols=range(1, Header.shape[1])
+        ).values[:, 0]
+        namelist = pd.read_csv(bin_dir, sep="\t", header=None, usecols=range(1)).values[
+            :, 0
+        ]
 
         for i in range(len(namelist)):
             bins[method_id][cluster_ids[i]].add(namelist[i])
@@ -37,7 +46,11 @@ def read_bins_nosequences(bin_dirs):
 
 
 # update for checkm marker
-def get_bin_quality(orig_bins: Dict[str, Dict[int, List[int]]], methods_sorted: List[str], markers: List[int]):
+def get_bin_quality(
+    orig_bins: Dict[str, Dict[int, List[int]]],
+    methods_sorted: List[str],
+    markers: List[int],
+):
     """
     Calculate the quality of each bin in the original bins and determine the best method.
 
@@ -50,7 +63,6 @@ def get_bin_quality(orig_bins: Dict[str, Dict[int, List[int]]], methods_sorted: 
     bin_quality_dict = defaultdict(lambda: {})
     sum_list = []
     sumcont5_list = []
-
 
     for method_id in methods_sorted:
         num_5010 = 0
@@ -75,17 +87,19 @@ def get_bin_quality(orig_bins: Dict[str, Dict[int, List[int]]], methods_sorted: 
             if comp > 90 and cont < 5:
                 num_905 += 1
 
-        bin_quality_dict[method_id]['num_5010'] = num_5010
-        bin_quality_dict[method_id]['num_7010'] = num_7010
-        bin_quality_dict[method_id]['num_9010'] = num_9010
-        bin_quality_dict[method_id]['num_505'] = num_505
-        bin_quality_dict[method_id]['num_705'] = num_705
-        bin_quality_dict[method_id]['num_905'] = num_905
-        bin_quality_dict[method_id]['sum'] = num_5010 + num_7010 + num_9010 + num_505 + num_705 + num_905
-        bin_quality_dict[method_id]['sum_cont5'] = num_505 + num_705 + num_905
+        bin_quality_dict[method_id]["num_5010"] = num_5010
+        bin_quality_dict[method_id]["num_7010"] = num_7010
+        bin_quality_dict[method_id]["num_9010"] = num_9010
+        bin_quality_dict[method_id]["num_505"] = num_505
+        bin_quality_dict[method_id]["num_705"] = num_705
+        bin_quality_dict[method_id]["num_905"] = num_905
+        bin_quality_dict[method_id]["sum"] = (
+            num_5010 + num_7010 + num_9010 + num_505 + num_705 + num_905
+        )
+        bin_quality_dict[method_id]["sum_cont5"] = num_505 + num_705 + num_905
 
-        sum_list.append(bin_quality_dict[method_id]['sum'] )
-        sumcont5_list.append(bin_quality_dict[method_id]['sum_cont5'])
+        sum_list.append(bin_quality_dict[method_id]["sum"])
+        sumcont5_list.append(bin_quality_dict[method_id]["sum_cont5"])
 
     sum_max = max(sum_list)
     sum_max_method = []
@@ -105,8 +119,12 @@ def get_bin_quality(orig_bins: Dict[str, Dict[int, List[int]]], methods_sorted: 
 
 
 # update for checkm marker
-def savecontigs_with_high_bin_quality(orig_bins: Dict[str, Dict[int, List[int]]],
-                                    best_method: str, markers: List[int], outpath: str):
+def savecontigs_with_high_bin_quality(
+    orig_bins: Dict[str, Dict[int, List[int]]],
+    best_method: str,
+    markers: List[int],
+    outpath: str,
+):
     """
     Save contigs with high bin quality to text files based on specified criteria.
 
@@ -118,38 +136,54 @@ def savecontigs_with_high_bin_quality(orig_bins: Dict[str, Dict[int, List[int]]]
     """
     bin_count_5010 = 0
     bin_count_5005 = 0
-    with open(outpath+'/'+best_method+'5010_res.txt','w') as f1:
-        with open(outpath+'/'+best_method+'5005_res.txt','w') as f2:
+    with open(outpath + "/" + best_method + "5010_res.txt", "w") as f1:
+        with open(outpath + "/" + best_method + "5005_res.txt", "w") as f2:
             for bin_id in orig_bins[best_method]:
                 comp, cont = get_binstats(orig_bins[best_method][bin_id], markers)
                 if comp > 50 and cont < 10:
                     for key in orig_bins[best_method][bin_id]:
-                        f1.write(key+'\t'+str(bin_count_5010)+'\n')
+                        f1.write(key + "\t" + str(bin_count_5010) + "\n")
                     bin_count_5010 += 1
 
                 if comp > 50 and cont < 5:
                     for key in orig_bins[best_method][bin_id]:
-                        f2.write(key+'\t'+str(bin_count_5005)+'\n')
+                        f2.write(key + "\t" + str(bin_count_5005) + "\n")
                     bin_count_5005 += 1
 
 
 def write_estimated_bin_quality(bin_quality_dict, output_file):
-    fout = open(os.path.join(output_file), 'w')
-    fout.write('Binning_method\tnum_5010\tnum_7010\tnum_9010\tnum_505\tnum_705\tnum_905\tsum\tsum_cont5\n')
+    fout = open(os.path.join(output_file), "w")
+    fout.write(
+        "Binning_method\tnum_5010\tnum_7010\tnum_9010\tnum_505\tnum_705\tnum_905\tsum\tsum_cont5\n"
+    )
     for method_id in bin_quality_dict:
-        fout.write(method_id + '\t' + str(bin_quality_dict[method_id]['num_5010']) + '\t'
-                   + str(bin_quality_dict[method_id]['num_7010']) + '\t'
-                   + str(bin_quality_dict[method_id]['num_9010']) + '\t'
-                   + str(bin_quality_dict[method_id]['num_505']) + '\t'
-                   + str(bin_quality_dict[method_id]['num_705']) + '\t'
-                   + str(bin_quality_dict[method_id]['num_905']) + '\t'
-                   + str(bin_quality_dict[method_id]['sum']) + '\t'
-                   + str(bin_quality_dict[method_id]['sum_cont5']) + '\n')
+        fout.write(
+            method_id
+            + "\t"
+            + str(bin_quality_dict[method_id]["num_5010"])
+            + "\t"
+            + str(bin_quality_dict[method_id]["num_7010"])
+            + "\t"
+            + str(bin_quality_dict[method_id]["num_9010"])
+            + "\t"
+            + str(bin_quality_dict[method_id]["num_505"])
+            + "\t"
+            + str(bin_quality_dict[method_id]["num_705"])
+            + "\t"
+            + str(bin_quality_dict[method_id]["num_905"])
+            + "\t"
+            + str(bin_quality_dict[method_id]["sum"])
+            + "\t"
+            + str(bin_quality_dict[method_id]["sum_cont5"])
+            + "\n"
+        )
 
     fout.close()
 
 
-def estimate_bins_quality_nobins(bac_mg_table, ar_mg_table, res_path, ignore_kmeans_res = False):
+def estimate_bins_quality_nobins(
+    bac_mg_table, ar_mg_table, res_path, ignore_kmeans_res=False
+):
     """
     Estimate the quality of bins based on SCG information.
 
@@ -166,9 +200,9 @@ def estimate_bins_quality_nobins(bac_mg_table, ar_mg_table, res_path, ignore_kme
     filenames = os.listdir(res_path)
     namelist = []
     for filename in filenames:
-        if filename.endswith('.tsv'):
+        if filename.endswith(".tsv"):
             if ignore_kmeans_res:
-                if not filename.startswith('weight'):
+                if not filename.startswith("weight"):
                     namelist.append(filename)
             else:
                 namelist.append(filename)
@@ -177,7 +211,7 @@ def estimate_bins_quality_nobins(bac_mg_table, ar_mg_table, res_path, ignore_kme
 
     bin_dirs = {}
     for res in namelist:
-        bin_dirs[res] =  (res_path + res)
+        bin_dirs[res] = res_path + res
 
     bins, contigs = read_bins_nosequences(bin_dirs)
 
@@ -191,11 +225,12 @@ def estimate_bins_quality_nobins(bac_mg_table, ar_mg_table, res_path, ignore_kme
 
     savecontigs_with_high_bin_quality(orig_bins, best_method, markers, res_path)
 
-    output_file = res_path + 'estimate_res.txt'
+    output_file = res_path + "estimate_res.txt"
     write_estimated_bin_quality(bin_quality_dict, output_file)
     return best_method
 
-def estimate_bins_quality_nobins_pltd(pltd_mg_table, res_path, ignore_kmeans_res = False):
+
+def estimate_bins_quality_nobins_pltd(pltd_mg_table, res_path, ignore_kmeans_res=False):
     """
     Estimate the quality of bins based on plastid marker gene information.
 
@@ -211,9 +246,9 @@ def estimate_bins_quality_nobins_pltd(pltd_mg_table, res_path, ignore_kmeans_res
     filenames = os.listdir(res_path)
     namelist = []
     for filename in filenames:
-        if filename.endswith('.tsv'):
+        if filename.endswith(".tsv"):
             if ignore_kmeans_res:
-                if not filename.startswith('weight'):
+                if not filename.startswith("weight"):
                     namelist.append(filename)
             else:
                 namelist.append(filename)
@@ -222,7 +257,7 @@ def estimate_bins_quality_nobins_pltd(pltd_mg_table, res_path, ignore_kmeans_res
 
     bin_dirs = {}
     for res in namelist:
-        bin_dirs[res] =  (res_path + res)
+        bin_dirs[res] = res_path + res
 
     bins, contigs = read_bins_nosequences(bin_dirs)
 
@@ -233,14 +268,20 @@ def estimate_bins_quality_nobins_pltd(pltd_mg_table, res_path, ignore_kmeans_res
 
     bin_quality_dict, best_method = get_bin_quality(orig_bins, methods_sorted, markers)
 
-    output_file = res_path + 'estimate_res.txt'
+    output_file = res_path + "estimate_res.txt"
     write_estimated_bin_quality(bin_quality_dict, output_file)
-    
+
     return best_method
 
 
-def run_get_final_result(logger, args, seed_num: int, num_threads: int = 40,
-                         res_name: Optional[str] = None, ignore_kmeans_res: bool = True):
+def run_get_final_result(
+    logger,
+    args,
+    seed_num: int,
+    num_threads: int = 40,
+    res_name: Optional[str] = None,
+    ignore_kmeans_res: bool = True,
+):
     """
     Run the final step to get the best clustering result based on estimated bin quality.
 
@@ -254,33 +295,60 @@ def run_get_final_result(logger, args, seed_num: int, num_threads: int = 40,
     if not (args.bac_mg_table and args.ar_mg_table):
         logger.info("Run unitem profile:\t" + str(seed_num))
         bin_dirs = {}
-        if res_name==None:
-            res_name = 'weight_seed_kmeans_k_' + str(seed_num) + '_result.tsv'
-        bin_dirs[res_name] = (args.output_path + '/cluster_res/' + res_name + '_bins', 'fa')
+        if res_name == None:
+            res_name = "weight_seed_kmeans_k_" + str(seed_num) + "_result.tsv"
+        bin_dirs[res_name] = (
+            args.output_path + "/cluster_res/" + res_name + "_bins",
+            "fa",
+        )
 
-        output_dir = args.output_path + '/cluster_res/unitem_profile'
+        output_dir = args.output_path + "/cluster_res/unitem_profile"
 
         if not (os.path.exists(output_dir)):
             make_sure_path_exists(output_dir)
             profile = Profile(num_threads)
             if args.checkm_database:
                 profile.Profile_setup(args.checkm_database)
-            profile.run_pltd(bin_dirs,
-                        output_dir)
+            profile.run_pltd(bin_dirs, output_dir)
 
-        bac_mg_table = output_dir + '/binning_methods/' + res_name + '/checkm_bac/marker_gene_table.tsv'
-        ar_mg_table = output_dir + '/binning_methods/' + res_name + '/checkm_ar/marker_gene_table.tsv'
-        pltd_mg_table = output_dir + '/binning_methods/' + res_name + '/checkm_pltd/marker_gene_table.tsv'
+        bac_mg_table = (
+            output_dir
+            + "/binning_methods/"
+            + res_name
+            + "/checkm_bac/marker_gene_table.tsv"
+        )
+        ar_mg_table = (
+            output_dir
+            + "/binning_methods/"
+            + res_name
+            + "/checkm_ar/marker_gene_table.tsv"
+        )
+        pltd_mg_table = (
+            output_dir
+            + "/binning_methods/"
+            + res_name
+            + "/checkm_pltd/marker_gene_table.tsv"
+        )
     else:
         bac_mg_table = args.bac_mg_table
         ar_mg_table = args.ar_mg_table
         pltd_mg_table = args.pltd_mg_table
 
-    if args.plastid:    
-        best_method = estimate_bins_quality_nobins_pltd(pltd_mg_table, args.output_path + '/cluster_res/',ignore_kmeans_res=ignore_kmeans_res)
+    if args.plastid:
+        best_method = estimate_bins_quality_nobins_pltd(
+            pltd_mg_table,
+            args.output_path + "/cluster_res/",
+            ignore_kmeans_res=ignore_kmeans_res,
+        )
 
-    else: 
-        best_method = estimate_bins_quality_nobins(bac_mg_table, ar_mg_table, args.output_path + '/cluster_res/',ignore_kmeans_res=ignore_kmeans_res)
-    logger.info('Final result:\t'+args.output_path + '/cluster_res/'+best_method)
-    filter_small_bins(logger, args.contig_file, args.output_path + '/cluster_res/'+best_method, args)
-
+    else:
+        best_method = estimate_bins_quality_nobins(
+            bac_mg_table,
+            ar_mg_table,
+            args.output_path + "/cluster_res/",
+            ignore_kmeans_res=ignore_kmeans_res,
+        )
+    logger.info("Final result:\t" + args.output_path + "/cluster_res/" + best_method)
+    filter_small_bins(
+        logger, args.contig_file, args.output_path + "/cluster_res/" + best_method, args
+    )

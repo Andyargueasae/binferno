@@ -10,16 +10,17 @@ import torch
 import yaml
 import sys
 
-def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
+
+def save_checkpoint(state, is_best, filename="checkpoint.pth.tar"):
     torch.save(state, filename)
     if is_best:
-        shutil.copyfile(filename, 'model_best.pth.tar')
+        shutil.copyfile(filename, "model_best.pth.tar")
 
 
 def save_config_file(model_checkpoints_folder, args):
     if not os.path.exists(model_checkpoints_folder):
         os.makedirs(model_checkpoints_folder)
-    with open(os.path.join(model_checkpoints_folder, 'config.yml'), 'w') as outfile:
+    with open(os.path.join(model_checkpoints_folder, "config.yml"), "w") as outfile:
         yaml.dump(args, outfile, default_flow_style=False)
 
 
@@ -42,7 +43,7 @@ def accuracy(output, target, topk=(1,)):
 
 def get_length(fastx_file):
     file_type = mimetypes.guess_type(fastx_file)[1]
-    if file_type == 'gzip':
+    if file_type == "gzip":
         f = gzip.open(fastx_file, "rt")
     elif not file_type:
         f = open(fastx_file, "rt")
@@ -53,7 +54,7 @@ def get_length(fastx_file):
         return length
     file_format = None
     line = f.readline()
-    if line.startswith('@'):
+    if line.startswith("@"):
         file_format = "fastq"
     elif line.startswith(">"):
         file_format = "fasta"
@@ -67,14 +68,13 @@ def get_length(fastx_file):
     return length
 
 
-
 def save_result(result, filepath, namelist):
     filedir, filename = os.path.split(filepath)
     if not filename:
         filename = "result.tsv"
     if not os.path.exists(filedir):
         os.makedirs(filedir)
-    f = open(filepath, 'w')
+    f = open(filepath, "w")
     for contigIdx in range(len(result)):
         f.write(namelist[contigIdx] + "\t" + str(result[contigIdx].item(0)) + "\n")
     f.close()
@@ -96,30 +96,36 @@ def calculateN50(seqLens):
 
 
 def get_kmer_coverage_aug0(data_path):
-    namelist = pd.read_csv(data_path + 'aug0_datacoverage_mean.tsv', sep='\t', usecols=range(1)).values[:, 0]
+    namelist = pd.read_csv(
+        data_path + "aug0_datacoverage_mean.tsv", sep="\t", usecols=range(1)
+    ).values[:, 0]
     mapObj = dict(zip(namelist, range(len(namelist))))
 
-    cov_file = data_path + 'aug0_datacoverage_mean.tsv'
-    com_file = data_path + 'aug0/kmer_4_f0.csv'
+    cov_file = data_path + "aug0_datacoverage_mean.tsv"
+    com_file = data_path + "aug0/kmer_4_f0.csv"
 
-    covHeader = pd.read_csv(cov_file, sep='\t', nrows=1)
-    shuffled_covMat = pd.read_csv(cov_file, sep='\t', usecols=range(1, covHeader.shape[1])).values
-    shuffled_namelist = pd.read_csv(cov_file, sep='\t', usecols=range(1)).values[:, 0]
+    covHeader = pd.read_csv(cov_file, sep="\t", nrows=1)
+    shuffled_covMat = pd.read_csv(
+        cov_file, sep="\t", usecols=range(1, covHeader.shape[1])
+    ).values
+    shuffled_namelist = pd.read_csv(cov_file, sep="\t", usecols=range(1)).values[:, 0]
 
     covIdxArr = np.empty(len(mapObj), dtype=np.int)
     for contigIdx in range(len(shuffled_namelist)):
-        if shuffled_namelist[contigIdx].split('_aug')[0] in mapObj:
-            covIdxArr[mapObj[shuffled_namelist[contigIdx].split('_aug')[0]]] = contigIdx
+        if shuffled_namelist[contigIdx].split("_aug")[0] in mapObj:
+            covIdxArr[mapObj[shuffled_namelist[contigIdx].split("_aug")[0]]] = contigIdx
     covMat = shuffled_covMat[covIdxArr]
 
-    compositHeader = pd.read_csv(com_file, sep=',', nrows=1)
-    shuffled_compositMat = pd.read_csv(com_file, sep=',', usecols=range(1, compositHeader.shape[1])).values
-    shuffled_namelist = pd.read_csv(com_file, sep=',', usecols=range(1)).values[:, 0]
+    compositHeader = pd.read_csv(com_file, sep=",", nrows=1)
+    shuffled_compositMat = pd.read_csv(
+        com_file, sep=",", usecols=range(1, compositHeader.shape[1])
+    ).values
+    shuffled_namelist = pd.read_csv(com_file, sep=",", usecols=range(1)).values[:, 0]
 
     covIdxArr = np.empty(len(mapObj), dtype=np.int)
     for contigIdx in range(len(shuffled_namelist)):
-        if shuffled_namelist[contigIdx].split('_aug')[0] in mapObj:
-            covIdxArr[mapObj[shuffled_namelist[contigIdx].split('_aug')[0]]] = contigIdx
+        if shuffled_namelist[contigIdx].split("_aug")[0] in mapObj:
+            covIdxArr[mapObj[shuffled_namelist[contigIdx].split("_aug")[0]]] = contigIdx
     compositMat = shuffled_compositMat[covIdxArr]
 
     # use cov_maxnormalize
@@ -134,23 +140,26 @@ def get_kmer_coverage_aug0(data_path):
     return X_t, covMat, compositMat, namelist
 
 
-
-
 @torch.no_grad()
 def get_embeddings(model, test_dl, embedding_dim, device):
     model.eval()
     embs = np.zeros(shape=(0, embedding_dim))
     for x in test_dl:
-        emb = model(x.to(device)).to('cpu')
+        emb = model(x.to(device)).to("cpu")
         embs = np.vstack((embs, emb))
 
     return embs
 
 
-def get_kmerMetric_emb(kmer_model_path,compositMats,device=torch.device('cpu'),kmerMetric_notl2normalize=False):
+def get_kmerMetric_emb(
+    kmer_model_path,
+    compositMats,
+    device=torch.device("cpu"),
+    kmerMetric_notl2normalize=False,
+):
     #####
     # load kmer_metric
-    config_file = os.path.dirname(kmer_model_path) + '/kmerMetric_config.yaml'
+    config_file = os.path.dirname(kmer_model_path) + "/kmerMetric_config.yaml"
 
     from ruamel.yaml import YAML
     from pathlib import Path
@@ -158,18 +167,17 @@ def get_kmerMetric_emb(kmer_model_path,compositMats,device=torch.device('cpu'),k
     from models.mlp import EmbeddingNet
     from sklearn.preprocessing import normalize
 
-
-    yaml = YAML(typ='safe')
+    yaml = YAML(typ="safe")
 
     cnf = yaml.load(Path(config_file))
 
-    ps = [cnf['dropout_value']] * (len(cnf['emb_szs']) - 1)
+    ps = [cnf["dropout_value"]] * (len(cnf["emb_szs"]) - 1)
     actn = nn.LeakyReLU()
 
     kmerMetric_model = EmbeddingNet(
         in_sz=len(compositMats[0]),
-        out_sz=cnf['embedding_dim'],
-        emb_szs=cnf['emb_szs'],
+        out_sz=cnf["embedding_dim"],
+        emb_szs=cnf["emb_szs"],
         ps=ps,
         use_bn=True,
         actn=actn,
@@ -181,11 +189,13 @@ def get_kmerMetric_emb(kmer_model_path,compositMats,device=torch.device('cpu'),k
 
     compositMats = torch.from_numpy(compositMats).float()
 
-    test_dataloader = torch.utils.data.DataLoader(compositMats,
-                                                  batch_size=2048,
-                                                  shuffle=False)
+    test_dataloader = torch.utils.data.DataLoader(
+        compositMats, batch_size=2048, shuffle=False
+    )
 
-    compositMats = get_embeddings(kmerMetric_model, test_dataloader, cnf['embedding_dim'], device)
+    compositMats = get_embeddings(
+        kmerMetric_model, test_dataloader, cnf["embedding_dim"], device
+    )
     if not kmerMetric_notl2normalize:
         compositMats = normalize(compositMats)
     return compositMats
@@ -197,8 +207,15 @@ def file_len(fname):
             pass
     return i + 1
 
-def gen_seed(logger, contig_file: str, threads: int, contig_length_threshold: int,
-             marker_name: str = "marker", quarter: str = "3quarter"):
+
+def gen_seed(
+    logger,
+    contig_file: str,
+    threads: int,
+    contig_length_threshold: int,
+    marker_name: str = "marker",
+    quarter: str = "3quarter",
+):
     """
     Generate seed sequences from contigs using FragGeneScan, HMMsearch, and custom markers.
 
@@ -209,32 +226,78 @@ def gen_seed(logger, contig_file: str, threads: int, contig_length_threshold: in
     :param quarter: The quarter identifier (default: "3quarter").
     :return: The number of candidate seeds generated.
     """
-    fragScanURL = 'run_FragGeneScan.pl'
+    fragScanURL = "run_FragGeneScan.pl"
 
-    hmmExeURL = 'hmmsearch'
-    markerExeURL = os.path.join(os.getcwd(), '../auxiliary', 'test_getmarker_' + quarter + '.pl')
-    markerURL = os.path.join(os.getcwd(), '../auxiliary', marker_name + '.hmm')
-    seedURL = contig_file + "." + marker_name + "." + quarter + "_lencutoff_" + str(contig_length_threshold) + ".seed"
+    hmmExeURL = "hmmsearch"
+    markerExeURL = os.path.join(
+        os.getcwd(), "../auxiliary", "test_getmarker_" + quarter + ".pl"
+    )
+    markerURL = os.path.join(os.getcwd(), "../auxiliary", marker_name + ".hmm")
+    seedURL = (
+        contig_file
+        + "."
+        + marker_name
+        + "."
+        + quarter
+        + "_lencutoff_"
+        + str(contig_length_threshold)
+        + ".seed"
+    )
     fragResultURL = contig_file + ".frag.faa"
-    hmmResultURL = contig_file + '.' + marker_name + ".hmmout"
+    hmmResultURL = contig_file + "." + marker_name + ".hmmout"
 
     if not (os.path.exists(fragResultURL)):
-        fragCmd = fragScanURL + " -genome=" + contig_file + " -out=" + contig_file + ".frag -complete=0 -train=complete -thread=" + str(
-            threads) + " 1>" + contig_file + ".frag.out 2>" + contig_file + ".frag.err"
+        fragCmd = (
+            fragScanURL
+            + " -genome="
+            + contig_file
+            + " -out="
+            + contig_file
+            + ".frag -complete=0 -train=complete -thread="
+            + str(threads)
+            + " 1>"
+            + contig_file
+            + ".frag.out 2>"
+            + contig_file
+            + ".frag.err"
+        )
         logger.info("exec cmd: " + fragCmd)
         os.system(fragCmd)
 
     if os.path.exists(fragResultURL):
         if not (os.path.exists(hmmResultURL)):
-            hmmCmd = hmmExeURL + " --domtblout " + hmmResultURL + " --cut_tc --cpu " + str(
-                threads) + " " + markerURL + " " + fragResultURL + " 1>" + hmmResultURL + ".out 2>" + hmmResultURL + ".err"
+            hmmCmd = (
+                hmmExeURL
+                + " --domtblout "
+                + hmmResultURL
+                + " --cut_tc --cpu "
+                + str(threads)
+                + " "
+                + markerURL
+                + " "
+                + fragResultURL
+                + " 1>"
+                + hmmResultURL
+                + ".out 2>"
+                + hmmResultURL
+                + ".err"
+            )
             logger.info("exec cmd: " + hmmCmd)
             os.system(hmmCmd)
 
         if os.path.exists(hmmResultURL):
             if not (os.path.exists(seedURL)):
-                markerCmd = markerExeURL + " " + hmmResultURL + " " + contig_file + " " + str(
-                    contig_length_threshold) + " " + seedURL
+                markerCmd = (
+                    markerExeURL
+                    + " "
+                    + hmmResultURL
+                    + " "
+                    + contig_file
+                    + " "
+                    + str(contig_length_threshold)
+                    + " "
+                    + seedURL
+                )
                 logger.info("exec cmd: " + markerCmd)
                 os.system(markerCmd)
 
