@@ -70,14 +70,13 @@ def gen_bins(fastafile: str, resultfile: str, outputdir: str) -> None:
 
 
 def filter_small_bins(
-    logger, fastafile: str, resultfile: str, args, minbinsize: int = 30000
-) -> None:
+    logger, fastafile: str, resultfile: str, output_path: str, minbinsize: int = 200000) -> None:
     """
     Filter small bins from the result file.
 
     :param fastafile: The path to the input FASTA file containing contigs.
     :param resultfile: The path to the binning result file.
-    :param args: The additional arguments used in the process.
+    :param output_path: The output directory where filtered bins will be saved.
     :param minbinsize: The minimum bin size (default: 200,000).
     :return: None
     """
@@ -117,5 +116,5 @@ def filter_small_bins(
                     f.write(contigIdx + "\t" + cluster_name + "\n")
     f.close()
 
-    gen_bins(fastafile, outputdir, args.output_path + "/comebin_res_bins")
-    shutil.copy2(outputdir, args.output_path + "/comebin_res.tsv")
+    gen_bins(fastafile, outputdir, output_path + "/comebin_res_bins")
+    shutil.copy2(outputdir, output_path + "/comebin_res.tsv")

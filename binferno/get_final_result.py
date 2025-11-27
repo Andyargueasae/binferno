@@ -1,3 +1,4 @@
+from pathlib import Path
 from scripts.unitem_profile import (
     Profile,
     make_sure_path_exists,
@@ -9,7 +10,7 @@ from collections import defaultdict
 import pandas as pd
 
 from scripts.unitem_common import read_bins  # the read_bins is not used here.
-from scripts.unitem_markers import Markers  # finished updating to plastid.
+from scripts.unitem_markers import Markers, pltdMarkers  # finished updating to plastid.
 from filter_small_bins import filter_small_bins
 
 from typing import List, Optional, Union, Dict
@@ -240,7 +241,7 @@ def estimate_bins_quality_nobins_pltd(pltd_mg_table, res_path, ignore_kmeans_res
 
     :return: The best method based on estimated bin quality.
     """
-    markers = Markers()
+    markers = pltdMarkers()
 
     # bin_dirs = get_bin_dirs(bin_dirs_file)
     filenames = os.listdir(res_path)
@@ -276,9 +277,16 @@ def estimate_bins_quality_nobins_pltd(pltd_mg_table, res_path, ignore_kmeans_res
 
 def run_get_final_result(
     logger,
-    args,
+    bac_mg_table: Optional[Path],
+    ar_mg_table: Optional[Path],
+    pltd_mg_table: Optional[Path],
+    checkm_database: Optional[Path],
+    contig_file: Path,
+    plastid: bool,
+    output_path: Path,
     seed_num: int,
     num_threads: int = 40,
+    minbinsize: int = 200000,
     res_name: Optional[str] = None,
     ignore_kmeans_res: bool = True,
 ):
@@ -292,24 +300,26 @@ def run_get_final_result(
     """
     logger.info("Seed_num:\t" + str(seed_num))
 
-    if not (args.bac_mg_table and args.ar_mg_table):
+    if not (bac_mg_table and ar_mg_table):
         logger.info("Run unitem profile:\t" + str(seed_num))
         bin_dirs = {}
         if res_name == None:
             res_name = "weight_seed_kmeans_k_" + str(seed_num) + "_result.tsv"
         bin_dirs[res_name] = (
-            args.output_path + "/cluster_res/" + res_name + "_bins",
+            output_path + "/cluster_res/" + res_name + "_bins",
             "fa",
         )
 
-        output_dir = args.output_path + "/cluster_res/unitem_profile"
-
+        output_dir = output_path + "/cluster_res/unitem_profile"
         if not (os.path.exists(output_dir)):
             make_sure_path_exists(output_dir)
             profile = Profile(num_threads)
-            if args.checkm_database:
-                profile.Profile_setup(args.checkm_database)
-            profile.run_pltd(bin_dirs, output_dir)
+            if checkm_database:
+                profile.Profile_setup(checkm_database)
+            if plastid:
+                profile.run_pltd(bin_dirs, output_dir)
+            else:
+                profile.run(bin_dirs, output_dir)
 
         bac_mg_table = (
             output_dir
@@ -330,14 +340,14 @@ def run_get_final_result(
             + "/checkm_pltd/marker_gene_table.tsv"
         )
     else:
-        bac_mg_table = args.bac_mg_table
-        ar_mg_table = args.ar_mg_table
-        pltd_mg_table = args.pltd_mg_table
+        bac_mg_table = bac_mg_table
+        ar_mg_table = ar_mg_table
+        pltd_mg_table = pltd_mg_table
 
-    if args.plastid:
+    if plastid:
         best_method = estimate_bins_quality_nobins_pltd(
             pltd_mg_table,
-            args.output_path + "/cluster_res/",
+            output_path + "/cluster_res/",
             ignore_kmeans_res=ignore_kmeans_res,
         )
 
@@ -345,10 +355,10 @@ def run_get_final_result(
         best_method = estimate_bins_quality_nobins(
             bac_mg_table,
             ar_mg_table,
-            args.output_path + "/cluster_res/",
+            output_path + "/cluster_res/",
             ignore_kmeans_res=ignore_kmeans_res,
         )
-    logger.info("Final result:\t" + args.output_path + "/cluster_res/" + best_method)
+    logger.info("Final result:\t" + output_path + "/cluster_res/" + best_method)
     filter_small_bins(
-        logger, args.contig_file, args.output_path + "/cluster_res/" + best_method, args
+        logger, contig_file, output_path + "/cluster_res/" + best_method, output_path, minbinsize=minbinsize,
     )
