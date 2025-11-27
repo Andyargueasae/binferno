@@ -219,11 +219,11 @@ def read_aug_seq_info(aug_seq_info_out_file):
     return aug_seq_info_dict
 
 
-def run_gen_cov_var(logger, args):
+def run_gen_cov_var(logger, out_augdata_path=None, num_threads=10, n_views=6, contig_len=1000):
     logger.info("Generate coverage variance files from bam files.")
 
-    if not args.out_augdata_path.endswith('/'):
-        args.out_augdata_path = args.out_augdata_path + '/'
+    if not out_augdata_path.endswith('/'):
+        out_augdata_path = out_augdata_path + '/'
 
-    out = args.out_augdata_path + 'depth/'
-    gen_cov_var_from_bedout(logger, args.out_augdata_path, out, num_aug=args.n_views-1,contig_len=args.contig_len,num_process=args.num_threads)
+    out = out_augdata_path + 'depth/'
+    gen_cov_var_from_bedout(logger, out_augdata_path, out, num_aug=n_views-1,contig_len=contig_len,num_process=num_threads)

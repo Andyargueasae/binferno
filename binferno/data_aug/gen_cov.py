@@ -328,17 +328,21 @@ def get_plastid_ids(contig_file):
                 plastid_contigs.append(line.strip().split()[0][1:])  # Remove '>' and take the ID
     return plastid_contigs
 
-def run_gen_cov(logger, args):
+def run_gen_cov(logger, out_augdata_path: str, contigs: str, bam_file_path: str,
+                threads: int = 10, min_contig_length: int = 1000, n_views: int = 6, plastid: bool = False):
+    
     logger.info("Generate coverage files from bam files.")
 
-    bam_file_path = args.bam_file_path
+    bam_file_path = bam_file_path
     if not bam_file_path.endswith('/'):
         bam_file_path = bam_file_path + '/'
 
-    if not args.out_augdata_path.endswith('/'):
-        args.out_augdata_path = args.out_augdata_path + '/'
+    if not out_augdata_path.endswith('/'):
+        out_augdata_path = out_augdata_path + '/'
 
-    out = args.out_augdata_path + 'depth/'
-    run_gen_bedtools_out(bam_file_path, out, logger,num_process=args.num_threads)
-    plastid_contig_ids = get_plastid_ids(args.contig_file) 
-    gen_cov_from_bedout(logger, args.out_augdata_path, out, num_aug=args.n_views-1, contig_len=args.contig_len, contig_ids=plastid_contig_ids, num_process=args.num_threads)
+    out = out_augdata_path + 'depth/'
+    run_gen_bedtools_out(bam_file_path, out, logger,num_process=threads)
+    
+    plastid_contig_ids = get_plastid_ids(contigs) 
+    gen_cov_from_bedout(logger, out_augdata_path, out, num_aug=n_views-1, contig_len=min_contig_length,
+                        contig_ids=plastid_contig_ids, num_process=threads, plastid=plastid)
