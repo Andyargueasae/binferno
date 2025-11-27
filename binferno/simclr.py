@@ -16,25 +16,28 @@ torch.manual_seed(0)
 
 class SimCLR(object):
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, model, optimizer, scheduler, device="cpu", output_path=None, num_threads=10, plastid=False, temperature=0.1, args_dict=None):
         """
         Initialize the SimCLR model and related components.
 
         :param kwargs: Keyword arguments including 'args', 'model', 'optimizer', 'scheduler'.
         """
-        self.args = kwargs["args"]
-        torch.set_num_threads(self.args.num_threads)
-        self.model = kwargs["model"].to(self.args.device)
-        self.optimizer = kwargs["optimizer"]
-        self.scheduler = kwargs["scheduler"]
-        self.writer = SummaryWriter(log_dir=self.args.output_path)
+        # args = kwargs["args"]
+        self.args = args_dict
+        torch.set_num_threads(num_threads)
+        self.model = model.to(device)
+        self.optimizer = optimizer
+        self.scheduler = scheduler
+        self.writer = SummaryWriter(log_dir=output_path)
         logging.basicConfig(
-            filename=os.path.join(self.args.output_path, "training.log"),
+            filename=os.path.join(output_path, "training.log"),
             level=logging.DEBUG,
         )
-        self.criterion = torch.nn.CrossEntropyLoss().to(self.args.device)
+        self.criterion = torch.nn.CrossEntropyLoss().to(device)
+        self.plastid = plastid
+        self.temperature = self.args.get("temperature", temperature) if self.args else temperature
 
-    def info_nce_loss(self, features):
+    def info_nce_loss(self, features, batch_size, n_views, device):
         """
         Calculate the InfoNCE loss for SimCLR.
 
@@ -42,18 +45,17 @@ class SimCLR(object):
         :return: Logits and labels for the loss.
         """
         labels = torch.cat(
-            [torch.arange(self.args.batch_size) for i in range(self.args.n_views)],
+            [torch.arange(batch_size) for i in range(n_views)],
             dim=0,
         )
         labels = (labels.unsqueeze(0) == labels.unsqueeze(1)).float()
-        labels = labels.to(self.args.device)
-
+        labels = labels.to(device)
         features = F.normalize(features, dim=1)
 
         similarity_matrix = torch.matmul(features, features.T)
 
         # discard the main diagonal from both: labels and similarities matrix
-        mask = torch.eye(labels.shape[0], dtype=torch.bool).to(self.args.device)
+        mask = torch.eye(labels.shape[0], dtype=torch.bool).to(device)
         labels = labels[~mask].view(labels.shape[0], -1)
         similarity_matrix = similarity_matrix[~mask].view(
             similarity_matrix.shape[0], -1
@@ -67,16 +69,15 @@ class SimCLR(object):
             similarity_matrix.shape[0], -1
         )
         negatives = (
-            negatives[:, None].expand(-1, self.args.n_views - 1, -1).flatten(0, 1)
+            negatives[:, None].expand(-1, n_views - 1, -1).flatten(0, 1)
         )
 
         logits = torch.cat([positives, negatives], dim=1)
-        labels = torch.zeros(logits.shape[0], dtype=torch.long).to(self.args.device)
-
-        logits = logits / self.args.temperature
+        labels = torch.zeros(logits.shape[0], dtype=torch.long).to(device)
+        logits = logits / self.temperature
         return logits, labels
 
-    def covmodel_info_nce_loss(self, features):
+    def covmodel_info_nce_loss(self, features, batch_size, n_views, device):
         """
         Calculate the InfoNCE loss for the coverage model.
 
@@ -84,18 +85,17 @@ class SimCLR(object):
         :return: Logits and labels for the loss.
         """
         labels = torch.cat(
-            [torch.arange(self.args.batch_size) for i in range(self.args.n_views)],
+            [torch.arange(batch_size) for i in range(n_views)],
             dim=0,
         )
         labels = (labels.unsqueeze(0) == labels.unsqueeze(1)).float()
-        labels = labels.to(self.args.device)
-
+        labels = labels.to(device)
         features = F.normalize(features, dim=1)
 
         similarity_matrix = torch.matmul(features, features.T)
 
         # discard the main diagonal from both: labels and similarities matrix
-        mask = torch.eye(labels.shape[0], dtype=torch.bool).to(self.args.device)
+        mask = torch.eye(labels.shape[0], dtype=torch.bool).to(device)
         labels = labels[~mask].view(labels.shape[0], -1)
         similarity_matrix = similarity_matrix[~mask].view(
             similarity_matrix.shape[0], -1
@@ -109,16 +109,15 @@ class SimCLR(object):
             similarity_matrix.shape[0], -1
         )
         negatives = (
-            negatives[:, None].expand(-1, self.args.n_views - 1, -1).flatten(0, 1)
+            negatives[:, None].expand(-1, n_views - 1, -1).flatten(0, 1)
         )
 
         logits = torch.cat([positives, negatives], dim=1)
-        labels = torch.zeros(logits.shape[0], dtype=torch.long).to(self.args.device)
-
-        logits = logits / self.args.covmodel_temperature
+        labels = torch.zeros(logits.shape[0], dtype=torch.long).to(device)
+        logits = logits / self.temperature
         return logits, labels
 
-    def kmermodel_info_nce_loss(self, features):
+    def kmermodel_info_nce_loss(self, features, batch_size, n_views, device):
         """
         Calculate the InfoNCE loss for the k-mer model.
 
@@ -126,18 +125,17 @@ class SimCLR(object):
         :return: Logits and labels for the loss.
         """
         labels = torch.cat(
-            [torch.arange(self.args.batch_size) for i in range(self.args.n_views)],
+            [torch.arange(batch_size) for i in range(n_views)],
             dim=0,
         )
         labels = (labels.unsqueeze(0) == labels.unsqueeze(1)).float()
-        labels = labels.to(self.args.device)
-
+        labels = labels.to(device)
         features = F.normalize(features, dim=1)
 
         similarity_matrix = torch.matmul(features, features.T)
 
         # discard the main diagonal from both: labels and similarities matrix
-        mask = torch.eye(labels.shape[0], dtype=torch.bool).to(self.args.device)
+        mask = torch.eye(labels.shape[0], dtype=torch.bool).to(device)
         labels = labels[~mask].view(labels.shape[0], -1)
         similarity_matrix = similarity_matrix[~mask].view(
             similarity_matrix.shape[0], -1
@@ -151,16 +149,17 @@ class SimCLR(object):
             similarity_matrix.shape[0], -1
         )
         negatives = (
-            negatives[:, None].expand(-1, self.args.n_views - 1, -1).flatten(0, 1)
+            negatives[:, None].expand(-1, n_views - 1, -1).flatten(0, 1)
         )
 
         logits = torch.cat([positives, negatives], dim=1)
-        labels = torch.zeros(logits.shape[0], dtype=torch.long).to(self.args.device)
+        labels = torch.zeros(logits.shape[0], dtype=torch.long).to(device)
 
-        logits = logits / self.args.kmermodel_temperature
+        logits = logits / self.temperature
         return logits, labels
 
-    def train(self, train_loader, data, namelist):
+    def train(self, train_loader, data, namelist, fp16_precision, 
+              epochs, notuse_scheduler, earlystop, output_path, device):
         """
         Train the SimCLR model.
 
@@ -168,23 +167,23 @@ class SimCLR(object):
         :param data: Input data.
         :param namelist: List of sequence names.
         """
-        scaler = GradScaler(enabled=self.args.fp16_precision)
+        scaler = GradScaler(enabled=fp16_precision)
 
         # save config file
-        save_config_file(self.args.output_path, self.args)
+        save_config_file(output_path, self.args)
 
         earlystop_epoch = 0
-        logging.info(f"Start SimCLR training for {self.args.epochs} epochs.")
-        # logging.info(f"Training with cpu: {self.args.disable_cuda}.")
+        logging.info(f"Start SimCLR training for {epochs} epochs.")
+        # logging.info(f"Training with cpu: {args.disable_cuda}.")
 
-        for epoch_counter in range(self.args.epochs):
+        for epoch_counter in range(epochs):
             # modified
             for contig_features in tqdm(train_loader):
                 contig_features = torch.cat(contig_features, dim=0)
 
-                contig_features = contig_features.to(self.args.device)
+                contig_features = contig_features.to(device)
 
-                with autocast(enabled=self.args.fp16_precision):
+                with autocast(enabled=fp16_precision):
                     features = self.model(contig_features)
                     logits, labels = self.info_nce_loss(features)
                     loss = self.criterion(logits, labels)
@@ -197,7 +196,7 @@ class SimCLR(object):
                 scaler.update()
 
             top1, top5 = accuracy(logits, labels, topk=(1, 5))
-            if not self.args.notuse_scheduler:
+            if not notuse_scheduler:
                 # warmup for the first 10 epochs
                 if epoch_counter >= 10:
                     self.scheduler.step()
@@ -205,7 +204,7 @@ class SimCLR(object):
                 f"Epoch: {epoch_counter}\tLoss: {loss}\tTop1 accuracy: {top1[0]}"
             )
 
-            if self.args.earlystop:
+            if earlystop:
                 if epoch_counter >= 10 and top1[0] > 99.0:
                     earlystop_epoch += 1
                 else:
@@ -215,19 +214,19 @@ class SimCLR(object):
 
         logging.info("Training has finished.")
         # save model checkpoints
-        checkpoint_name = "checkpoint_{:04d}.pth.tar".format(self.args.epochs)
+        checkpoint_name = "checkpoint_{:04d}.pth.tar".format(epochs)
         save_checkpoint(
             {
-                "epoch": self.args.epochs,
-                # 'arch': self.args.arch,
+                "epoch": epochs,
+                # 'arch': args.arch,
                 "state_dict": self.model.state_dict(),
                 "optimizer": self.optimizer.state_dict(),
             },
             is_best=False,
-            filename=os.path.join(self.args.output_path, checkpoint_name),
+            filename=os.path.join(output_path, checkpoint_name),
         )
         logging.info(
-            f"Model checkpoint and metadata has been saved at {self.args.output_path}."
+            f"Model checkpoint and metadata has been saved at {output_path}."
         )
 
         # ckpt = torch.load('checkpoint_0200.pth.tar')
@@ -238,7 +237,7 @@ class SimCLR(object):
             bs_ = 1024
             out = np.concatenate(
                 [
-                    self.model(data[0][i : i + bs_].to(self.args.device))
+                    self.model(data[0][i : i + bs_].to(device))
                     .to("cpu")
                     .numpy()
                     for i in range(0, len(data[0]), bs_)
@@ -246,10 +245,13 @@ class SimCLR(object):
                 axis=0,
             )
             embeddings_df = pd.DataFrame(out, index=namelist)
-            outfile = self.args.output_path + "/embeddings.tsv"
+            outfile = output_path + "/embeddings.tsv"
             embeddings_df.to_csv(outfile, sep="\t", header=True)
 
-    def train_addpretrain(self, train_loader, data, namelist):
+    def train_addpretrain(self, train_loader, data, namelist, fp16_precision, 
+              epochs, notuse_scheduler, earlystop, output_path, device,
+              addcovloss=False, lambdaloss2=1.0, lossbalance=False,
+              addkmerloss=False, lambdakmerloss2=1.0, pretrain_kmer_model_path="no", kmer_model_path="empty"):
         """
         Train the SimCLR model with an additional pre-trained k-mer model.
 
@@ -257,21 +259,24 @@ class SimCLR(object):
         :param data: Input data.
         :param namelist: List of sequence names.
         """
-        scaler = GradScaler(enabled=self.args.fp16_precision)
+        scaler = GradScaler(enabled=fp16_precision)
 
         # save config file
-        save_config_file(self.args.output_path, self.args)
+        save_config_file(output_path, self.args)
 
         earlystop_epoch = 0
-        logging.info(f"Start SimCLR training for {self.args.epochs} epochs.")
-        # logging.info(f"Training with cpu: {self.args.disable_cuda}.")
-        if self.args.kmer_model_path == "empty":
-            kmer_len = 538
+        logging.info(f"Start SimCLR training for {epochs} epochs.")
+        # logging.info(f"Training with cpu: {args.disable_cuda}.")
+        if kmer_model_path == "empty":
+            if self.plastid:
+                kmer_len = 538
+            else:
+                kmer_len = 1945
         else:
             kmer_len = 128
         logging.info("kmer_len:\t" + str(kmer_len) + "\n")
 
-        for epoch_counter in range(self.args.epochs):
+        for epoch_counter in range(epochs):
             if epoch_counter == 0:
                 epoch_loss1 = 0
                 epoch_loss2 = 0
@@ -281,12 +286,12 @@ class SimCLR(object):
             for contig_features in tqdm(train_loader):
                 contig_features = torch.cat(contig_features, dim=0)
 
-                contig_features = contig_features.to(self.args.device)
+                contig_features = contig_features.to(device)
                 # print(contig_features.shape)
 
-                with autocast(enabled=self.args.fp16_precision):
-                    if self.args.addcovloss and not self.args.addkmerloss:
-                        if self.args.pretrain_kmer_model_path != "no":
+                with autocast(enabled= fp16_precision):
+                    if addcovloss and not addkmerloss:
+                        if pretrain_kmer_model_path != "no":
                             features, covemb, kmeremb = self.model(
                                 contig_features[:, -kmer_len:],
                                 contig_features[:, :-kmer_len],
@@ -303,13 +308,13 @@ class SimCLR(object):
                         loss1 = self.criterion(logits, labels)
                         logits2, labels2 = self.covmodel_info_nce_loss(covemb)
                         loss2 = self.criterion(logits2, labels2)
-                        if self.args.lossbalance:
+                        if lossbalance:
                             if epoch_counter == 0:
                                 weight_lambdaloss2 = 1
                             loss = loss1 + weight_lambdaloss2 * loss2
                         else:
-                            loss = loss1 + self.args.lambdaloss2 * loss2
-                    elif self.args.addcovloss and self.args.addkmerloss:
+                            loss = loss1 + lambdaloss2 * loss2
+                    elif addcovloss and addkmerloss:
                         features, covemb, kmeremb = self.model(
                             contig_features[:, -kmer_len:],
                             contig_features[:, :-kmer_len],
@@ -325,18 +330,19 @@ class SimCLR(object):
                         loss3 = self.criterion(logits3, labels3)
                         loss = (
                             loss1
-                            + self.args.lambdaloss2 * loss2
-                            + self.args.lambdakmerloss2 * loss3
+                            + lambdaloss2 * loss2
+                            + lambdakmerloss2 * loss3
                         )
                     else:
                         # features, covemb = self.model(contig_features[:, -kmer_len:], contig_features[:, :-kmer_len])
-                        if self.args.pretrain_kmer_model_path != "no":
+                        if pretrain_kmer_model_path != "no":
                             features, covemb, kmeremb = self.model(
                                 contig_features[:, -kmer_len:],
                                 contig_features[:, :-kmer_len],
                             )
                             # print(contig_features[:2, :-kmer_len])
                         else:
+                            
                             features, covemb = self.model(
                                 contig_features[:, -kmer_len:],
                                 contig_features[:, :-kmer_len],
@@ -353,14 +359,14 @@ class SimCLR(object):
                 scaler.update()
 
                 if epoch_counter == 0:
-                    if self.args.addcovloss:
+                    if addcovloss:
                         epoch_loss1 += loss1.data.item()
                         epoch_loss2 += loss2.data.item()
                         epoch_loss += loss.data.item()
 
             top1, top5 = accuracy(logits, labels, topk=(1, 5))
 
-            if not self.args.notuse_scheduler:
+            if not notuse_scheduler:
                 # warmup for the first 10 epochs
                 if epoch_counter >= 10:
                     self.scheduler.step()
@@ -368,7 +374,7 @@ class SimCLR(object):
                 f"Epoch: {epoch_counter}\tLoss: {loss}\tTop1 accuracy: {top1[0]}"
             )
 
-            if self.args.earlystop:
+            if earlystop:
                 if epoch_counter >= 10 and top1[0] > 99.0:
                     earlystop_epoch += 1
                 else:
@@ -377,35 +383,35 @@ class SimCLR(object):
                 if earlystop_epoch >= 3:
                     break
 
-            if self.args.addcovloss:
+            if addcovloss:
                 if epoch_counter == 0:
                     logging.debug(
                         f"Epoch: {epoch_counter}\tcoverage model loss: {loss2}"
                     )
-                    if self.args.lossbalance:
+                    if lossbalance:
                         weight_lambdaloss2 = epoch_loss1 / epoch_loss2
                         logging.debug(
                             f"Epoch: {epoch_counter}\tweight_lambdaloss2: {weight_lambdaloss2}"
                         )
 
-            if self.args.addkmerloss:
+            if addkmerloss:
                 if epoch_counter == 0:
                     logging.debug(f"Epoch: {epoch_counter}\tkmer model loss: {loss3}")
         logging.info("Training has finished.")
         # save model checkpoints
-        checkpoint_name = "checkpoint_{:04d}.pth.tar".format(self.args.epochs)
+        checkpoint_name = "checkpoint_{:04d}.pth.tar".format(epochs)
         save_checkpoint(
             {
-                "epoch": self.args.epochs,
-                # 'arch': self.args.arch,
+                "epoch": epochs,
+                # 'arch': args.arch,
                 "state_dict": self.model.state_dict(),
                 "optimizer": self.optimizer.state_dict(),
             },
             is_best=False,
-            filename=os.path.join(self.args.output_path, checkpoint_name),
+            filename=os.path.join(output_path, checkpoint_name),
         )
         logging.info(
-            f"Model checkpoint and metadata has been saved at {self.args.output_path}."
+            f"Model checkpoint and metadata has been saved at {output_path}."
         )
 
         # ckpt = torch.load('/checkpoint_0200.pth.tar')
@@ -419,8 +425,8 @@ class SimCLR(object):
             out = np.concatenate(
                 [
                     self.model(
-                        data[0][i : i + bs_, -kmer_len:].to(self.args.device),
-                        data[0][i : i + bs_, :-kmer_len].to(self.args.device),
+                        data[0][i : i + bs_, -kmer_len:].to(device),
+                        data[0][i : i + bs_, :-kmer_len].to(device),
                     )[0]
                     .to("cpu")
                     .numpy()
@@ -430,14 +436,14 @@ class SimCLR(object):
             )
             embeddings_df = pd.DataFrame(out, index=namelist)
 
-            outfile = self.args.output_path + "/embeddings.tsv"
+            outfile = output_path + "/embeddings.tsv"
             embeddings_df.to_csv(outfile, sep="\t", header=True)
 
             covout = np.concatenate(
                 [
                     self.model(
-                        data[0][i : i + bs_, -kmer_len:].to(self.args.device),
-                        data[0][i : i + bs_, :-kmer_len].to(self.args.device),
+                        data[0][i : i + bs_, -kmer_len:].to(device),
+                        data[0][i : i + bs_, :-kmer_len].to(device),
                     )[1]
                     .to("cpu")
                     .numpy()
@@ -446,32 +452,31 @@ class SimCLR(object):
                 axis=0,
             )
             embeddings_df = pd.DataFrame(covout, index=namelist)
-            outfile = self.args.output_path + "/covembeddings.tsv"
+            outfile = output_path + "/covembeddings.tsv"
             embeddings_df.to_csv(outfile, sep="\t", header=True)
 
-    def covmodeltrain(self, train_loader):
+    def covmodeltrain(self, train_loader, fp16_precision, covmodelepochs, notuse_scheduler, earlystop, output_path, device):
         """
         Train the coverage model.
 
         :param train_loader: Data loader for training.
         """
-        scaler = GradScaler(enabled=self.args.fp16_precision)
+        scaler = GradScaler(enabled=fp16_precision)
 
         # save config file
-        save_config_file(self.args.output_path, self.args)
-
+        save_config_file(output_path, self.args)
         earlystop_epoch = 0
-        logging.info(f"Start SimCLR training for {self.args.epochs} epochs.")
-        # logging.info(f"Training with cpu: {self.args.disable_cuda}.")
+        logging.info(f"Start SimCLR training for {covmodelepochs} epochs.")
+        # logging.info(f"Training with cpu: {args.disable_cuda}.")
 
-        for epoch_counter in range(self.args.covmodelepochs):
+        for epoch_counter in range(covmodelepochs):
             # modified
             for contig_features in tqdm(train_loader):
                 contig_features = torch.cat(contig_features, dim=0)
 
-                contig_features = contig_features.to(self.args.device)
+                contig_features = contig_features.to(device)
 
-                with autocast(enabled=self.args.fp16_precision):
+                with autocast(enabled=fp16_precision):
                     features = self.model(contig_features[:, :-128])
                     logits, labels = self.info_nce_loss(features)
                     loss = self.criterion(logits, labels)
@@ -485,7 +490,7 @@ class SimCLR(object):
 
             top1, top5 = accuracy(logits, labels, topk=(1, 5))
 
-            if not self.args.notuse_scheduler:
+            if not notuse_scheduler:
                 # warmup for the first 10 epochs
                 if epoch_counter >= 10:
                     self.scheduler.step()
@@ -493,7 +498,7 @@ class SimCLR(object):
                 f"Epoch: {epoch_counter}\tLoss: {loss}\tTop1 accuracy: {top1[0]}"
             )
 
-            if self.args.earlystop:
+            if earlystop:
                 if epoch_counter >= 10 and top1[0] > 99.0:
                     earlystop_epoch += 1
                 else:
@@ -503,19 +508,19 @@ class SimCLR(object):
 
         logging.info("Training has finished.")
         # save model checkpoints
-        checkpoint_name = "checkpoint_{:04d}.pth.tar".format(self.args.epochs)
+        checkpoint_name = "checkpoint_{:04d}.pth.tar".format(covmodelepochs)
         save_checkpoint(
             {
-                "epoch": self.args.covmodelepochs,
-                # 'arch': self.args.arch,
+                "epoch": covmodelepochs,
+                # 'arch': args.arch,
                 "state_dict": self.model.state_dict(),
                 "optimizer": self.optimizer.state_dict(),
             },
             is_best=False,
-            filename=os.path.join(self.args.output_path, checkpoint_name),
+            filename=os.path.join(output_path, checkpoint_name),
         )
         logging.info(
-            f"Model checkpoint and metadata has been saved at {self.args.output_path}."
+            f"Model checkpoint and metadata has been saved at {output_path}."
         )
 
         # ckpt = torch.load('checkpoint_0200.pth.tar')
