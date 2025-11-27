@@ -360,7 +360,8 @@ def run_leiden(
     f.close()
 
 
-def cluster(logger, args, prefix=None):
+def cluster(logger, emb_file=None, seed_file=None, output_path=None, contig_file=None, contig_len=1000, 
+            not_l2normaize=False, cluster_num=None, num_threads=None, prefix=None):
     """
     Cluster contigs and save the results.
 
@@ -369,13 +370,6 @@ def cluster(logger, args, prefix=None):
     :return: None
     """
     logger.info("Start clustering.")
-
-    emb_file = args.emb_file
-    seed_file = args.seed_file
-    output_path = args.output_path
-    contig_file = args.contig_file
-
-    contig_len = args.contig_len
 
     output_path = output_path + "/cluster_res/"
 
@@ -402,7 +396,7 @@ def cluster(logger, args, prefix=None):
     namelist = namelist[np.array(length_weight) >= contig_len]
     length_weight = list(np.array(length_weight)[np.array(length_weight) >= contig_len])
 
-    if args.not_l2normaize:
+    if not_l2normaize:
         norm_embeddings = embMat
     else:
         norm_embeddings = normalize(embMat)
@@ -423,8 +417,8 @@ def cluster(logger, args, prefix=None):
     )
     bin_nums = [seed_num]
 
-    if args.cluster_num:
-        bin_nums.append(args.cluster_num)
+    if cluster_num:
+        bin_nums.append(cluster_num)
 
     logger.info("Bin_numbers:\t" + str(bin_nums))
     for k in bin_nums:
@@ -443,7 +437,7 @@ def cluster(logger, args, prefix=None):
 
     import multiprocessing
 
-    num_workers = args.num_threads
+    num_workers = num_threads
 
     ##### #########  hnswlib_method
     parameter_list = [1, 5, 10, 30, 50, 70, 90, 110]
