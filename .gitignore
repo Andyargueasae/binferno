@@ -1,3 +1,8 @@
 COMEBin/__pycache__/*
 COMEBin/*/__pycache__/*
 checkm_db/
+binferno/__pycache__
+binferno/*/__pycache__
+dist
+prodigal_markers
+
