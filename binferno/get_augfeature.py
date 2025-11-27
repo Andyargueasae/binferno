@@ -59,6 +59,7 @@ def read_memmap(path, count, dtype: str = "float16") -> np.memmap:
 def get_Corgi_coverage(
     data_path: str,
     n_views: int = 2,
+    device=torch.device("cpu"),
     cov_meannormalize: bool = False,
     cov_minmaxnormalize: bool = False,
     cov_standardization: bool = False,
@@ -395,6 +396,7 @@ def get_ContrastiveLearningDataset(
 def GetCorgiContrastiveDataset(
     data_path: str,
     n_views: int = 2,
+    device=torch.device("cpu"),
     cov_meannormalize: bool = False,
     cov_minmaxnormalize: bool = False,
     cov_standardization: bool = False,
@@ -414,6 +416,7 @@ def GetCorgiContrastiveDataset(
     dataset, namelist = get_Corgi_coverage(
         data_path=data_path,
         n_views=n_views,
+        device=device,
         cov_meannormalize=cov_meannormalize,
         cov_minmaxnormalize=cov_minmaxnormalize,
         cov_standardization=cov_standardization,
