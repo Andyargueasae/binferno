@@ -1,30 +1,25 @@
 from pathlib import Path
-import typer
+import tyro
 
-from . import features, training, clustering
+from .features import BinfernoFeatures
+from .training import BinfernoTraining
+from .clustering import BinfernoClustering
 
-app = typer.Typer()
-
-@app.command()
-def main(
+def binferno(
     fasta:Path,
     bam:Path,
-    kmer:bool = typer.Option(True, help="Whether to include a kmer features"),
-    corgi:bool = typer.Option(True, help="Whether to include a corgi features"),
-    coverage:bool = typer.Option(True, help="Whether to include a coverage features"),
-    simclr:bool = typer.Option(True, help="Whether to include a SimCLR training module"),
-    barlowtwins:bool = typer.Option(False, help="Whether to include a BarlowTwins training module"),
+    features:BinfernoFeatures,
+    training:BinfernoTraining,
+    clustering:BinfernoClustering,
 ):
-    # Build Features
-    feature_module = features.build_feature_modules(kmer, corgi, coverage)
-    
     # Run Training
-    training_module = training.build_training_modules(simclr, barlowtwins)
-    results = training_module(fasta, bam, feature_module)
+    results = training(fasta, bam, features)
 
     # Run clustering
-    clustering_module = clustering.build_clustering_module()
-    clusters = clustering_module(results)
+    clusters = clustering(results)
 
     # TODO Output results
     
+
+def main():
+    tyro.cli(binferno)

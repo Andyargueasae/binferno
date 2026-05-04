@@ -1,12 +1,12 @@
-from abc import ABC
-from pathlib import Path
+from pydantic import BaseModel
 
 import torch
 
-class BaseFeatures(ABC):
+class BaseFeatures(BaseModel):
     def __call__(
-        fasta:Path,
-        bam:Path,
+        self,
+        seq:str,
+        coverage:int,
     ) -> torch.Tensor:
         raise NotImplementedError()
 

@@ -1,10 +1,10 @@
-from abc import ABC
+from pydantic import BaseModel
 from pathlib import Path
 from ..features import BaseFeatures
 
 import torch
 
-class BaseTraining(ABC):
+class BaseTraining(BaseModel):
     def __call__(
         self,
         fasta:Path,

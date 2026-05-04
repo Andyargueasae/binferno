@@ -1,17 +1,23 @@
+import torch
+
+from .base import BaseFeatures
 from .corgi import CorgiFeatures
 from .coverage import CoverageFeatures
 from .kmer import KmerFeatures
-from ..multi import MultiModule
 
 
+class BinfernoFeatures(BaseFeatures):
+    corgi: CorgiFeatures
+    kmer: KmerFeatures
+    coverage: CoverageFeatures
 
-def build_feature_modules(kmer:bool, corgi:bool, coverage:bool):
-    features = []
-    if kmer:
-        features.append(KmerFeatures())
-    if corgi:
-        features.append(CorgiFeatures())
-    if coverage:
-        features.append(CoverageFeatures())
+    def __call__(self, *args, **kwargs) -> torch.Tensor:
+        results = []
+        if self.corgi.use:
+            results.append(self.corgi(*args, **kwargs))
+        if self.kmer.use:
+            results.append(self.kmer(*args, **kwargs))
+        if self.coverage.use:
+            results.append(self.coverage(*args, **kwargs))
 
-    return MultiModule(*features)
+        return torch.cat(results, dim=1)

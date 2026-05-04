@@ -6,6 +6,8 @@ from .base import BaseTraining
 
 
 class BarlowTwinsTraining(BaseTraining):
+    use:bool = False
+
     def __call__(
         self,
         fasta:Path,
