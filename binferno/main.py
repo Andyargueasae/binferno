@@ -17,11 +17,10 @@ def main(
 ):
     # Build Features
     feature_module = features.build_feature_modules(kmer, corgi, coverage)
-    features = feature_module(fasta, bam)
     
     # Run Training
     training_module = training.build_training_modules(simclr, barlowtwins)
-    results = training_module(features)
+    results = training_module(fasta, bam, feature_module)
 
     # Run clustering
     clustering_module = clustering.build_clustering_module()
