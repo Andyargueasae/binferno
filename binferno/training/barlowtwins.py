@@ -13,8 +13,8 @@ class BarlowTwinsTraining(BaseTraining):
         feature_module:BaseFeatures,
     ) -> torch.Tensor:
         
-        # generate augmentations and get features using `feature_module`
+        # generate substring for augmentation and coverage for augmentation
         for augmentation in self.augmentations:
-            features = feature_module(fasta, bam)
+            features = feature_module(seq, coverage)
 
         raise NotImplementedError()
