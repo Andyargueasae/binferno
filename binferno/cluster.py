@@ -19,8 +19,8 @@ from sklearn.cluster._kmeans import (
     MiniBatchKMeans,
 )
 
-from utils import get_length, calculateN50, save_result
-from scripts.gen_bins_from_tsv import gen_bins as gen_bins_from_tsv
+from binferno.utils import get_length, calculateN50, save_result
+from binferno.scripts.gen_bins_from_tsv import gen_bins as gen_bins_from_tsv
 from typing import List, Optional, Union
 
 
@@ -124,9 +124,8 @@ def seed_kmeans_full(
     if not (os.path.exists(output_temp)):
         km = KMeans(
             n_clusters=bin_number,
-            n_jobs=-1,
             random_state=7,
-            algorithm="full",
+            algorithm="lloyd",
             init=functools.partial(partial_seed_init, seed_idx=seed_bacar_marker_idx),
         )
         km.fit(X_mat, sample_weight=length_weight)

@@ -30,7 +30,7 @@ class Binferno(object):
         console_hdr = logging.StreamHandler()
         console_hdr.setFormatter(formatter)
     @app.command()
-    def gen_aug(output_path: str, contigs: str, bam_dir: str, threads: int = 10, 
+    def gen_aug(output_path: str, contigs: str, bam_dir: str, threads: int = 10,
                 min_contig_length: int = 1000, n_views: int = 6, corgi_model: str=None, plastid: bool = False):
         out_augdata_path = output_path
         os.makedirs(output_path, exist_ok=True)
@@ -56,15 +56,17 @@ class Binferno(object):
     
     @app.command()
     def train(data_path: str, output_path: str, epochs: int = 200, batch_size: int = 1024, lr: float = 0.001,
-                weight_decay: float = 1e-4, out_dim: int = 128, dropout: float = 0.2,
+                weight_decay: float = 1e-4, out_dim: int = 128, dropout: float = 0.2, merge_kmer_corgi: bool=False,
                 emb_szs: int = 2048, n_layers: int = 3, emb_szs_forcov: int = 2048, out_dim_forcov: int = 128,
                 n_layers_forcov: int = 3, log_every_n_steps: int=20, temperature: float = 0.1, n_views: int=6,
-                fp16_precision: bool = False, cov_meannormalize: bool = True, cov_maxnormalize: bool = False,
+                fp16_precision: bool = False, cov_meannormalize: bool = False, cov_minmaxnormalize: bool = True,
                 cov_standardization: bool = False, corgi_l2_normalize: bool = True, threads: int = 10, early_stop: bool = False,
                 workers: int = 4, notuseaug0: bool = False, addvars: bool = False, vars_sqrt: bool = False, 
-                add_model_for_coverage: bool = False):
+                add_model_for_coverage: bool = False, plastid: bool = False):
         # training function for COMEBin.
         # resume the logger created from gen_aug.
+        if not os.path.exists(output_path):
+            os.makedirs(output_path, exist_ok=True)
         handler = logging.FileHandler(os.path.join(output_path, "binferno.log"))
         logger.addHandler(handler)
         logger.info("train")
@@ -89,7 +91,7 @@ class Binferno(object):
             "n_views": n_views,
             "fp16_precision": fp16_precision,
             "cov_meannormalize": cov_meannormalize,
-            "cov_maxnormalize": cov_maxnormalize,
+            "cov_minmaxnormalize": cov_minmaxnormalize,
             "cov_standardization": cov_standardization,
             "corgi_l2_normalize": corgi_l2_normalize,
             "threads": threads,
@@ -98,20 +100,20 @@ class Binferno(object):
             "notuseaug0": notuseaug0,
             "addvars": addvars,
             "vars_sqrt": vars_sqrt,
-            "add_model_for_coverage": add_model_for_coverage
+            "add_model_for_coverage": add_model_for_coverage,
+            "merge_kmer_corgi": merge_kmer_corgi
         }
 
-        from train_CLmodel import train_CLmodel
+        from .train_CLmodel import train_CLmodel
         train_CLmodel(logger, device=None, num_threads=threads, output_path=output_path, notuseaug0=notuseaug0,
                 data=data_path,n_views=n_views, workers=workers, batch_size=batch_size, epochs=epochs, lr=lr,
-                weight_decay=weight_decay, out_dim=out_dim, dropout=dropout,
+                weight_decay=weight_decay, out_dim=out_dim, dropout_value=dropout, merge_kmer_corgi=merge_kmer_corgi,
                 emb_szs=emb_szs, n_layers=n_layers, emb_szs_forcov=emb_szs_forcov,
                 out_dim_forcov=out_dim_forcov, n_layers_forcov=n_layers_forcov,
-                log_every_n_steps=log_every_n_steps, temperature=temperature,
                 fp16_precision=fp16_precision, cov_meannormalize=cov_meannormalize,
-                cov_maxnormalize=cov_maxnormalize, cov_standardization=cov_standardization,
+                cov_minmaxnormalize=cov_minmaxnormalize, cov_standardization=cov_standardization,
                 corgi_l2_normalize=corgi_l2_normalize, early_stop=early_stop, addvars=addvars, vars_sqrt=vars_sqrt,
-                add_model_for_coverage=add_model_for_coverage, arg_dict=arg_dict)
+                add_model_for_coverage=add_model_for_coverage, args_dict=arg_dict, plastid=plastid)
         return
     
     @app.command()
@@ -121,14 +123,14 @@ class Binferno(object):
         handler = logging.FileHandler(os.path.join(output_path, "binferno.log"))
         logger.addHandler(handler)
         logger.info("binning")
-        from utils import gen_seed
-        from cluster import cluster
+        from binferno.utils import gen_seed
+        from binferno.cluster import cluster
         if plastid:
             _ = gen_seed(
                 logger,
                 contig_path,
                 num_threads,
-                contig_len,
+                contig_length_threshold=1001,
                 marker_name="pltd_marker",
                 quarter="2quarter",
             )
@@ -137,9 +139,9 @@ class Binferno(object):
                 logger,
                 contig_path,
                 num_threads,
-                contig_len,
+                contig_length_threshold=1001,
                 marker_name="bacar_marker",
-                quarter="4quarter",
+                quarter="2quarter",
             )
         cluster(logger, emb_file=emb_file, seed_file=seed_file, output_path=output_path, contig_file=contig_path, contig_len=contig_len, 
             not_l2normaize=not_l2normalize, cluster_num=None, num_threads=num_threads)
@@ -148,13 +150,13 @@ class Binferno(object):
     @app.command()
     def get_results(contig_file: str, output_path: str, num_threads: int = 10, 
             bac_mg_table: str = None, ar_mg_table: str = None, pltd_mg_table: str = None, 
-            plastid: bool = False, min_binsize: int=200000, checkm_database: str = None, contig_len: int = 1000):
+            plastid: bool = False, min_binsize: int=200000, checkm_database: str = None, contig_len: int = 1001):
         # resume the logger first.
         handler = logging.FileHandler(os.path.join(output_path, "binferno.log"))
         logger.addHandler(handler)
         logger.info("Retrieving results")
-        from utils import gen_seed
-        from get_final_result import run_get_final_result
+        from binferno.utils import gen_seed
+        from binferno.get_final_result import run_get_final_result
 
         if plastid:
             seed_num = gen_seed(
@@ -176,16 +178,16 @@ class Binferno(object):
             )
 
         run_get_final_result(
-            logger, bac_mg_table,
-            ar_mg_table,
-            pltd_mg_table,
-            checkm_database,
-            contig_file,
-            plastid,
-            output_path,
-            min_binsize,
-            seed_num, 
-            num_threads,
+            logger, bac_mg_table=bac_mg_table,
+            ar_mg_table=ar_mg_table,
+            pltd_mg_table=pltd_mg_table,
+            checkm_database=checkm_database,
+            contig_file=contig_file,
+            plastid=plastid,
+            output_path=output_path,
+            minbinsize=min_binsize,
+            seed_num=seed_num, 
+            num_threads=num_threads,
             ignore_kmeans_res=True)
 
         return

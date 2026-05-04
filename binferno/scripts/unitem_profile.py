@@ -28,7 +28,7 @@ from collections import defaultdict
 
 from biolib.external.execute import check_on_path
 
-from scripts.unitem_defaults import *
+from binferno.scripts.unitem_defaults import *
 from biolib.common import make_sure_path_exists, check_dir_exists
 
 # add

@@ -10,7 +10,7 @@ from collections import defaultdict
 from checkm.defaultValues import DefaultValues
 from checkm.markerSets import MarkerSetParser, BinMarkerSets
 
-from scripts.unitem_defaults import *
+from binferno.scripts.unitem_defaults import *
 
 """
 CHECKM_BAC_MS = 'bacteria.ms'

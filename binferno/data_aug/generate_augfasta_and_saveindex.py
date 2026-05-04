@@ -98,6 +98,7 @@ def run_gen_augfasta(logger, contig_file: str, out_augdata_path: str,
     """
     Generate augmentation fasta file and save index
     """
+    from .gen_kmer import run_gen_kmer
     num_aug = n_views - 1  # Generate several copies of augmented data
     fasta_file = contig_file
     out_path = out_augdata_path
@@ -108,9 +109,11 @@ def run_gen_augfasta(logger, contig_file: str, out_augdata_path: str,
     os.makedirs(outdir, exist_ok=True)
     out_file = outdir + '/sequences_aug0.fasta'
     shutil.copyfile(fasta_file, out_file)
+    run_gen_kmer(out_file, 0, 4)
 
     # from .gen_kmer import run_gen_kmer
     from .gen_corgi import run_corgi
+    
     embedding_path = f"{out_file.replace('.fasta', '')}.array.npy"
     if not os.path.exists(embedding_path):
         run_corgi(input_fasta=out_file, min_length=contig_len, model_path=model_path, embedding=embedding_path)
@@ -126,6 +129,6 @@ def run_gen_augfasta(logger, contig_file: str, out_augdata_path: str,
 
         out_file = outdir + '/sequences_aug' + str(i + 1) + '.fasta'
         gen_augfasta(seqs, 'aug' + str(i + 1), out_file, p=p, contig_len=contig_len)
-        # run_gen_kmer(out_file, 0, 4)
+        run_gen_kmer(out_file, 0, 4)
         embedding_path = f"{out_file.replace('.fasta', '')}.array.npy"
-        run_corgi(input_fasta=out_file, min_length=contig_len, model_path=model_path, embedding=embedding_path)
+        run_corgi(input_fasta=out_file, min_length=0, model_path=model_path, embedding=embedding_path)

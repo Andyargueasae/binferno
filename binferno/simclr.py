@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from torch.cuda.amp import GradScaler, autocast
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
-from utils import save_config_file, accuracy, save_checkpoint
+from binferno.utils import save_config_file, accuracy, save_checkpoint
 import pandas as pd
 import numpy as np
 
@@ -24,8 +24,9 @@ class SimCLR(object):
         """
         # args = kwargs["args"]
         self.args = args_dict
+        self.device = device
         torch.set_num_threads(num_threads)
-        self.model = model.to(device)
+        self.model = model.to(self.device)
         self.optimizer = optimizer
         self.scheduler = scheduler
         self.writer = SummaryWriter(log_dir=output_path)
@@ -33,23 +34,25 @@ class SimCLR(object):
             filename=os.path.join(output_path, "training.log"),
             level=logging.DEBUG,
         )
-        self.criterion = torch.nn.CrossEntropyLoss().to(device)
+        self.criterion = torch.nn.CrossEntropyLoss().to(self.device)
         self.plastid = plastid
         self.temperature = self.args.get("temperature", temperature) if self.args else temperature
 
-    def info_nce_loss(self, features, batch_size, n_views, device):
+    def info_nce_loss(self, features, device, args_dict):
         """
         Calculate the InfoNCE loss for SimCLR.
 
         :param features: Input features.
         :return: Logits and labels for the loss.
         """
+        batch_size = args_dict.get("batch_size", 1024)
+        n_views = args_dict.get("n_views", 6)
         labels = torch.cat(
             [torch.arange(batch_size) for i in range(n_views)],
             dim=0,
         )
         labels = (labels.unsqueeze(0) == labels.unsqueeze(1)).float()
-        labels = labels.to(device)
+        labels = labels.to(self.device)
         features = F.normalize(features, dim=1)
 
         similarity_matrix = torch.matmul(features, features.T)
@@ -77,13 +80,15 @@ class SimCLR(object):
         logits = logits / self.temperature
         return logits, labels
 
-    def covmodel_info_nce_loss(self, features, batch_size, n_views, device):
+    def covmodel_info_nce_loss(self, features, device, args_dict):
         """
         Calculate the InfoNCE loss for the coverage model.
 
         :param features: Input features.
         :return: Logits and labels for the loss.
         """
+        batch_size = args_dict.get("batch_size", batch_size)
+        n_views = args_dict.get("n_views", n_views)
         labels = torch.cat(
             [torch.arange(batch_size) for i in range(n_views)],
             dim=0,
@@ -117,13 +122,15 @@ class SimCLR(object):
         logits = logits / self.temperature
         return logits, labels
 
-    def kmermodel_info_nce_loss(self, features, batch_size, n_views, device):
+    def kmermodel_info_nce_loss(self, features, device, args_dict):
         """
         Calculate the InfoNCE loss for the k-mer model.
 
         :param features: Input features.
         :return: Logits and labels for the loss.
         """
+        batch_size = args_dict.get("batch_size", batch_size)
+        n_views = args_dict.get("n_views", n_views)
         labels = torch.cat(
             [torch.arange(batch_size) for i in range(n_views)],
             dim=0,
@@ -185,7 +192,7 @@ class SimCLR(object):
 
                 with autocast(enabled=fp16_precision):
                     features = self.model(contig_features)
-                    logits, labels = self.info_nce_loss(features)
+                    logits, labels = self.info_nce_loss(features, device, self.args)
                     loss = self.criterion(logits, labels)
 
                 self.optimizer.zero_grad()
@@ -248,10 +255,11 @@ class SimCLR(object):
             outfile = output_path + "/embeddings.tsv"
             embeddings_df.to_csv(outfile, sep="\t", header=True)
 
-    def train_addpretrain(self, train_loader, data, namelist, fp16_precision, 
-              epochs, notuse_scheduler, earlystop, output_path, device,
-              addcovloss=False, lambdaloss2=1.0, lossbalance=False,
-              addkmerloss=False, lambdakmerloss2=1.0, pretrain_kmer_model_path="no", kmer_model_path="empty"):
+    def train_addpretrain(self, train_loader, data, namelist, fp16_precision=False, 
+              epochs=200, notuse_scheduler=False, earlystop=False, output_path=None, device="cuda",
+              addcovloss=False, lambdaloss2=1.0, lossbalance=False, merge_kmer_corgi=False,
+              addkmerloss=False, lambdakmerloss2=1.0, pretrain_kmer_model_path="no", kmer_model_path="empty",
+              kmer_dim=136):
         """
         Train the SimCLR model with an additional pre-trained k-mer model.
 
@@ -268,10 +276,7 @@ class SimCLR(object):
         logging.info(f"Start SimCLR training for {epochs} epochs.")
         # logging.info(f"Training with cpu: {args.disable_cuda}.")
         if kmer_model_path == "empty":
-            if self.plastid:
-                kmer_len = 538
-            else:
-                kmer_len = 1945
+            kmer_len = kmer_dim
         else:
             kmer_len = 128
         logging.info("kmer_len:\t" + str(kmer_len) + "\n")
@@ -304,9 +309,9 @@ class SimCLR(object):
                             )
                             # print(contig_features[:2, :-kmer_len])
 
-                        logits, labels = self.info_nce_loss(features)
+                        logits, labels = self.info_nce_loss(features, device, self.args)
                         loss1 = self.criterion(logits, labels)
-                        logits2, labels2 = self.covmodel_info_nce_loss(covemb)
+                        logits2, labels2 = self.covmodel_info_nce_loss(covemb, device, self.args)
                         loss2 = self.criterion(logits2, labels2)
                         if lossbalance:
                             if epoch_counter == 0:
@@ -322,11 +327,11 @@ class SimCLR(object):
                         # print(len(features[0]))
                         # print(len(covemb[0]))
                         # print(len(kmeremb[0]))
-                        logits, labels = self.info_nce_loss(features)
+                        logits, labels = self.info_nce_loss(features, device, self.args)
                         loss1 = self.criterion(logits, labels)
-                        logits2, labels2 = self.covmodel_info_nce_loss(covemb)
+                        logits2, labels2 = self.covmodel_info_nce_loss(covemb, device, self.args)
                         loss2 = self.criterion(logits2, labels2)
-                        logits3, labels3 = self.kmermodel_info_nce_loss(kmeremb)
+                        logits3, labels3 = self.kmermodel_info_nce_loss(kmeremb, device, self.args)
                         loss3 = self.criterion(logits3, labels3)
                         loss = (
                             loss1
@@ -348,7 +353,7 @@ class SimCLR(object):
                                 contig_features[:, :-kmer_len],
                             )
                             # print(contig_features[:2, :-kmer_len])
-                        logits, labels = self.info_nce_loss(features)
+                        logits, labels = self.info_nce_loss(features, device, self.args)
                         loss = self.criterion(logits, labels)
 
                 self.optimizer.zero_grad()
@@ -478,7 +483,7 @@ class SimCLR(object):
 
                 with autocast(enabled=fp16_precision):
                     features = self.model(contig_features[:, :-128])
-                    logits, labels = self.info_nce_loss(features)
+                    logits, labels = self.info_nce_loss(features, device, self.args)
                     loss = self.criterion(logits, labels)
 
                 self.optimizer.zero_grad()

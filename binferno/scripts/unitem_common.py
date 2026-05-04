@@ -8,12 +8,12 @@ import os
 import ast
 from collections import defaultdict
 
-import scripts.seq_io as seq_io
+import binferno.scripts.seq_io as seq_io
 import biolib.seq_tk as seq_tk
 
 from checkm.defaultValues import DefaultValues
 
-from scripts.unitem_defaults import *
+from binferno.scripts.unitem_defaults import *
 
 
 def calculateN50L50M50(seqs):

@@ -230,9 +230,9 @@ def gen_seed(
 
     hmmExeURL = "hmmsearch"
     markerExeURL = os.path.join(
-        os.getcwd(), "../auxiliary", "test_getmarker_" + quarter + ".pl"
+        os.getcwd(), "auxiliary", "test_getmarker_" + quarter + ".pl"
     )
-    markerURL = os.path.join(os.getcwd(), "../auxiliary", marker_name + ".hmm")
+    markerURL = os.path.join(os.getcwd(), "auxiliary", marker_name + ".hmm")
     seedURL = (
         contig_file
         + "."
@@ -282,6 +282,23 @@ def gen_seed(
                 + hmmResultURL
                 + ".err"
             )
+            if marker_name == "pltd_marker":
+                hmmCmd = (
+                    hmmExeURL
+                    + " --domtblout "
+                    + hmmResultURL
+                    + " -E 1e-10 --cpu "
+                    + str(threads)
+                    + " "
+                    + markerURL
+                    + " "
+                    + fragResultURL
+                    + " 1>"
+                    + hmmResultURL
+                    + ".out 2>"
+                    + hmmResultURL
+                    + ".err"
+                )
             logger.info("exec cmd: " + hmmCmd)
             os.system(hmmCmd)
 
