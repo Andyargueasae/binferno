@@ -3,8 +3,6 @@ from .base import BaseFeatures
 
 
 class CorgiFeatures(BaseFeatures):
-    use:bool = True
-
     def __call__(
         self,
         seq:str,

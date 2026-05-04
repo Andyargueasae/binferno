@@ -3,9 +3,7 @@ import numpy as np
 
 from .base import BaseClustering
 
-class LeidenClustering(BaseClustering):
-    use:bool = True
-    
+class LeidenClustering(BaseClustering):    
     def __call__(
         self,
         training_results:torch.Tensor,

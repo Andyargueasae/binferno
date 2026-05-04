@@ -6,7 +6,6 @@ from ..features import BaseFeatures
 
 
 class SimCLRTraining(BaseTraining):
-    use:bool = True
     temperature:float = 0.15
     
     def __call__(

@@ -2,9 +2,7 @@ import torch
 from .base import BaseFeatures
 
 
-class KmerFeatures(BaseFeatures):
-    use:bool = True
-    
+class KmerFeatures(BaseFeatures):    
     def __call__(
         self,
         fasta,
