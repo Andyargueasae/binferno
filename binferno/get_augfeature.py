@@ -67,7 +67,7 @@ def get_Corgi_coverage(
     vars_sqrt: bool = False,
     corgi_l2_normalize: bool = False,
     kmer_l2_normalize: bool = True,
-    merge_kmer_corgi: bool=False
+    merge_kmer_corgi: bool = False,
 ):
     """
     Get the coverage features and CORGI generated features (length 538).
@@ -83,10 +83,12 @@ def get_Corgi_coverage(
         corgi_file = glob.glob(data_path + "aug" + str(view) + "/*.npy")[0]
         corgi_index = glob.glob(data_path + "aug" + str(view) + "/*.index")[0]
         covHeader = pd.read_csv(cov_file, sep="\t", nrows=1)
-        shuffled_covMat = pd.read_csv(cov_file, 
-                                      sep="\t", 
-                                      usecols=range(1, covHeader.shape[1])).values
-        shuffled_namelist = pd.read_csv(cov_file, sep="\t", usecols=range(1)).values[:, 0]
+        shuffled_covMat = pd.read_csv(
+            cov_file, sep="\t", usecols=range(1, covHeader.shape[1])
+        ).values
+        shuffled_namelist = pd.read_csv(cov_file, sep="\t", usecols=range(1)).values[
+            :, 0
+        ]
         covIdxArr = np.empty(len(mapObj), dtype=np.int32)
         for contigIdx in range(len(shuffled_namelist)):
             if shuffled_namelist[contigIdx].split("_aug")[0] in mapObj:
@@ -96,19 +98,21 @@ def get_Corgi_coverage(
 
         covMat = shuffled_covMat[covIdxArr]
 
-
         com_file = data_path + "aug" + str(view) + "/kmer_4_f0.csv"
         compositHeader = pd.read_csv(com_file, sep=",", nrows=1)
-        shuffled_compositMat = pd.read_csv(com_file, 
-                                           sep=",", 
-                                           usecols=range(1, compositHeader.shape[1])).values
-        shuffled_namelist = pd.read_csv(com_file, sep=",", usecols=range(1)).values[:, 0]
+        shuffled_compositMat = pd.read_csv(
+            com_file, sep=",", usecols=range(1, compositHeader.shape[1])
+        ).values
+        shuffled_namelist = pd.read_csv(com_file, sep=",", usecols=range(1)).values[
+            :, 0
+        ]
         covIdxArr = np.empty(len(mapObj), dtype=np.int32)
         for contigIdx in range(len(shuffled_namelist)):
             if shuffled_namelist[contigIdx].split("_aug")[0] in mapObj:
-                covIdxArr[mapObj[shuffled_namelist[contigIdx].split("_aug")[0]]] = (contigIdx)
+                covIdxArr[mapObj[shuffled_namelist[contigIdx].split("_aug")[0]]] = (
+                    contigIdx
+                )
         compositMat = shuffled_compositMat[covIdxArr]
-
 
         corgi_emb, corgi_index = read_embeddings(corgi_file, corgi_index, merge=True)
         shuffled_corgiMat = corgi_emb
@@ -118,25 +122,27 @@ def get_Corgi_coverage(
         covIdxArr = np.empty(len(mapObj), dtype=np.int32)
         for contigIdx in range(len(shuffled_namelist)):
             if shuffled_namelist[contigIdx].split("_aug")[0] in mapObj:
-                covIdxArr[mapObj[shuffled_namelist[contigIdx].split("_aug")[0]]] = (contigIdx)
+                covIdxArr[mapObj[shuffled_namelist[contigIdx].split("_aug")[0]]] = (
+                    contigIdx
+                )
         corgiMat = shuffled_corgiMat[covIdxArr]
-
 
         if addvars:
             vars_file = data_path + "aug" + str(view) + "_datacoverage_var.tsv"
             varsHeader = pd.read_csv(vars_file, sep="\t", nrows=1)
-            shuffled_varsMat = pd.read_csv(vars_file, 
-                                           sep="\t", 
-                                           usecols=range(1, varsHeader.shape[1])).values
-            shuffled_namelist = pd.read_csv(vars_file, 
-                                            sep="\t", 
-                                            usecols=range(1)).values[:, 0]
+            shuffled_varsMat = pd.read_csv(
+                vars_file, sep="\t", usecols=range(1, varsHeader.shape[1])
+            ).values
+            shuffled_namelist = pd.read_csv(
+                vars_file, sep="\t", usecols=range(1)
+            ).values[:, 0]
             covIdxArr = np.empty(len(mapObj), dtype=np.int32)
             for contigIdx in range(len(shuffled_namelist)):
                 if shuffled_namelist[contigIdx].split("_aug")[0] in mapObj:
-                    covIdxArr[mapObj[shuffled_namelist[contigIdx].split("_aug")[0]]] = (contigIdx)
+                    covIdxArr[mapObj[shuffled_namelist[contigIdx].split("_aug")[0]]] = (
+                        contigIdx
+                    )
             varsMat = shuffled_varsMat[covIdxArr]
-
 
         if view == 0:
             covMats = covMat
@@ -148,7 +154,7 @@ def get_Corgi_coverage(
         else:
             covMats = np.vstack((covMats, covMat))
             corgiMats = np.vstack((corgiMats, corgiMat))
-            if merge_kmer_corgi:    
+            if merge_kmer_corgi:
                 compositMats = np.vstack((compositMats, compositMat))
             if addvars:
                 varsMats = np.vstack((varsMats, varsMat))
@@ -422,7 +428,7 @@ def GetCorgiContrastiveDataset(
     addvars: bool = False,
     vars_sqrt: bool = False,
     corgi_l2_normalize: bool = False,
-    merge_kmer_corgi: bool = False
+    merge_kmer_corgi: bool = False,
 ):
     """
     data_path: str, n_views: int = 2,
@@ -443,6 +449,6 @@ def GetCorgiContrastiveDataset(
         addvars=addvars,
         vars_sqrt=vars_sqrt,
         corgi_l2_normalize=corgi_l2_normalize,
-        merge_kmer_corgi=merge_kmer_corgi
+        merge_kmer_corgi=merge_kmer_corgi,
     )
     return dataset, namelist

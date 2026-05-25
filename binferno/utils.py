@@ -2,10 +2,11 @@ import gzip
 from Bio import SeqIO
 import mimetypes
 import os
+import subprocess
 import shutil
 import pandas as pd
 import numpy as np
-
+import pyfastx
 import torch
 import yaml
 import sys
@@ -79,20 +80,17 @@ def save_result(result, filepath, namelist):
         f.write(namelist[contigIdx] + "\t" + str(result[contigIdx].item(0)) + "\n")
     f.close()
 
+def calc_N50(contigs: str) -> int:
+    seq_record = pyfastx.Fastx(contigs)
+    lengths = sorted([len(record) for _, record in seq_record], reverse=True)
+    total_length = sum(lengths)
+    cumulative_length = 0
+    for length in lengths:
+        cumulative_length += length
+        if cumulative_length >= total_length / 2:
+            return length
+    return 0
 
-def calculateN50(seqLens):
-    thresholdN50 = sum(seqLens) / 2.0
-
-    seqLens.sort(reverse=True)
-
-    testSum = 0
-    N50 = 0
-    for seqLen in seqLens:
-        testSum += seqLen
-        if testSum >= thresholdN50:
-            N50 = seqLen
-            break
-    return N50
 
 
 def get_kmer_coverage_aug0(data_path):
@@ -230,9 +228,11 @@ def gen_seed(
 
     hmmExeURL = "hmmsearch"
     markerExeURL = os.path.join(
-        os.getcwd(), "auxiliary", "test_getmarker_" + quarter + ".pl"
+        os.path.dirname(__file__), "auxiliary", "test_getmarker_" + quarter + ".pl"
     )
-    markerURL = os.path.join(os.getcwd(), "auxiliary", marker_name + ".hmm")
+    markerURL = os.path.join(
+        os.path.dirname(__file__), "auxiliary", marker_name + ".hmm"
+    )
     seedURL = (
         contig_file
         + "."
@@ -262,7 +262,7 @@ def gen_seed(
             + ".frag.err"
         )
         logger.info("exec cmd: " + fragCmd)
-        os.system(fragCmd)
+        subprocess.run(fragCmd, shell=True, check=True)
 
     if os.path.exists(fragResultURL):
         if not (os.path.exists(hmmResultURL)):
@@ -270,7 +270,7 @@ def gen_seed(
                 hmmExeURL
                 + " --domtblout "
                 + hmmResultURL
-                + " --cut_tc --cpu "
+                + " -E 1e-10 --cpu "
                 + str(threads)
                 + " "
                 + markerURL
@@ -300,7 +300,7 @@ def gen_seed(
                     + ".err"
                 )
             logger.info("exec cmd: " + hmmCmd)
-            os.system(hmmCmd)
+            subprocess.run(hmmCmd, shell=True, check=True)
 
         if os.path.exists(hmmResultURL):
             if not (os.path.exists(seedURL)):
@@ -316,7 +316,7 @@ def gen_seed(
                     + seedURL
                 )
                 logger.info("exec cmd: " + markerCmd)
-                os.system(markerCmd)
+                subprocess.run(markerCmd, shell=True, check=True)
 
             if os.path.exists(seedURL):
                 candK = file_len(seedURL)
@@ -325,8 +325,10 @@ def gen_seed(
                 candK = 0
         else:
             logger.info("Hmmsearch failed! Not exist: " + hmmResultURL)
+            os.remove(hmmResultURL)
             sys.exit()
     else:
         logger.info("FragGeneScan failed! Not exist: " + fragResultURL)
+        os.remove(fragResultURL)
         sys.exit()
     return candK

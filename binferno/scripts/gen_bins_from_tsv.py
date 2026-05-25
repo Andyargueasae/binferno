@@ -11,12 +11,12 @@ def gen_bins(fastafile, resultfile, outputdir):
     print("Processing file:\t{}".format(fastafile))
     sequences = {}
     if fastafile.endswith("gz"):
-        with gzip.open(fastafile, 'r') as f:
+        with gzip.open(fastafile, "r") as f:
             for line in f:
                 line = str(line, encoding="utf-8")
                 if line.startswith(">"):
                     if " " in line:
-                        seq, others = line.split(' ', 1)
+                        seq, others = line.split(" ", 1)
                         sequences[seq] = ""
                     else:
                         seq = line.rstrip("\n")
@@ -24,11 +24,11 @@ def gen_bins(fastafile, resultfile, outputdir):
                 else:
                     sequences[seq] += line.rstrip("\n")
     else:
-        with open(fastafile, 'r') as f:
+        with open(fastafile, "r") as f:
             for line in f:
                 if line.startswith(">"):
                     if " " in line:
-                        seq, others = line.split(' ', 1)
+                        seq, others = line.split(" ", 1)
                         sequences[seq] = ""
                     else:
                         seq = line.rstrip("\n")
@@ -39,7 +39,7 @@ def gen_bins(fastafile, resultfile, outputdir):
     dic = {}
     with open(resultfile, "r") as f:
         for line in f:
-            contig_name, cluster_name = line.strip().split('\t')
+            contig_name, cluster_name = line.strip().split("\t")
             try:
                 dic[cluster_name].append(contig_name)
             except:
@@ -63,12 +63,3 @@ def gen_bins(fastafile, resultfile, outputdir):
                 f.write(contig_name + "\n")
                 f.write(sequence + "\n")
                 bin_name += 1
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-f", help="original fasta file")
-    parser.add_argument("-r", help="tsv version result file")
-    parser.add_argument("-o", help="output dir")
-    args = parser.parse_args()
-    gen_bins(args.f, args.r, args.o)

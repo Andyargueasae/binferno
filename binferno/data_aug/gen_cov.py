@@ -10,6 +10,7 @@ import pandas as pd
 import numpy as np
 from itertools import groupby
 
+
 ### Return error message when using multiprocessing
 def error(msg, *args):
     return multiprocessing.get_logger().error(msg, *args)
@@ -35,7 +36,7 @@ class LoggingPool(Pool):
 
 
 def _checkback(msg):
-    msg[1].info('Processed:{}'.format(msg[0]))
+    msg[1].info("Processed:{}".format(msg[0]))
 
 
 def gen_bedtools_out(bam_file: str, bam_index: int, out: str, logger):
@@ -48,19 +49,16 @@ def gen_bedtools_out(bam_file: str, bam_index: int, out: str, logger):
 
     :return: A tuple containing the path to the processed BAM file and the logger.
     """
-    logger.info('Processing `{}`'.format(bam_file))
-    bam_name = os.path.split(bam_file)[-1] + '_{}'.format(bam_index)
-    bam_depth = os.path.join(out, '{}_depth.txt'.format(bam_name))
+    logger.info("Processing `{}`".format(bam_file))
+    bam_name = os.path.split(bam_file)[-1] + "_{}".format(bam_index)
+    bam_depth = os.path.join(out, "{}_depth.txt".format(bam_name))
 
-    with open(bam_depth, 'wb') as bedtools_out:
+    with open(bam_depth, "wb") as bedtools_out:
         subprocess.check_call(
-            ['bedtools', 'genomecov',
-             '-bga',
-             '-ibam', bam_file],
-            stdout=bedtools_out)
+            ["bedtools", "genomecov", "-bga", "-ibam", bam_file], stdout=bedtools_out
+        )
 
     return (bam_file, logger)
-
 
 
 def run_gen_bedtools_out(bam_file_path: str, out: str, logger, num_process: int = 10):
@@ -76,13 +74,15 @@ def run_gen_bedtools_out(bam_file_path: str, out: str, logger, num_process: int 
     filenames = os.listdir(bam_file_path)
     namelist = []
     for filename in filenames:
-        if filename.endswith('.bam'):
+        if filename.endswith(".bam"):
             namelist.append(filename)
 
     namelist.sort()
 
     if all(os.path.exists(os.path.join(out, f"{name}_depth.txt")) for name in namelist):
-        logger.info("All bedtools output files already exist. Skipping bedtools coverage generation.")
+        logger.info(
+            "All bedtools output files already exist. Skipping bedtools coverage generation."
+        )
         return
 
     os.makedirs(out, exist_ok=True)
@@ -95,15 +95,22 @@ def run_gen_bedtools_out(bam_file_path: str, out: str, logger, num_process: int 
         pool.apply_async(
             gen_bedtools_out,
             args=(bam_file, bam_index, out, logger),
-            callback=_checkback)
+            callback=_checkback,
+        )
 
     pool.close()
     pool.join()
 
 
 # modifed from https://github.com/BigDataBiology/SemiBin/blob/3bad22c58e710d8a5455f7411bc8d4202d557c61/SemiBin/generate_coverage.py#L5
-def calculate_coverage_samplebyindex(depth_file: str, augpredix: str, aug_seq_info_dict: dict, logger, edge: int = 0,
-                                     contig_threshold: int = 1000):
+def calculate_coverage_samplebyindex(
+    depth_file: str,
+    augpredix: str,
+    aug_seq_info_dict: dict,
+    logger,
+    edge: int = 0,
+    contig_threshold: int = 1000,
+):
     """
     Calculate coverage from a position depth file for a set of contigs by index.
 
@@ -118,10 +125,12 @@ def calculate_coverage_samplebyindex(depth_file: str, augpredix: str, aug_seq_in
     contigs = []
     mean_coverage = []
 
-    for contig_name, lines in groupby(open(depth_file), lambda ell: ell.split('\t', 1)[0]):
+    for contig_name, lines in groupby(
+        open(depth_file), lambda ell: ell.split("\t", 1)[0]
+    ):
         depth_value = []
         for line in lines:
-            line_split = line.strip().split('\t')
+            line_split = line.strip().split("\t")
             length = int(float(line_split[2])) - int(float(line_split[1]))
             value = int(float(line_split[3]))
             depth_value.extend([value] * length)
@@ -133,25 +142,35 @@ def calculate_coverage_samplebyindex(depth_file: str, augpredix: str, aug_seq_in
         start = aug_seq_info_dict[contig_name][0]
         end = aug_seq_info_dict[contig_name][1]
 
-        depth_value_ = depth_value[start + edge:end + 1 - edge]
+        depth_value_ = depth_value[start + edge : end + 1 - edge]
 
         mean = np.mean(depth_value_)
         mean_coverage.append(mean)
         contigs.append(contig_name)
 
     contig_cov = pd.DataFrame(
-        {'{0}_cov'.format(depth_file): mean_coverage,
-         }, index=contigs)
+        {
+            "{0}_cov".format(depth_file): mean_coverage,
+        },
+        index=contigs,
+    )
 
-    with atomic_write(depth_file + '_' + augpredix + '_data_cov.csv', overwrite=True) as ofile:
-        contig_cov.to_csv(ofile, sep='\t')
+    with atomic_write(
+        depth_file + "_" + augpredix + "_data_cov.csv", overwrite=True
+    ) as ofile:
+        contig_cov.to_csv(ofile, sep="\t")
 
     return (depth_file, logger)
 
 
-def calculate_coverage(depth_file: str, logger, edge: int = 0,
-                       contig_threshold: int = 1000, sep: str = None,
-                       contig_threshold_dict: dict = None):
+def calculate_coverage(
+    depth_file: str,
+    logger,
+    edge: int = 0,
+    contig_threshold: int = 1000,
+    sep: str = None,
+    contig_threshold_dict: dict = None,
+):
     """
     Calculate coverage based on a position depth file generated from mosdepth or bedtools genomecov.
 
@@ -166,10 +185,12 @@ def calculate_coverage(depth_file: str, logger, edge: int = 0,
     contigs = []
     mean_coverage = []
 
-    for contig_name, lines in groupby(open(depth_file), lambda ell: ell.split('\t', 1)[0]):
+    for contig_name, lines in groupby(
+        open(depth_file), lambda ell: ell.split("\t", 1)[0]
+    ):
         depth_value = []
         for line in lines:
-            line_split = line.strip().split('\t')
+            line_split = line.strip().split("\t")
             length = int(float(line_split[2])) - int(float(line_split[1]))
             value = int(float(line_split[3]))
             depth_value.extend([value] * length)
@@ -190,13 +211,17 @@ def calculate_coverage(depth_file: str, logger, edge: int = 0,
         contigs.append(contig_name)
 
     contig_cov = pd.DataFrame(
-        {'{0}_cov'.format(depth_file): mean_coverage,
-         }, index=contigs)
+        {
+            "{0}_cov".format(depth_file): mean_coverage,
+        },
+        index=contigs,
+    )
 
-    with atomic_write(depth_file + '_aug0_data_cov.csv', overwrite=True) as ofile:
-        contig_cov.to_csv(ofile, sep='\t')
+    with atomic_write(depth_file + "_aug0_data_cov.csv", overwrite=True) as ofile:
+        contig_cov.to_csv(ofile, sep="\t")
 
     return (depth_file, logger)
+
 
 def modify_depth_file(depth_file: str, contig_ids: list):
     """
@@ -207,18 +232,30 @@ def modify_depth_file(depth_file: str, contig_ids: list):
 
     :return: None
     """
-    with open(depth_file, 'r') as infile, atomic_write(depth_file, overwrite=True) as outfile:
+    with (
+        open(depth_file, "r") as infile,
+        atomic_write(depth_file, overwrite=True) as outfile,
+    ):
         for line in infile:
-            if line.startswith('#'):
+            if line.startswith("#"):
                 outfile.write(line)
                 continue
-            contig_id = line.split('\t')[0]
+            contig_id = line.split("\t")[0]
             if contig_id in contig_ids:
                 outfile.write(line)
 
 
-def gen_cov_from_bedout(logger, out_path: str, depth_file_path: str, contig_ids: list=None,
-                        num_process: int = 10, num_aug: int = 5, edge: int = 0, contig_len: int = 1000, plastid: bool=False):
+def gen_cov_from_bedout(
+    logger,
+    out_path: str,
+    depth_file_path: str,
+    contig_ids: list = None,
+    num_process: int = 10,
+    num_aug: int = 5,
+    edge: int = 0,
+    contig_len: int = 1000,
+    plastid: bool = False,
+):
     """
     Generate coverage data from bedtools output for original and augmented sequences.
 
@@ -235,7 +272,7 @@ def gen_cov_from_bedout(logger, out_path: str, depth_file_path: str, contig_ids:
     filenames = os.listdir(depth_file_path)
     namelist = []
     for filename in filenames:
-        if filename.endswith('_depth.txt'):
+        if filename.endswith("_depth.txt"):
             namelist.append(filename)
 
     namelist.sort()
@@ -249,27 +286,29 @@ def gen_cov_from_bedout(logger, out_path: str, depth_file_path: str, contig_ids:
         pool.apply_async(
             calculate_coverage,
             args=(depth_file, logger, edge, contig_len),
-            callback=_checkback)
+            callback=_checkback,
+        )
 
     pool.close()
     pool.join()
 
     # merge coverage files
     for nameid in range(len(namelist)):
-        cov_file = depth_file_path + namelist[
-            nameid] + '_aug0_data_cov.csv'
-        res_mat = pd.read_csv(cov_file, sep='\t', header=0, index_col=0)
+        cov_file = depth_file_path + namelist[nameid] + "_aug0_data_cov.csv"
+        res_mat = pd.read_csv(cov_file, sep="\t", header=0, index_col=0)
         if nameid == 0:
             joined = res_mat
         else:
             joined = res_mat.join(joined, how="inner")
 
-    outfile = out_path + 'aug0_datacoverage_mean.tsv'
-    joined.to_csv(outfile, sep='\t', header=True)
+    outfile = out_path + "aug0_datacoverage_mean.tsv"
+    joined.to_csv(outfile, sep="\t", header=True)
 
     for i in range(num_aug):
-        outdir = out_path + 'aug' + str(i + 1)
-        aug_seq_info_out_file = outdir + '/sequences_aug' + str(i + 1) + '.fasta' + '.aug_seq_info.tsv'
+        outdir = out_path + "aug" + str(i + 1)
+        aug_seq_info_out_file = (
+            outdir + "/sequences_aug" + str(i + 1) + ".fasta" + ".aug_seq_info.tsv"
+        )
         aug_seq_info_dict = read_aug_seq_info(aug_seq_info_out_file)
 
         # num_process = 40
@@ -283,35 +322,49 @@ def gen_cov_from_bedout(logger, out_path: str, depth_file_path: str, contig_ids:
                 modify_depth_file(depth_file, contig_ids)
             pool.apply_async(
                 calculate_coverage_samplebyindex,
-                args=(depth_file, 'aug' + str(i + 1), aug_seq_info_dict, logger, edge, contig_len),
-                callback=_checkback)
+                args=(
+                    depth_file,
+                    "aug" + str(i + 1),
+                    aug_seq_info_dict,
+                    logger,
+                    edge,
+                    contig_len,
+                ),
+                callback=_checkback,
+            )
 
         pool.close()
         pool.join()
 
         # merge coverage files
         for nameid in range(len(namelist)):
-            cov_file = depth_file_path + namelist[
-                nameid] + '_aug' + str(i + 1) + '_data_cov.csv'
+            cov_file = (
+                depth_file_path
+                + namelist[nameid]
+                + "_aug"
+                + str(i + 1)
+                + "_data_cov.csv"
+            )
 
-            res_mat = pd.read_csv(cov_file, sep='\t', header=0, index_col=0)
+            res_mat = pd.read_csv(cov_file, sep="\t", header=0, index_col=0)
             if nameid == 0:
                 joined = res_mat
             else:
                 joined = res_mat.join(joined, how="inner")
 
-        logger.info("Finish calculating coverage for aug_"+str(i+1))
-        outfile = out_path + 'aug' + str(i + 1) + '_datacoverage_mean.tsv'
-        joined.to_csv(outfile, sep='\t', header=True)
+        logger.info("Finish calculating coverage for aug_" + str(i + 1))
+        outfile = out_path + "aug" + str(i + 1) + "_datacoverage_mean.tsv"
+        joined.to_csv(outfile, sep="\t", header=True)
 
 
 def read_aug_seq_info(aug_seq_info_out_file):
-    aug_seq_info = pd.read_csv(aug_seq_info_out_file, sep='\t', header=0).values[:]
+    aug_seq_info = pd.read_csv(aug_seq_info_out_file, sep="\t", header=0).values[:]
     aug_seq_info_dict = {}
     for i in range(len(aug_seq_info)):
         aug_seq_info_dict[aug_seq_info[i][0]] = [aug_seq_info[i][1], aug_seq_info[i][2]]
 
     return aug_seq_info_dict
+
 
 def get_plastid_ids(contig_file):
     """
@@ -322,27 +375,46 @@ def get_plastid_ids(contig_file):
     :return: List of plastid contig IDs (list).
     """
     plastid_contigs = []
-    with open(contig_file, 'r') as f:
+    with open(contig_file, "r") as f:
         for line in f:
-            if line.startswith('>'):
-                plastid_contigs.append(line.strip().split()[0][1:])  # Remove '>' and take the ID
+            if line.startswith(">"):
+                plastid_contigs.append(
+                    line.strip().split()[0][1:]
+                )  # Remove '>' and take the ID
     return plastid_contigs
 
-def run_gen_cov(logger, out_augdata_path: str, contigs: str, bam_file_path: str,
-                threads: int = 10, min_contig_length: int = 1000, n_views: int = 6, plastid: bool = False):
-    
+
+def run_gen_cov(
+    logger,
+    out_augdata_path: str,
+    contigs: str,
+    bam_file_path: str,
+    threads: int = 10,
+    min_contig_length: int = 1000,
+    n_views: int = 6,
+    plastid: bool = False,
+):
+
     logger.info("Generate coverage files from bam files.")
 
     bam_file_path = bam_file_path
-    if not bam_file_path.endswith('/'):
-        bam_file_path = bam_file_path + '/'
+    if not bam_file_path.endswith("/"):
+        bam_file_path = bam_file_path + "/"
 
-    if not out_augdata_path.endswith('/'):
-        out_augdata_path = out_augdata_path + '/'
+    if not out_augdata_path.endswith("/"):
+        out_augdata_path = out_augdata_path + "/"
 
-    out = out_augdata_path + 'depth/'
-    run_gen_bedtools_out(bam_file_path, out, logger,num_process=threads)
-    
-    plastid_contig_ids = get_plastid_ids(contigs) 
-    gen_cov_from_bedout(logger, out_augdata_path, out, num_aug=n_views-1, contig_len=min_contig_length,
-                        contig_ids=plastid_contig_ids, num_process=threads, plastid=plastid)
+    out = out_augdata_path + "depth/"
+    run_gen_bedtools_out(bam_file_path, out, logger, num_process=threads)
+
+    plastid_contig_ids = get_plastid_ids(contigs)
+    gen_cov_from_bedout(
+        logger,
+        out_augdata_path,
+        out,
+        num_aug=n_views - 1,
+        contig_len=min_contig_length,
+        contig_ids=plastid_contig_ids,
+        num_process=threads,
+        plastid=plastid,
+    )

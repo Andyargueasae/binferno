@@ -16,7 +16,7 @@ def get_inputsequences(fastx_file: str):
     :return: A dictionary where sequence IDs are keys and sequences are values.
     """
     file_type = mimetypes.guess_type(fastx_file)[1]
-    if file_type == 'gzip':
+    if file_type == "gzip":
         f = gzip.open(fastx_file, "rt")
     elif not file_type:
         f = open(fastx_file, "rt")
@@ -27,7 +27,7 @@ def get_inputsequences(fastx_file: str):
         return seqs
     file_format = None
     line = f.readline()
-    if line.startswith('@'):
+    if line.startswith("@"):
         file_format = "fastq"
     elif line.startswith(">"):
         file_format = "fasta"
@@ -41,8 +41,13 @@ def get_inputsequences(fastx_file: str):
     return seqs
 
 
-def gen_augfasta(seqs: Dict[str, str], augprefix: str, out_file: str,
-                 p: float = None, contig_len: int = 1000):
+def gen_augfasta(
+    seqs: Dict[str, str],
+    augprefix: str,
+    out_file: str,
+    p: float = None,
+    contig_len: int = 1000,
+):
     """
     Generate augmented sequences and save them to a FASTA file along with sequence information.
 
@@ -59,76 +64,100 @@ def gen_augfasta(seqs: Dict[str, str], augprefix: str, out_file: str,
 
     aug_seq_info = []
     if not p:
-        with open(out_file, 'w') as f:
+        with open(out_file, "w") as f:
             for seqid in seqkeys:
-                start = random.randint(0, len(seqs[seqid]) - (contig_len+1))
+                start = random.randint(0, len(seqs[seqid]) - (contig_len + 1))
                 sim_len = random.randint(contig_len, len(seqs[seqid]) - start)
                 end = start + sim_len - 1
                 # gen_seqs_dict[genome_name+"_sim_"+str(sim_count)] =seqs[seqid][start:end+1]
-                sequence = str(seqs[seqid][start:end + 1])
+                sequence = str(seqs[seqid][start : end + 1])
                 seqid_name = ">" + seqid + "_" + str(augprefix)
                 f.write(seqid_name + "\n")
                 f.write(sequence + "\n")
                 aug_seq_info.append((seqid, start, end, sim_len))
     else:
-        with open(out_file, 'w') as f:
+        with open(out_file, "w") as f:
             for seqid in seqkeys:
                 sim_len = int(p * len(seqs[seqid]))
                 start = random.randint(0, len(seqs[seqid]) - sim_len - 10)
                 end = start + sim_len - 1
                 # gen_seqs_dict[genome_name+"_sim_"+str(sim_count)] =seqs[seqid][start:end+1]
-                sequence = str(seqs[seqid][start:end + 1])
+                sequence = str(seqs[seqid][start : end + 1])
                 seqid_name = ">" + seqid + "_aug_" + str(augprefix)
                 f.write(seqid_name + "\n")
                 f.write(sequence + "\n")
                 aug_seq_info.append((seqid, start, end, sim_len))
 
-    aug_seq_info_out_file = out_file + '.aug_seq_info.tsv'
+    aug_seq_info_out_file = out_file + ".aug_seq_info.tsv"
 
-    with open(aug_seq_info_out_file, 'w') as afile:
-        afile.write('seqid\tstart\tend\tlength\n')
+    with open(aug_seq_info_out_file, "w") as afile:
+        afile.write("seqid\tstart\tend\tlength\n")
         for i in range(len(aug_seq_info)):
             afile.write(
-                aug_seq_info[i][0] + '\t' + str(aug_seq_info[i][1]) + '\t' + str(aug_seq_info[i][2]) + '\t' + str(
-                    aug_seq_info[i][3]) + '\n')
+                aug_seq_info[i][0]
+                + "\t"
+                + str(aug_seq_info[i][1])
+                + "\t"
+                + str(aug_seq_info[i][2])
+                + "\t"
+                + str(aug_seq_info[i][3])
+                + "\n"
+            )
 
 
-def run_gen_augfasta(logger, contig_file: str, out_augdata_path: str,
-                     contig_len: int = 1000, n_views: int = 6, model_path: str = None):
+def run_gen_augfasta(
+    logger,
+    contig_file: str,
+    out_augdata_path: str,
+    contig_len: int = 1000,
+    n_views: int = 6,
+    model_path: str = None,
+):
     """
     Generate augmentation fasta file and save index
     """
     from .gen_kmer import run_gen_kmer
+
     num_aug = n_views - 1  # Generate several copies of augmented data
     fasta_file = contig_file
     out_path = out_augdata_path
-    # how to 
-    outdir = out_path + '/aug0'
+    # how to
+    outdir = out_path + "/aug0"
     if os.path.exists(outdir) and len(glob.glob(out_path + "/aug*")) == n_views:
         return
     os.makedirs(outdir, exist_ok=True)
-    out_file = outdir + '/sequences_aug0.fasta'
+    out_file = outdir + "/sequences_aug0.fasta"
     shutil.copyfile(fasta_file, out_file)
     run_gen_kmer(out_file, 0, 4)
 
     # from .gen_kmer import run_gen_kmer
     from .gen_corgi import run_corgi
-    
+
     embedding_path = f"{out_file.replace('.fasta', '')}.array.npy"
     if not os.path.exists(embedding_path):
-        run_corgi(input_fasta=out_file, min_length=contig_len, model_path=model_path, embedding=embedding_path)
+        run_corgi(
+            input_fasta=out_file,
+            min_length=contig_len,
+            model_path=model_path,
+            embedding=embedding_path,
+        )
     else:
         pass
 
     for i in range(num_aug):
-        outdir = out_path + '/aug' + str(i + 1)
+        outdir = out_path + "/aug" + str(i + 1)
         os.makedirs(outdir, exist_ok=True)
-        logger.info("aug:\t" + str(i+1))
+        logger.info("aug:\t" + str(i + 1))
         p = None
         seqs = get_inputsequences(fasta_file)
 
-        out_file = outdir + '/sequences_aug' + str(i + 1) + '.fasta'
-        gen_augfasta(seqs, 'aug' + str(i + 1), out_file, p=p, contig_len=contig_len)
+        out_file = outdir + "/sequences_aug" + str(i + 1) + ".fasta"
+        gen_augfasta(seqs, "aug" + str(i + 1), out_file, p=p, contig_len=contig_len)
         run_gen_kmer(out_file, 0, 4)
         embedding_path = f"{out_file.replace('.fasta', '')}.array.npy"
-        run_corgi(input_fasta=out_file, min_length=0, model_path=model_path, embedding=embedding_path)
+        run_corgi(
+            input_fasta=out_file,
+            min_length=0,
+            model_path=model_path,
+            embedding=embedding_path,
+        )

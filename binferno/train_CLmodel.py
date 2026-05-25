@@ -5,7 +5,10 @@ import numpy as np
 import os
 import sys
 
-from binferno.get_augfeature import get_ContrastiveLearningDataset, GetCorgiContrastiveDataset
+from binferno.get_augfeature import (
+    get_ContrastiveLearningDataset,
+    GetCorgiContrastiveDataset,
+)
 from binferno.utils import get_length
 
 from binferno.models.mlp import EmbeddingNet
@@ -17,15 +20,48 @@ torch.cuda.manual_seed_all(1)
 torch.backends.cudnn.deterministic = True
 
 
-def train_CLmodel(logger, device=None, num_threads=10, output_path=None, data=None,
-                n_views=6, notuseaug0=False, cov_meannormalize=False, cov_minmaxnormalize=False,
-                cov_standardization=False, addvars=False, vars_sqrt=False, corgi_l2_normalize=True, merge_kmer_corgi=False,
-                batch_size=256, epochs=100, lr=1e-3, weight_decay=1e-6, dropout_value=0.2, fp16_precision=False,
-                emb_szs=2048, n_layers=3, out_dim=128, out_dim_forcov=128, emb_szs_forcov=2048, n_layers_forcov=3,
-                pretrain_kmer_model_path="no", not_load_kmermetric_state=False, finetunepretrainmodel=False, early_stop=False,
-                finetunelr_ratio=0.1, covmodelepochs=50, covmodel_notl2normalize=False, contig_len=1000, workers=4, 
-                add_model_for_coverage=False, plastid=False, kmer_model_path="empty", pretrain_coveragemodel=False,
-                args_dict=None):
+def train_CLmodel(
+    logger,
+    device=None,
+    num_threads=10,
+    output_path=None,
+    data=None,
+    n_views=6,
+    notuseaug0=False,
+    cov_meannormalize=False,
+    cov_minmaxnormalize=False,
+    cov_standardization=False,
+    addvars=False,
+    vars_sqrt=False,
+    corgi_l2_normalize=True,
+    merge_kmer_corgi=False,
+    batch_size=256,
+    epochs=100,
+    lr=1e-3,
+    weight_decay=1e-6,
+    dropout_value=0.2,
+    fp16_precision=False,
+    emb_szs=2048,
+    n_layers=3,
+    out_dim=128,
+    out_dim_forcov=128,
+    emb_szs_forcov=2048,
+    n_layers_forcov=3,
+    pretrain_kmer_model_path="no",
+    not_load_kmermetric_state=False,
+    finetunepretrainmodel=False,
+    early_stop=False,
+    finetunelr_ratio=0.1,
+    covmodelepochs=50,
+    covmodel_notl2normalize=False,
+    contig_len=1000,
+    workers=4,
+    add_model_for_coverage=False,
+    plastid=False,
+    kmer_model_path="empty",
+    pretrain_coveragemodel=False,
+    args_dict=None,
+):
     """
     Train the Contrastive Learning model.
     """
@@ -55,7 +91,7 @@ def train_CLmodel(logger, device=None, num_threads=10, output_path=None, data=No
         addvars=addvars,
         vars_sqrt=vars_sqrt,
         corgi_l2_normalize=corgi_l2_normalize,
-        merge_kmer_corgi=merge_kmer_corgi
+        merge_kmer_corgi=merge_kmer_corgi,
     )
 
     contig_file = data + "/aug0/sequences_aug0.fasta"
@@ -75,10 +111,7 @@ def train_CLmodel(logger, device=None, num_threads=10, output_path=None, data=No
     else:
         # train_dataset = torch.utils.data.TensorDataset(*dataset)
         train_dataset = torch.utils.data.TensorDataset(
-            *[
-                dataset[i][np.array(length_weight) >= contig_len]
-                for i in range(n_views)
-            ]
+            *[dataset[i][np.array(length_weight) >= contig_len] for i in range(n_views)]
         )
 
     train_loader = torch.utils.data.DataLoader(
@@ -115,15 +148,20 @@ def train_CLmodel(logger, device=None, num_threads=10, output_path=None, data=No
         )
 
         simclr = SimCLR(
-            model=model, optimizer=optimizer, scheduler=scheduler, args_dict=args_dict, output_path=output_path, device=device, plastid=plastid
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            args_dict=args_dict,
+            output_path=output_path,
+            device=device,
+            plastid=plastid,
         )
         simclr.train(train_loader, dataset, namelist)
 
     else:
         if pretrain_kmer_model_path != "no":
             config_file = (
-                os.path.dirname(pretrain_kmer_model_path)
-                + "/kmerMetric_config.yaml"
+                os.path.dirname(pretrain_kmer_model_path) + "/kmerMetric_config.yaml"
             )
 
             from ruamel.yaml import YAML
@@ -157,7 +195,7 @@ def train_CLmodel(logger, device=None, num_threads=10, output_path=None, data=No
             cov_dim = len(dataset[0][0]) - insize
             input_size = out_dim_forcov + 128
             print("cov_dim:\t" + str(cov_dim) + "\n")
-    
+
             emb_szs_list = [emb_szs_forcov] * n_layers_forcov
 
             cov_model = EmbeddingNet(
@@ -197,7 +235,7 @@ def train_CLmodel(logger, device=None, num_threads=10, output_path=None, data=No
                     for name, param in model.named_parameters()
                     if name not in pretrained_model_paraname
                 ]
-                
+
                 optimizer = torch.optim.AdamW(
                     [
                         {"params": params_lx},
@@ -220,10 +258,25 @@ def train_CLmodel(logger, device=None, num_threads=10, output_path=None, data=No
             )
 
             simclr = SimCLR(
-                model=model, optimizer=optimizer, scheduler=scheduler, args_dict=args_dict, output_path=output_path, device=device, plastid=plastid
+                model=model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                args_dict=args_dict,
+                output_path=output_path,
+                device=device,
+                plastid=plastid,
             )
-            simclr.train_addpretrain(train_loader, dataset, namelist, fp16_precision=fp16_precision, device=device, 
-                                     epochs=epochs, notuse_scheduler=False, earlystop=early_stop, output_path=output_path)
+            simclr.train_addpretrain(
+                train_loader,
+                dataset,
+                namelist,
+                fp16_precision=fp16_precision,
+                device=device,
+                epochs=epochs,
+                notuse_scheduler=False,
+                earlystop=early_stop,
+                output_path=output_path,
+            )
 
         else:
             if kmer_model_path == "empty":
@@ -278,7 +331,13 @@ def train_CLmodel(logger, device=None, num_threads=10, output_path=None, data=No
                 )
 
                 simclr = SimCLR(
-                    model=cov_model, optimizer=optimizer, scheduler=scheduler, args_dict=args_dict, output_path=output_path, device=device, plastid=plastid
+                    model=cov_model,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    args_dict=args_dict,
+                    output_path=output_path,
+                    device=device,
+                    plastid=plastid,
                 )
                 simclr.covmodeltrain(train_loader)
                 print(cov_model.state_dict())
@@ -307,9 +366,25 @@ def train_CLmodel(logger, device=None, num_threads=10, output_path=None, data=No
             )
 
             simclr = SimCLR(
-                model=model, optimizer=optimizer, scheduler=scheduler, args_dict=args_dict, output_path=output_path, device=device, plastid=plastid
+                model=model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                args_dict=args_dict,
+                output_path=output_path,
+                device=device,
+                plastid=plastid,
             )
-            simclr.train_addpretrain(train_loader, dataset, namelist, fp16_precision=fp16_precision, device=device, merge_kmer_corgi=merge_kmer_corgi,
-                                     epochs=epochs, notuse_scheduler=False, earlystop=early_stop, output_path=output_path, kmer_dim=(len(dataset[0][0])-cov_dim))
+            simclr.train_addpretrain(
+                train_loader,
+                dataset,
+                namelist,
+                fp16_precision=fp16_precision,
+                device=device,
+                epochs=epochs,
+                notuse_scheduler=False,
+                earlystop=early_stop,
+                output_path=output_path,
+                kmer_dim=(len(dataset[0][0]) - cov_dim),
+            )
 
     logger.info("Finish training.")

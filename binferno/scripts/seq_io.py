@@ -28,9 +28,30 @@ class InputFileError(BioLibError):
     pass
 
 
-protein_bases = {'a', 'r', 'n', 'd', 'c', 'q', 'e', 'g', 'h', 'i', 'l', 'k', 'm', 'f', 'p', 's', 't', 'w', 'y', 'v'}
-nucleotide_bases = {'a', 'c', 'g', 't'}
-insertion_bases = {'-', '.'}
+protein_bases = {
+    "a",
+    "r",
+    "n",
+    "d",
+    "c",
+    "q",
+    "e",
+    "g",
+    "h",
+    "i",
+    "l",
+    "k",
+    "m",
+    "f",
+    "p",
+    "s",
+    "t",
+    "w",
+    "y",
+    "v",
+}
+nucleotide_bases = {"a", "c", "g", "t"}
+insertion_bases = {"-", "."}
 
 
 def is_nucleotide(seq_file, req_perc=0.95, max_seqs_to_read=10):
@@ -66,7 +87,7 @@ def is_nucleotide(seq_file, req_perc=0.95, max_seqs_to_read=10):
         seq = seq.lower()
 
         nt_bases = 0
-        for c in (nucleotide_bases | {'n'} | insertion_bases):
+        for c in nucleotide_bases | {"n"} | insertion_bases:
             nt_bases += seq.count(c)
 
         if nt_bases / len(seq) >= req_perc:
@@ -112,7 +133,7 @@ def is_protein(seq_file, req_perc=0.95, max_seqs_to_read=10):
         seq = seq.lower()
 
         prot_bases = 0
-        for c in (protein_bases | {'x'} | insertion_bases):
+        for c in protein_bases | {"x"} | insertion_bases:
             prot_bases += seq.count(c)
 
         if prot_bases / len(seq) >= req_perc:
@@ -138,7 +159,7 @@ def read(seq_file):
     dict : dict[seq_id] -> seq
         Sequences indexed by sequence id.
     """
-    if seq_file.endswith(('.fq.gz', '.fastq.gz', '.fq', '.fq.gz')):
+    if seq_file.endswith((".fq.gz", ".fastq.gz", ".fq", ".fq.gz")):
         return read_fastq(seq_file)
     else:
         return read_fasta(seq_file)
@@ -161,23 +182,23 @@ def read_fasta(fasta_file, keep_annotation=False):
     """
 
     if not os.path.exists(fasta_file):
-        raise InputFileError('Input file %s does not exist.' % fasta_file)
+        raise InputFileError("Input file %s does not exist." % fasta_file)
 
     if os.stat(fasta_file).st_size == 0:
         return {}
 
     try:
         open_file = open
-        if fasta_file.endswith('.gz'):
+        if fasta_file.endswith(".gz"):
             open_file = gzip.open
 
         seqs = {}
-        for line in open_file(fasta_file, 'rt'):
+        for line in open_file(fasta_file, "rt"):
             # skip blank lines
             if not line.strip():
                 continue
 
-            if line[0] == '>':
+            if line[0] == ">":
                 if keep_annotation:
                     seq_id = line[1:-1]
                 else:
@@ -188,7 +209,7 @@ def read_fasta(fasta_file, keep_annotation=False):
                 seqs[seq_id].append(line.strip())
 
         for seq_id, seq in seqs.items():
-            seqs[seq_id] = ''.join(seq).replace(' ', '')
+            seqs[seq_id] = "".join(seq).replace(" ", "")
     except:
         print(traceback.format_exc())
         print()
@@ -213,19 +234,19 @@ def read_fastq(fastq_file):
     """
 
     if not os.path.exists(fastq_file):
-        raise InputFileError('Input file %s does not exist.' % fastq_file)
+        raise InputFileError("Input file %s does not exist." % fastq_file)
 
     if os.stat(fastq_file).st_size == 0:
         return {}
 
     try:
         open_file = open
-        if fastq_file.endswith('.gz'):
+        if fastq_file.endswith(".gz"):
             open_file = gzip.open
 
         seqs = {}
         line_num = 0
-        for line in open_file(fastq_file, 'rt'):
+        for line in open_file(fastq_file, "rt"):
             line_num += 1
 
             if line_num == 1:
@@ -273,7 +294,7 @@ def read_seq(seq_file, keep_annotation=False):
         and the annotation if keep_annotation is True.
     """
 
-    if seq_file.endswith(('.fq.gz', '.fastq.gz', '.fq', '.fq.gz')):
+    if seq_file.endswith((".fq.gz", ".fastq.gz", ".fq", ".fq.gz")):
         for rtn in read_fastq_seq(seq_file):
             yield rtn
     else:
@@ -309,37 +330,37 @@ def read_fasta_seq(fasta_file, keep_annotation=False):
     """
 
     if not os.path.exists(fasta_file):
-        raise InputFileError('Input file %s does not exist.' % fasta_file)
+        raise InputFileError("Input file %s does not exist." % fasta_file)
 
     if os.stat(fasta_file).st_size == 0:
         pass
 
     try:
         open_file = open
-        if fasta_file.endswith('.gz'):
+        if fasta_file.endswith(".gz"):
             open_file = gzip.open
 
         seq_id = None
         annotation = None
         seq = None
-        for line in open_file(fasta_file, 'rt'):
+        for line in open_file(fasta_file, "rt"):
             # skip blank lines
             if not line.strip():
                 continue
 
-            if line[0] == '>':
+            if line[0] == ">":
                 if seq_id != None:
                     if keep_annotation:
-                        yield seq_id, ''.join(seq).replace(' ', ''), annotation
+                        yield seq_id, "".join(seq).replace(" ", ""), annotation
                     else:
-                        yield seq_id, ''.join(seq).replace(' ', '')
+                        yield seq_id, "".join(seq).replace(" ", "")
 
                 line_split = line[1:-1].split(None, 1)
                 if len(line_split) == 2:
                     seq_id, annotation = line_split
                 else:
                     seq_id = line_split[0]
-                    annotation = ''
+                    annotation = ""
                 seq = []
             else:
                 seq.append(line.strip())
@@ -349,9 +370,9 @@ def read_fasta_seq(fasta_file, keep_annotation=False):
         """Patched by Bostjan Murovec."""
         if (seq != None) and (seq_id != None):
             if keep_annotation:
-                yield seq_id, ''.join(seq).replace(' ', ''), annotation
+                yield seq_id, "".join(seq).replace(" ", ""), annotation
             else:
-                yield seq_id, ''.join(seq).replace(' ', '')
+                yield seq_id, "".join(seq).replace(" ", "")
         """Patched by Bostjan Murovec."""
 
         """Original code."""
@@ -396,18 +417,18 @@ def read_fastq_seq(fastq_file):
     """
 
     if not os.path.exists(fastq_file):
-        raise InputFileError('Input file %s does not exist.' % fastq_file)
+        raise InputFileError("Input file %s does not exist." % fastq_file)
 
     if os.stat(fastq_file).st_size == 0:
         pass
 
     try:
         open_file = open
-        if fastq_file.endswith('.gz'):
+        if fastq_file.endswith(".gz"):
             open_file = gzip.open
 
         line_num = 0
-        for line in open_file(fastq_file, 'rt'):
+        for line in open_file(fastq_file, "rt"):
             line_num += 1
 
             if line_num == 1:
@@ -442,15 +463,15 @@ def extract_seqs(fasta_file, seqs_to_extract):
     """
 
     if not os.path.exists(fasta_file):
-        raise InputFileError('Input file %s does not exist.' % fasta_file)
+        raise InputFileError("Input file %s does not exist." % fasta_file)
 
     if os.stat(fasta_file).st_size == 0:
         return {}
 
     seqs = {}
     for line in open(fasta_file):
-        if line[0] == '>':
-            seq_id = line[1:].partition(' ')[0]
+        if line[0] == ">":
+            seq_id = line[1:].partition(" ")[0]
 
             seq_of_interest = False
             if seq_id in seqs_to_extract:
@@ -460,7 +481,7 @@ def extract_seqs(fasta_file, seqs_to_extract):
             seqs[seq_id].append(line.strip())
 
     for seq_id, seq in seqs.items():
-        seqs[seq_id] = ''.join(seq).replace(' ', '')
+        seqs[seq_id] = "".join(seq).replace(" ", "")
 
     return seqs
 
@@ -480,14 +501,14 @@ def seq_lengths(fasta_file):
     """
 
     if not os.path.exists(fasta_file):
-        raise InputFileError('Input file %s does not exist.' % fasta_file)
+        raise InputFileError("Input file %s does not exist." % fasta_file)
 
     if os.stat(fasta_file).st_size == 0:
         return {}
 
     lens = {}
     for seq_id, seq in read_fasta_seq(fasta_file):
-        if seq[-1] == '*':
+        if seq[-1] == "*":
             lens[seq_id] = len(seq) - 1
         else:
             lens[seq_id] = len(seq)
@@ -509,12 +530,12 @@ def write_fasta(seqs, output_file):
         Name of fasta file to produce.
     """
 
-    if output_file.endswith('.gz'):
-        fout = gzip.open(output_file, 'wb')
+    if output_file.endswith(".gz"):
+        fout = gzip.open(output_file, "wb")
     else:
-        fout = open(output_file, 'w')
+        fout = open(output_file, "w")
 
     for seq_id, seq in seqs.items():
-        fout.write('>' + seq_id + '\n')
-        fout.write(seq + '\n')
+        fout.write(">" + seq_id + "\n")
+        fout.write(seq + "\n")
     fout.close()

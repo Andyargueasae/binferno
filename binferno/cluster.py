@@ -23,7 +23,6 @@ from binferno.utils import get_length, calculateN50, save_result
 from binferno.scripts.gen_bins_from_tsv import gen_bins as gen_bins_from_tsv
 from typing import List, Optional, Union
 
-
 logger = logging.getLogger("COMEBin")
 
 logger.setLevel(logging.INFO)
@@ -359,8 +358,18 @@ def run_leiden(
     f.close()
 
 
-def cluster(logger, emb_file=None, seed_file=None, output_path=None, contig_file=None, contig_len=1000, 
-            not_l2normaize=False, cluster_num=None, num_threads=None, prefix=None):
+def cluster(
+    logger,
+    emb_file=None,
+    seed_file=None,
+    output_path=None,
+    contig_file=None,
+    contig_len=1000,
+    not_l2normaize=False,
+    cluster_num=None,
+    num_threads=None,
+    prefix=None,
+):
     """
     Cluster contigs and save the results.
 

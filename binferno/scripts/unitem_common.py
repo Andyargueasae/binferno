@@ -44,12 +44,14 @@ def calculateN50L50M50(seqs):
 
 def parse_checkm_bin_stats(checkm_dir):
     """Read bin statistics from file."""
-    bin_stats_file = os.path.join(checkm_dir, 'storage', DefaultValues.BIN_STATS_EXT_OUT)
+    bin_stats_file = os.path.join(
+        checkm_dir, "storage", DefaultValues.BIN_STATS_EXT_OUT
+    )
 
     bin_stats = {}
-    with open(bin_stats_file, 'r') as f:
+    with open(bin_stats_file, "r") as f:
         for line in f:
-            line_split = line.split('\t')
+            line_split = line.split("\t")
             bin_stats[line_split[0]] = ast.literal_eval(line_split[1])
 
     return bin_stats
@@ -79,8 +81,8 @@ def read_bins(bin_dirs):
             if not bf.endswith(bin_ext):
                 continue
 
-            bin_id = bf[0:bf.rfind(bin_ext)]
-            if bin_id[-1] == '.':
+            bin_id = bf[0 : bf.rfind(bin_ext)]
+            if bin_id[-1] == ".":
                 bin_id = bin_id[0:-1]
             bf_path = os.path.join(bin_dir, bf)
 
@@ -90,7 +92,7 @@ def read_bins(bin_dirs):
                 contigs_in_bins[seq_id][method_id] = bin_id
 
             if len(bins[method_id][bin_id]) == 0:
-                print('Bin %s from %s is empty.' % (bf, method_id))
+                print("Bin %s from %s is empty." % (bf, method_id))
 
     return bins, contigs, contigs_in_bins
 
@@ -110,5 +112,5 @@ def bin_gc(bin):
         g_count += g
         t_count += t
 
-    total = (a_count + c_count + g_count + t_count)
+    total = a_count + c_count + g_count + t_count
     return (g_count + c_count) / total

@@ -10,7 +10,10 @@ from collections import defaultdict
 import pandas as pd
 
 from binferno.scripts.unitem_common import read_bins  # the read_bins is not used here.
-from binferno.scripts.unitem_markers import Markers, pltdMarkers  # finished updating to plastid.
+from binferno.scripts.unitem_markers import (
+    Markers,
+    PltdMarkers,
+)  # finished updating to plastid.
 from binferno.filter_small_bins import filter_small_bins
 
 from typing import List, Optional, Union, Dict
@@ -241,7 +244,7 @@ def estimate_bins_quality_nobins_pltd(pltd_mg_table, res_path, ignore_kmeans_res
 
     :return: The best method based on estimated bin quality.
     """
-    markers = pltdMarkers()
+    markers = PltdMarkers()
 
     # bin_dirs = get_bin_dirs(bin_dirs_file)
     filenames = os.listdir(res_path)
@@ -277,13 +280,13 @@ def estimate_bins_quality_nobins_pltd(pltd_mg_table, res_path, ignore_kmeans_res
 
 def run_get_final_result(
     logger,
-    bac_mg_table: Optional[Path]= None,
-    ar_mg_table: Optional[Path]= None,
-    pltd_mg_table: Optional[Path]= None,
-    checkm_database: Optional[Path]= None,
+    bac_mg_table: Optional[Path] = None,
+    ar_mg_table: Optional[Path] = None,
+    pltd_mg_table: Optional[Path] = None,
+    checkm_database: Optional[Path] = None,
     contig_file: Optional[Path] = None,
     plastid: bool = False,
-    output_path: Optional[Path]= None,
+    output_path: Optional[Path] = None,
     seed_num: int = 0,
     num_threads: int = 40,
     minbinsize: int = 200000,
@@ -361,5 +364,9 @@ def run_get_final_result(
         )
     logger.info("Final result:\t" + output_path + "/cluster_res/" + best_method)
     filter_small_bins(
-        logger, contig_file, output_path + "/cluster_res/" + best_method, output_path, minbinsize=minbinsize,
+        logger,
+        contig_file,
+        output_path + "/cluster_res/" + best_method,
+        output_path,
+        minbinsize=minbinsize,
     )

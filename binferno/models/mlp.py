@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 
+
 class EmbeddingNet(nn.Module):
     # Useful code from fast.ai tabular model
     # https://github.com/fastai/fastai/blob/3b7c453cfa3845c6ffc496dd4043c07f3919270e/fastai/tabular/models.py#L6
@@ -24,12 +25,12 @@ class EmbeddingNet(nn.Module):
         self.fc = nn.Sequential(*layers)
 
     def bn_drop_lin(
-            self,
-            n_in: int,
-            n_out: int,
-            bn: bool = True,
-            p: float = 0.0,
-            actn: nn.Module = None,
+        self,
+        n_in: int,
+        n_out: int,
+        bn: bool = True,
+        p: float = 0.0,
+        actn: nn.Module = None,
     ):
         # https://github.com/fastai/fastai/blob/3b7c453cfa3845c6ffc496dd4043c07f3919270e/fastai/layers.py#L44
         "Sequence of batchnorm (if `bn`), dropout (with `p`) and linear (`n_in`,`n_out`) layers followed by `actn`."
@@ -43,5 +44,4 @@ class EmbeddingNet(nn.Module):
 
     def forward(self, x):
         output = self.fc(x)
-        return output#F.normalize(output) #output #/ torch.linalg.vector_norm(output, dim=-1, keepdim=True)
-
+        return output  # F.normalize(output) #output #/ torch.linalg.vector_norm(output, dim=-1, keepdim=True)
