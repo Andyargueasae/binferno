@@ -21,87 +21,9 @@ from sklearn.cluster._kmeans import (
 )
 
 
-def file_len(fname):
-    with open(fname) as f:
-        for i, l in enumerate(f):
-            pass
-    return i + 1
-
-
-def save_result(result, filepath, namelist):
-    filedir, filename = os.path.split(filepath)
-    if not filename:
-        filename = "result.tsv"
-    if not os.path.exists(filedir):
-        os.makedirs(filedir)
-    f = open(filepath, "w")
-    for contigIdx in range(len(result)):
-        f.write(namelist[contigIdx] + "\t" + str(result[contigIdx].item(0)) + "\n")
-    f.close()
-
-
-def gen_bins(fastafile, resultfile, outputdir):
-    # read fasta file
-    print("Processing file:\t{}".format(fastafile))
-    sequences = {}
-    if fastafile.endswith("gz"):
-        with gzip.open(fastafile, "r") as f:
-            for line in f:
-                line = str(line, encoding="utf-8")
-                if line.startswith(">"):
-                    if " " in line:
-                        seq, others = line.split(" ", 1)
-                        sequences[seq] = ""
-                    else:
-                        seq = line.rstrip("\n")
-                        sequences[seq] = ""
-                else:
-                    sequences[seq] += line.rstrip("\n")
-    else:
-        with open(fastafile, "r") as f:
-            for line in f:
-                if line.startswith(">"):
-                    if " " in line:
-                        seq, others = line.split(" ", 1)
-                        sequences[seq] = ""
-                    else:
-                        seq = line.rstrip("\n")
-                        sequences[seq] = ""
-                else:
-                    sequences[seq] += line.rstrip("\n")
-    print("Reading Map:\t{}".format(resultfile))
-    dic = {}
-    with open(resultfile, "r") as f:
-        for line in f:
-            contig_name, cluster_name = line.strip().split("\t")
-            try:
-                dic[cluster_name].append(contig_name)
-            except:
-                dic[cluster_name] = []
-                dic[cluster_name].append(contig_name)
-    print("Writing bins:\t{}".format(outputdir))
-    if not os.path.exists(outputdir):
-        os.makedirs(outputdir)
-
-    bin_name = 0
-    for _, cluster in dic.items():
-        binfile = os.path.join(outputdir, "{}.fa".format(bin_name))
-        with open(binfile, "w") as f:
-            for contig_name in cluster:
-                contig_name = ">" + contig_name
-                try:
-                    sequence = sequences[contig_name]
-                except:
-                    bin_name += 1
-                    continue
-                f.write(contig_name + "\n")
-                f.write(sequence + "\n")
-                bin_name += 1
-
-
 class BaseClustering(BaseModel):
 
-    def calculateN50(self, seqLens):
+    def calculate_n50(self, seqLens):
         thresholdN50 = sum(seqLens) / 2.0
 
         seqLens.sort(reverse=True)
@@ -236,8 +158,8 @@ class BaseClustering(BaseModel):
         )
         km.fit(X_mat, sample_weight=length_weight)
 
-        save_result(km.labels_, output_tsv, namelist)
-        gen_bins(contig_file, output_tsv, f"{output_tsv}_bins")
+        self.save_result(km.labels_, output_tsv, namelist)
+        self.gen_bins(contig_file, output_tsv, f"{output_tsv}_bins")
 
         logger.info(f"Weighted seed-kmeans time:\t{time() - start:.3f}s")
 
@@ -340,3 +262,78 @@ class BaseClustering(BaseModel):
         """
 
         return X
+
+    def file_len(fname):
+        with open(fname) as f:
+            for i, l in enumerate(f):
+                pass
+        return i + 1
+
+    def save_result(result, filepath, namelist):
+        filedir, filename = os.path.split(filepath)
+        if not filename:
+            filename = "result.tsv"
+        if not os.path.exists(filedir):
+            os.makedirs(filedir)
+        f = open(filepath, "w")
+        for contigIdx in range(len(result)):
+            f.write(namelist[contigIdx] + "\t" + str(result[contigIdx].item(0)) + "\n")
+        f.close()
+
+    def gen_bins(fastafile, resultfile, outputdir):
+        # read fasta file
+        print("Processing file:\t{}".format(fastafile))
+        sequences = {}
+        if fastafile.endswith("gz"):
+            with gzip.open(fastafile, "r") as f:
+                for line in f:
+                    line = str(line, encoding="utf-8")
+                    if line.startswith(">"):
+                        if " " in line:
+                            seq, others = line.split(" ", 1)
+                            sequences[seq] = ""
+                        else:
+                            seq = line.rstrip("\n")
+                            sequences[seq] = ""
+                    else:
+                        sequences[seq] += line.rstrip("\n")
+        else:
+            with open(fastafile, "r") as f:
+                for line in f:
+                    if line.startswith(">"):
+                        if " " in line:
+                            seq, others = line.split(" ", 1)
+                            sequences[seq] = ""
+                        else:
+                            seq = line.rstrip("\n")
+                            sequences[seq] = ""
+                    else:
+                        sequences[seq] += line.rstrip("\n")
+        print("Reading Map:\t{}".format(resultfile))
+        dic = {}
+        with open(resultfile, "r") as f:
+            for line in f:
+                contig_name, cluster_name = line.strip().split("\t")
+                try:
+                    dic[cluster_name].append(contig_name)
+                except:
+                    dic[cluster_name] = []
+                    dic[cluster_name].append(contig_name)
+        print("Writing bins:\t{}".format(outputdir))
+        if not os.path.exists(outputdir):
+            os.makedirs(outputdir)
+
+        bin_name = 0
+        for _, cluster in dic.items():
+            binfile = os.path.join(outputdir, "{}.fa".format(bin_name))
+            with open(binfile, "w") as f:
+                for contig_name in cluster:
+                    contig_name = ">" + contig_name
+                    try:
+                        sequence = sequences[contig_name]
+                    except:
+                        bin_name += 1
+                        continue
+                    f.write(contig_name + "\n")
+                    f.write(sequence + "\n")
+                    bin_name += 1

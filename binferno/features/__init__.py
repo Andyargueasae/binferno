@@ -1,25 +1,27 @@
 import pandas as pd
 from pydantic import Field
-from .base import BaseFeatures
-from .corgi import CorgiFeatures  # the only one without required multisample mode.
-from .coverage import CoverageFeatures
-from .kmer import KmerFeatures
+from .base import BaseFeatureBuilder
+from .corgi import (
+    CorgiFeatureBuilder,
+)  # the only one without required multisample mode.
+from .coverage import CoverageFeatureBuilder
+from .kmer import KmerFeatureBuilder
 
 
-class BinfernoFeatures(BaseFeatures):
+class BinfernoFeatureBuilder(BaseFeatureBuilder):
     use_corgi: bool = Field(
         default=False,
         description="Whether to use Corgi to generate features for training.",
     )
-    corgi: CorgiFeatures
+    corgi: CorgiFeatureBuilder
     use_kmer: bool = Field(
         default=True, description="Whether to use k-mer features for training."
     )
-    kmer: KmerFeatures
+    kmer: KmerFeatureBuilder
     use_coverage: bool = Field(
         default=True, description="Whether to use coverage features for training."
     )
-    coverage: CoverageFeatures
+    coverage: CoverageFeatureBuilder
     save_features: bool = Field(
         default=True,
         description="Whether to save the generated features as tsv files in the output directory.",
@@ -83,7 +85,7 @@ class BinfernoFeatures(BaseFeatures):
         )  # free up memory after generating the features.
 
         namelist = list(FragMent_Dict.keys())
-        # [kmer, corgi, coverage] features are already sorted by method in the sort_features_by_method function, 
+        # [kmer, corgi, coverage] features are already sorted by method in the sort_features_by_method function,
         # so we can directly save the resulting features without further sorting.
 
         resulting_features.to_csv(
@@ -91,10 +93,11 @@ class BinfernoFeatures(BaseFeatures):
         )
         return resulting_features
 
-# class BinfernoMultiFeatures(BinfernoFeatures):
-#     kmer: KmerMultiFeatures
-#     coverage: CoverageMultiFeatures
-#     corgi: CorgiFeatures
+
+# class BinfernoMultiFeatureBuilder(BinfernoFeatureBuilder):
+#     kmer: KmerMultiFeatureBuilder
+#     coverage: CoverageMultiFeatureBuilder
+#     corgi: CorgiFeatureBuilder
 
 #     def __call__():
 #         return

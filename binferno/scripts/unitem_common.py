@@ -16,7 +16,7 @@ from checkm.defaultValues import DefaultValues
 from binferno.scripts.unitem_defaults import *
 
 
-def calculateN50L50M50(seqs):
+def calculate_n50_l50_m50(seqs):
     """Calculate N50 and M50 statistics."""
 
     seq_lens = [len(seq) for seq in seqs]

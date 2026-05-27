@@ -56,7 +56,7 @@ class BinfernoClustering(BaseClustering):
         if len(namelist) == 0:
             raise ValueError("No contigs remain after length filtering")
 
-        logger.info(f"N50:\t{self.calculateN50(length_weight.tolist())}")
+        logger.info(f"N50:\t{self.calculate_n50(length_weight.tolist())}")
         logger.info(f"Contigs retained after length filter: {len(namelist)}")
 
         norm_embeddings = normalize(emb_mat).astype(np.float32, copy=False)

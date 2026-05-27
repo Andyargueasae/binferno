@@ -1,13 +1,14 @@
 import glob
 from pathlib import Path
-from .base import BaseFeatures
+from .base import BaseFeatureBuilder
 import pandas as pd
 from corgi import Corgi
 import numpy as np
 from typing import Union, Optional, Tuple, List
 import os
 from pydantic import Field
-from ..utils import calc_N50
+from ..utils import calc_n50
+
 
 def read_embeddings(
     embeddings_path: Union[Path, str],
@@ -69,7 +70,7 @@ def run_corgi(
     return
 
 
-class CorgiFeatures(BaseFeatures):
+class CorgiFeatureBuilder(BaseFeatureBuilder):
     model_path: str = Field(
         default="",
         description="Path to the pretrained Corgi model checkpoint. If None, will use the default pretrained model.",
@@ -91,7 +92,9 @@ class CorgiFeatures(BaseFeatures):
         """
         # 1. run corgi.
         # 2. read corgi embedding outputs, and return the pandas dataframe.
-        aug_views = sorted(glob.glob(os.path.join(seq_dir, f"augmented_fragments_view*.fasta")))
+        aug_views = sorted(
+            glob.glob(os.path.join(seq_dir, f"augmented_fragments_view*.fasta"))
+        )
 
         # process raw contigs first, make sure every contigs has .original suffix for indexing the features later.
         if len(aug_views) == 0:
@@ -106,10 +109,12 @@ class CorgiFeatures(BaseFeatures):
         # replace method-guided determination by checking: if aug0 isn't same raw contigs, then it is barlow_twins.
         aug_zero_fasta = os.path.join(seq_dir, f"augmented_fragments_view0.fasta")
         # check if aug_zero_fasta is the direct copy of raw contigs: n_sequences and N50 should be the same.
-        N50_aug_zero = calc_N50(aug_zero_fasta)
-        N50_raw = calc_N50(contigs)
-         
-        if N50_aug_zero != N50_raw: # view 0 isn't direct copy of raw contigs, run corgi on raw contigs first and add to the corgi_df.
+        N50_aug_zero = calc_n50(aug_zero_fasta)
+        N50_raw = calc_n50(contigs)
+
+        if (
+            N50_aug_zero != N50_raw
+        ):  # view 0 isn't direct copy of raw contigs, run corgi on raw contigs first and add to the corgi_df.
             raw_emb = Path(f"{contigs.replace('.fasta', '')}_embeddings.npy")
             raw_index = Path(f"{contigs.replace('.fasta', '')}_embeddings.index")
             if not os.path.exists(raw_emb) or not os.path.exists(raw_index):

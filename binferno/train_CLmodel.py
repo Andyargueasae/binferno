@@ -6,8 +6,8 @@ import os
 import sys
 
 from binferno.get_augfeature import (
-    get_ContrastiveLearningDataset,
-    GetCorgiContrastiveDataset,
+    get_contrastive_learning_dataset,
+    get_corgi_contrastive_dataset,
 )
 from binferno.utils import get_length
 
@@ -20,7 +20,7 @@ torch.cuda.manual_seed_all(1)
 torch.backends.cudnn.deterministic = True
 
 
-def train_CLmodel(
+def train_cl_model(
     logger,
     device=None,
     num_threads=10,
@@ -81,7 +81,7 @@ def train_CLmodel(
         )
         sys.exit()
 
-    dataset, namelist = GetCorgiContrastiveDataset(
+    dataset, namelist = get_corgi_contrastive_dataset(
         data_path=data,
         n_views=n_views,
         device=device,

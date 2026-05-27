@@ -69,19 +69,19 @@ class NeuralNetwork(nn.Module):
             nn.BatchNorm1d(512),
             nn.LeakyReLU(),
             nn.Dropout(0.2),
-            nn.Linear(512, 512),
-            nn.BatchNorm1d(512),
+            nn.Linear(512, cov_hidden1),
+            nn.BatchNorm1d(cov_hidden1),
             nn.LeakyReLU(),
             nn.Dropout(0.2),
-            nn.Linear(512, 128),
-            nn.BatchNorm1d(128),
+            nn.Linear(cov_hidden1, cov_hidden2),
+            nn.BatchNorm1d(cov_hidden2),
             nn.LeakyReLU(),
         )
 
         self.final_cov_dim = cov_hidden2  # 128?
 
         # leave fusion network to be implemented later.
-        self.fusion_network = FusionNetwork(
+        self.fusion_network = fusion_network(
             emb_dim=output_dim,
             kmer_enc_dim=output_dim,
             coverage_dim=self.final_cov_dim,
@@ -408,7 +408,7 @@ class attentionFusion(nn.Module):
         return self.normal_forward(tnf_feature, coverage_feature)
 
 
-def FusionNetwork(
+def fusion_network(
     emb_dim=128,
     kmer_enc_dim=128,
     coverage_dim=128,
@@ -432,21 +432,19 @@ class gated_fusion(nn.Module):
         super(gated_fusion, self).__init__()
         self.emb_dim = emb_dim
         self.gate = nn.Sequential(
-            nn.LayerNorm(
-                self.emb_dim * 2
-            ),  
-            # LayerNorm can help stabilize the training of the gating mechanism, 
-            # especially when the input features have different distributions. 
-            # It can also help mitigate the issue of one modality dominating the 
-            # other by normalizing the concatenated features before applying the 
+            nn.LayerNorm(self.emb_dim * 2),
+            # LayerNorm can help stabilize the training of the gating mechanism,
+            # especially when the input features have different distributions.
+            # It can also help mitigate the issue of one modality dominating the
+            # other by normalizing the concatenated features before applying the
             # linear transformation and sigmoid activation.
             nn.Linear(self.emb_dim * 2, self.emb_dim),
             nn.Sigmoid(),
-        )  
-        # symmetric gating for both modalities, can be easily extended to 
-        # asymmetric gating if needed. The gate will learn to weigh the 
-        # importance of each modality for the final fused representation, 
-        # allowing the model to adaptively focus on the more informative 
+        )
+        # symmetric gating for both modalities, can be easily extended to
+        # asymmetric gating if needed. The gate will learn to weigh the
+        # importance of each modality for the final fused representation,
+        # allowing the model to adaptively focus on the more informative
         # modality for each sample.
         self.out_norm = nn.LayerNorm(self.emb_dim)
 
@@ -454,3 +452,141 @@ class gated_fusion(nn.Module):
         gate_weight = self.gate(torch.cat([kmer_emb, coverage_emb], dim=1))
         fused = gate_weight * kmer_emb + (1 - gate_weight) * coverage_emb
         return self.out_norm(fused)
+
+
+# The raw COMEBin's embedding network is a simple MLP with batch normalization and dropout. We can use it as a baseline model for our experiments. We can also implement a more complex fusion network later to see if we can improve the performance.
+class EmbeddingNet(nn.Module):
+    # Useful code from fast.ai tabular model
+    # https://github.com/fastai/fastai/blob/3b7c453cfa3845c6ffc496dd4043c07f3919270e/fastai/tabular/models.py#L6
+    def __init__(self, in_sz, out_sz, emb_szs, ps, use_bn=True, actn=nn.ReLU()):
+        super(EmbeddingNet, self).__init__()
+        self.in_sz = in_sz
+        self.out_sz = out_sz
+        self.n_embs = len(emb_szs) - 1
+        if ps == 0:
+            ps = np.zeros(self.n_embs)
+        # input layer
+        layers = [nn.Linear(self.in_sz, emb_szs[0]), actn]
+        # hidden layers
+        for i in range(self.n_embs):
+            layers += self.bn_drop_lin(
+                n_in=emb_szs[i], n_out=emb_szs[i + 1], bn=use_bn, p=ps[i], actn=actn
+            )
+        # output layer
+        layers.append(nn.Linear(emb_szs[-1], self.out_sz))
+        self.fc = nn.Sequential(*layers)
+
+    def bn_drop_lin(
+        self,
+        n_in: int,
+        n_out: int,
+        bn: bool = True,
+        p: float = 0.0,
+        actn: nn.Module = None,
+    ):
+        # https://github.com/fastai/fastai/blob/3b7c453cfa3845c6ffc496dd4043c07f3919270e/fastai/layers.py#L44
+        "Sequence of batchnorm (if `bn`), dropout (with `p`) and linear (`n_in`,`n_out`) layers followed by `actn`."
+        layers = [nn.BatchNorm1d(n_in)] if bn else []
+        if p != 0:
+            layers.append(nn.Dropout(p))
+        layers.append(nn.Linear(n_in, n_out))
+        if actn is not None:
+            layers.append(actn)
+        return layers
+
+    def forward(self, x):
+        output = self.fc(x)
+        return output  # F.normalize(output) #output #/ torch.linalg.vector_norm(output, dim=-1, keepdim=True)
+
+
+class SimCLRNet(nn.Module):
+    # Useful code from fast.ai tabular model
+    # https://github.com/fastai/fastai/blob/3b7c453cfa3845c6ffc496dd4043c07f3919270e/fastai/tabular/models.py#L6
+    def __init__(
+        self,
+        in_sz,
+        out_sz,
+        emb_szs,
+        ps,
+        use_bn=True,
+        actn=nn.ReLU(),
+        pretrained_model=None,
+        cov_model=None,
+        covmodel_notl2normalize=False,
+    ):
+        super(SimCLRNet, self).__init__()
+        self.pretrained_model = pretrained_model
+        self.cov_model = cov_model
+        self.in_sz = in_sz
+        self.out_sz = out_sz
+        self.n_embs = len(emb_szs) - 1
+        self.covmodel_notl2normalize = covmodel_notl2normalize
+        if ps == 0:
+            ps = np.zeros(self.n_embs)
+        # input layer
+        layers = [nn.Linear(self.in_sz, emb_szs[0]), actn]
+        # hidden layers
+        for i in range(self.n_embs):
+            layers += self.bn_drop_lin(
+                n_in=emb_szs[i], n_out=emb_szs[i + 1], bn=use_bn, p=ps[i], actn=actn
+            )
+        # output layer
+        layers.append(nn.Linear(emb_szs[-1], self.out_sz))
+        self.fc = nn.Sequential(*layers)
+        project_layer = [actn, nn.Linear(self.out_sz, self.out_sz)]
+        # project_layer= [nn.Linear(self.out_sz,self.out_sz),actn,nn.Linear(self.out_sz,self.out_sz)]
+        self.fc2 = nn.Sequential(*project_layer)
+
+    def bn_drop_lin(
+        self,
+        n_in: int,
+        n_out: int,
+        bn: bool = True,
+        p: float = 0.0,
+        actn: nn.Module = None,
+    ):
+        # https://github.com/fastai/fastai/blob/3b7c453cfa3845c6ffc496dd4043c07f3919270e/fastai/layers.py#L44
+        "Sequence of batchnorm (if `bn`), dropout (with `p`) and linear (`n_in`,`n_out`) layers followed by `actn`."
+        layers = [nn.BatchNorm1d(n_in)] if bn else []
+        if p != 0:
+            layers.append(nn.Dropout(p))
+        layers.append(nn.Linear(n_in, n_out))
+        if actn is not None:
+            layers.append(actn)
+        return layers
+
+    def forward(self, x, x2=None):
+        if self.pretrained_model is not None and self.cov_model is None:
+            kmeremb = self.pretrained_model(x)
+            x = torch.cat([F.normalize(self.pretrained_model(x)), x2], dim=-1)
+        if self.pretrained_model is not None and self.cov_model is not None:
+            kmeremb = self.pretrained_model(x)
+            if self.covmodel_notl2normalize:
+                x = torch.cat(
+                    [F.normalize(self.pretrained_model(x)), self.cov_model(x2)], dim=-1
+                )
+            else:
+                x = torch.cat(
+                    [
+                        F.normalize(self.pretrained_model(x)),
+                        F.normalize(self.cov_model(x2)),
+                    ],
+                    dim=-1,
+                )
+
+        # this is the case.
+        if self.pretrained_model is None and self.cov_model is not None:
+            if self.covmodel_notl2normalize:
+                x = torch.cat([x, self.cov_model(x2)], dim=-1)
+            else:
+                # coverage model feature is normalized by default and concatenated with original features.
+                x = torch.cat([x, F.normalize(self.cov_model(x2))], dim=-1)
+
+        output = self.fc(x)
+
+        if self.cov_model is not None and self.pretrained_model is not None:
+            return output, self.cov_model(x2), kmeremb
+        elif self.cov_model is not None and self.pretrained_model is None:
+            return output, self.cov_model(x2)
+        else:
+            return output  # F.normalize(output) #output #/ torch.linalg.vector_norm(output, dim=-1, keepdim=True)

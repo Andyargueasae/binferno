@@ -1,24 +1,27 @@
 from pathlib import Path
+import random
 import torch
 from torch import nn
 import torch.nn.functional as F
 import numpy as np
 from tqdm import tqdm
 from torch.backends import cudnn
-from .neuralnetwork import SimCLRNet, EmbeddingNet, NeuralNetwork
-from .base import BaseTraining
-from ..features import BinfernoFeatures
+from .models.simclr import SimCLRNet, EmbeddingNet, NeuralNetwork
+from .base import BaseTrainer
+from ..features import BinfernoFeatureBuilder
 from pydantic import Field
 import pyfastx
 from torch.amp import GradScaler
 import os
 import pandas as pd
+from typing import Dict, List
+from collections import OrderedDict
 
 KMER_DIM = 136
 
 
-class SimCLRTraining(BaseTraining):
-    features: BinfernoFeatures
+class SimCLRTrainer(BaseTrainer):
+    features: BinfernoFeatureBuilder
     simclrnet: bool = Field(
         default=False,
         description="Whether to use SimCLRNet architecture for training. If False, use a simpler MLP architecture.",
@@ -26,22 +29,38 @@ class SimCLRTraining(BaseTraining):
     no_proj: bool = Field(
         default=False,
         description="Whether to use a projection head in the NeuralNetwork architecture.",
-        )
+    )
+    learning_rate: float = Field(
+        default=2.5e-3, description="Learning rate for training."
+    )
+    batch_size: int = Field(default=1024, description="Batch size for training.")
+    epochs: int = Field(default=300, description="Number of epochs for training.")
+    weight_decay: float = Field(default=1e-4, description="Weight decay for training.")
+    seed: int = Field(default=42, description="Random seed for training.")
+    output_dim: int = Field(
+        default=128, description="Output dimension for the embeddings."
+    )
+    n_layers: int = Field(
+        default=2, description="Number of layers for the neural network."
+    )
+    contig_length: int = Field(
+        default=1000, description="Minimum contig length to be included in training."
+    )
+    view_num: int = Field(
+        default=6, description="Number of augmented views to generate for each contig."
+    )
+    seed: int = Field(
+        default=42, description="Random seed for training and augmentation."
+    )
+
     def __call__(
         self,
         contigs: str,
         bam: str,
         output_dir: Path,
-        view_num: int = 6,
-        contig_length: int = 1000,
         logger=None,
         threads: int = 4,
-        batch_size: int = 1024,
-        n_layers: int = 3,
-        multiscale: bool = False,
-        epochs: int = 300,
         temperature: float = 0.15,
-        output_dim: int = 128,
         multisample: bool = False,
         **kwargs,
     ):
@@ -57,8 +76,8 @@ class SimCLRTraining(BaseTraining):
             simclr=True,
             barlow_twins=False,
             output_dir=output_dir,
-            view_num=view_num,
-            contig_length=contig_length,
+            view_num=self.view_num,
+            contig_length=self.contig_length,
         )
 
         # after getting the augmented views, pass to binfernofeatures to get the features pooled.
@@ -69,12 +88,14 @@ class SimCLRTraining(BaseTraining):
             bam_path=bam,
             threads=threads,
             logger=logger,
-            output_dir=output_dir
+            output_dir=output_dir,
         )
 
         # after getting the features, sort the features by method to ensure integrity before training.
-        feature_df = self.features.sort_features_by_method(
-            feature_df, contig_ids=namelist, simclr=True,
+        feature_df = self.sort_features_by_method(
+            feature_df,
+            contig_ids=namelist,
+            simclr=True,
         )
 
         if torch.cuda.is_available():
@@ -96,15 +117,15 @@ class SimCLRTraining(BaseTraining):
         if self.simclrnet:
             cov_model = EmbeddingNet(
                 in_sz=cov_dim,
-                out_sz=output_dim,  # 128
+                out_sz=self.output_dim,  # 128
                 emb_szs=[2048] * 3,
                 ps=[0.2] * 2,
                 actn=nn.LeakyReLU(),
                 use_bn=True,
             ).to(device)
             model = SimCLRNet(
-                in_sz=composition_dim + output_dim,
-                out_sz=output_dim,
+                in_sz=composition_dim + self.output_dim,
+                out_sz=self.output_dim,
                 emb_szs=[2048] * 3,
                 use_bn=True,
                 ps=[0.2] * 2,
@@ -115,21 +136,21 @@ class SimCLRTraining(BaseTraining):
             model = NeuralNetwork(
                 tnf_dim=composition_dim,
                 coverage_dim=cov_dim,
-                output_dim=output_dim,
+                output_dim=self.output_dim,
                 kmer_dim=kmer_dim,
-                n_layers=n_layers,
+                n_layers=self.n_layers,
                 proj_head_dim=proj_head_dim,
-                apply_multiscale=multiscale,
+                apply_multiscale=True,
                 no_proj=self.no_proj,
             ).to(device)
 
         # prepare training.
-        train_loader, optimizer, scheduler, dataset = self.prepare_training(
+        train_loader, optimizer, scheduler, dataset = self.prepare_trainer(
             data_df=feature_df,
-            batch_size=batch_size,
-            contig_length=contig_length,
+            batch_size=self.batch_size,
+            contig_length=self.contig_length,
             model=model,
-            n_views=view_num,
+            n_views=self.view_num,
             simclrnet=self.simclrnet,
             **kwargs,
         )
@@ -147,30 +168,30 @@ class SimCLRTraining(BaseTraining):
                 optimizer=optimizer,
                 scheduler=scheduler,
                 device=device,
-                epochs=epochs,
+                epochs=self.epochs,
                 model=model,
                 n_cov=cov_dim,
-                n_views=view_num,
+                n_views=self.view_num,
                 temperature=temperature,
                 output_dir=output_dir,
                 logger=logger,
             )
         else:
-            model = self.Train(
+            model = self.train(
                 dataloader=train_loader,
                 optimizer=optimizer,
                 scheduler=scheduler,
                 device=device,
                 method="simclr",
                 model=model,
-                n_views=view_num,
+                n_views=self.view_num,
                 **kwargs,
             )
 
         embedding_path = output_dir / "embeddings.tsv"
         if not embedding_path.exists():
             if self.simclrnet:
-                embeddings = self.SimCLR_get_embs(
+                embeddings = self.simclr_get_embs(
                     model=model,
                     data=dataset,
                     output_path=embedding_path,
@@ -182,7 +203,7 @@ class SimCLRTraining(BaseTraining):
                     model=model,
                     data_df=feature_df,
                     output_path=embedding_path,
-                    batch_size=batch_size,
+                    batch_size=self.batch_size,
                     save_individual_embs=False,
                 )
         else:
@@ -192,7 +213,7 @@ class SimCLRTraining(BaseTraining):
             embeddings = pd.read_csv(embedding_path, sep="\t", header=0, index_col=0)
         return embeddings
 
-    def prepare_training(
+    def prepare_trainer(
         self,
         data_df,
         batch_size: int = 1024,
@@ -321,7 +342,7 @@ class SimCLRTraining(BaseTraining):
             contig_length[name] = len(seq)
         return contig_length
 
-    def Train(
+    def train(
         self,
         dataloader: torch.utils.data.DataLoader,
         optimizer: torch.optim.Optimizer,
@@ -334,7 +355,9 @@ class SimCLRTraining(BaseTraining):
         n_views: int = 6,
         **kwargs,
     ):
-
+        self.unify_seeds(
+            self.seed
+        )  # ensure reproducibility by unifying seeds across random, numpy, and torch.
         temperature = kwargs.get("temperature", 0.15)
         output_dir = kwargs.get("output_dir", None)
         MODEL_PATH = output_dir / "best_model.pt" if output_dir else "best_model.pt"
@@ -443,7 +466,9 @@ class SimCLRTraining(BaseTraining):
         output_dir: str = None,
         **kwargs,
     ):
-
+        self.unify_seeds(
+            self.seed
+        )  # ensure reproducibility by unifying seeds across random, numpy, and torch.
         criterion = torch.nn.CrossEntropyLoss().to(device)
 
         if n_cov <= 0:
@@ -554,7 +579,7 @@ class SimCLRTraining(BaseTraining):
         torch.save(model.state_dict(), os.path.join(output_dir, "simclr_model.pt"))
         return
 
-    def SimCLR_get_embs(self, model, data, namelist, output_path, device, kmer_len):
+    def simclr_get_embs(self, model, data, namelist, output_path, device, kmer_len):
         with torch.no_grad():
             model.eval()
             bs_ = 1024
@@ -593,3 +618,141 @@ class SimCLRTraining(BaseTraining):
             outfile = output_path.parent / "cov_embeddings.tsv"
             embeddings_df.to_csv(str(outfile), sep="\t", header=True, index=True)
         return embeddings_df
+
+    def gen_views(
+        self,
+        contigs=None,
+        simclr=False,
+        barlow_twins=False,
+        output_dir=None,
+        view_num=6,
+        contig_length=1000,
+    ) -> Dict[str, pd.DataFrame]:
+        # process input contigs into augmented fragments.
+        FragMent_Dict, All_Fragments = self.augment_views(
+            contigs=contigs,
+            view_num=view_num,
+            contig_length=contig_length,
+            output_dir=output_dir,
+            simclr=simclr,
+            barlow_twins=barlow_twins,
+        )
+
+        namelist = list(
+            FragMent_Dict.keys()
+        )  # the ordered contig names which will be used for indexing the features.
+
+        return FragMent_Dict, All_Fragments, namelist
+
+    def augmentation(
+        self,
+        fasta_file=None,
+        num_views=6,
+        length_threshold=1000,
+        method: str = "barlow_twins",
+    ):
+        # initialize the augmentation.
+        seqs = pyfastx.Fastx(fasta_file)
+        all_fragments = []
+        fragment_to_contig = {}
+        short_fragment_count = 0
+        sequence_count = 0
+        # apply augmentation.
+        fragments_dict = OrderedDict()
+        fragment_count = 0
+
+        assert method in [
+            "barlow_twins",
+            "simclr",
+        ], "Method must be either 'barlow_twins' or 'simclr'. \
+            Please set the method parameter accordingly."
+
+        # the loop over sequences to generate augmentations.
+        for header, seq in seqs:
+            if len(seq) < length_threshold:
+                continue
+            clean_header = str(header.split()[0])
+            fragments_dict[clean_header] = {
+                "sequence": seq,
+                "fragments": [],
+                "fragment_info": {},
+            }
+
+            augmented_fragments = self.simclr_augmentation(
+                sequence=seq,
+                header=clean_header,
+                min_contig_length=length_threshold,
+                num_augmentations=num_views,
+            )
+
+            for (
+                fragment_header,
+                fragment_seq,
+                start_pos,
+                frag_len,
+            ) in augmented_fragments:
+                fragments_dict[clean_header]["fragments"].append(fragment_header)
+                fragments_dict[clean_header]["fragment_info"][fragment_header] = {
+                    "start_pos": start_pos,
+                    "length": frag_len,
+                }
+
+                if len(fragment_seq) < length_threshold:
+                    short_fragment_count += 1
+                    continue
+
+                all_fragments.append((fragment_header, fragment_seq))
+                fragment_to_contig[fragment_header] = clean_header
+                fragment_count += 1
+
+            sequence_count += 1
+
+        print(f"Total sequences processed: {sequence_count}")
+        print(f"Total fragments generated: {len(all_fragments)}")
+        return fragments_dict, all_fragments
+
+    def simclr_augmentation(
+        seqs: str,
+        clean_header: str,
+        length_threshold: int,
+        num_views: int,
+    ) -> List:
+        seq_len = len(seqs)
+        fragments = []
+        fragments.append((f"{clean_header}.0", seqs, 0, seq_len))
+        for i in range(1, num_views):
+            try:
+                start = random.randint(0, seq_len - (length_threshold + 1))
+            except ValueError:
+                start = 0
+            sim_len = random.randint(length_threshold, seq_len - start)
+            end = start + sim_len - 1
+            sequence = str(seqs[start : end + 1])
+            seq_id = f"{clean_header}.{i}"
+            fragments.append((seq_id, sequence, start, sim_len))
+        return fragments
+
+    def augment_views(
+        self,
+        contigs: Path,
+        view_num: int,
+        contig_length: int,
+        output_dir: Path,
+    ) -> Dict[str, Dict]:
+        """
+        Augmentation of contigs only. The returned data is a dictionary storing: raw contig -> ( seq, header, (start, end) )
+        """
+        # three things used across the stage:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        FragMent_Dict: OrderedDict = OrderedDict()
+        All_Fragments: list = []
+
+        FragMent_Dict, All_Fragments = self.augmentation(
+            fasta_file=str(contigs),
+            output_dir=str(output_dir),
+            num_views=view_num,
+            length_threshold=contig_length,
+            method="simclr",
+        )
+
+        return FragMent_Dict, All_Fragments

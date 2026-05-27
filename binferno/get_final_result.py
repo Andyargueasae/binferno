@@ -318,7 +318,7 @@ def run_get_final_result(
             make_sure_path_exists(output_dir)
             profile = Profile(num_threads)
             if checkm_database:
-                profile.Profile_setup(checkm_database)
+                profile.profile_setup(checkm_database)
             if plastid:
                 profile.run_pltd(bin_dirs, output_dir)
             else:

@@ -159,9 +159,9 @@ class Binferno(object):
             "merge_kmer_corgi": merge_kmer_corgi,
         }
 
-        from .train_CLmodel import train_CLmodel
+        from .train_CLmodel import train_cl_model
 
-        train_CLmodel(
+        train_cl_model(
             logger,
             device=None,
             num_threads=threads,

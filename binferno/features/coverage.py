@@ -4,7 +4,7 @@ from multiprocessing import Pool
 from typing import Dict, List, Set, Tuple, Union, Any
 import glob
 import pandas as pd
-from .base import BaseFeatures
+from .base import BaseFeatureBuilder
 import numpy as np
 import pysam
 from tqdm import tqdm
@@ -490,7 +490,7 @@ def _normalise_coverage_dicts(
     raise ValueError(f"Unsupported normalization method: {norm_method}")
 
 
-def calculateBamCov(
+def calculate_bam_cov(
     bam_files: str,
     bam_batch: int = 100000,
     fragments_dict: dict = None,
@@ -634,7 +634,7 @@ def max_normalize_stacked_coverage(
     return df / col_max
 
 
-class CoverageFeatures(BaseFeatures):
+class CoverageFeatureBuilder(BaseFeatureBuilder):
     normalize_method: str = Field(
         default="rpkm",
         description=(
@@ -659,16 +659,13 @@ class CoverageFeatures(BaseFeatures):
     ) -> pd.DataFrame:
         bam_batch = 100_000
 
-        logger.info(
-            f"Extracting coverage for single fragment dict."
-
-        )
+        logger.info(f"Extracting coverage for single fragment dict.")
 
         if self.simclr:
             # COMEBin-like path:
             # return raw coverage first, ordered [std..., mean...].
             # normalize later after stacking all views.
-            return calculateBamCov(
+            return calculate_bam_cov(
                 bam_path,
                 bam_batch=bam_batch,
                 fragments_dict=fragment_dict,
@@ -680,7 +677,7 @@ class CoverageFeatures(BaseFeatures):
 
         # Non-SimCLR path:
         # retain rpm/rpkm/max/none immediate normalization.
-        return calculateBamCov(
+        return calculate_bam_cov(
             bam_path,
             bam_batch=bam_batch,
             fragments_dict=fragment_dict,
@@ -692,6 +689,6 @@ class CoverageFeatures(BaseFeatures):
 
 
 # ======= Multisample coverage features. =======
-# class CoverageMultiFeatures(CoverageFeatures):
-    # def __call__():
-        # pass
+# class CoverageMultiFeatureBuilder(CoverageFeatureBuilder):
+# def __call__():
+# pass

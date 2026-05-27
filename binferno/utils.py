@@ -80,7 +80,8 @@ def save_result(result, filepath, namelist):
         f.write(namelist[contigIdx] + "\t" + str(result[contigIdx].item(0)) + "\n")
     f.close()
 
-def calc_N50(contigs: str) -> int:
+
+def calc_n50(contigs: str) -> int:
     seq_record = pyfastx.Fastx(contigs)
     lengths = sorted([len(record) for _, record in seq_record], reverse=True)
     total_length = sum(lengths)
@@ -90,7 +91,6 @@ def calc_N50(contigs: str) -> int:
         if cumulative_length >= total_length / 2:
             return length
     return 0
-
 
 
 def get_kmer_coverage_aug0(data_path):
@@ -149,7 +149,7 @@ def get_embeddings(model, test_dl, embedding_dim, device):
     return embs
 
 
-def get_kmerMetric_emb(
+def get_kmer_metric_emb(
     kmer_model_path,
     compositMats,
     device=torch.device("cpu"),

@@ -27,7 +27,7 @@ class Profile:
         check_on_path("checkm")
         self.cpus = cpus
 
-    def Profile_setup(self, database):
+    def profile_setup(self, database):
         """
         Set the active CheckM database root.
         """

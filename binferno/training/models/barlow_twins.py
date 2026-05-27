@@ -81,11 +81,11 @@ class NeuralNetwork(nn.Module):
             nn.Linear(cov_hidden1, cov_hidden2),
             nn.BatchNorm1d(cov_hidden2),
             nn.LeakyReLU(),
-        )  
+        )
 
-        self.final_cov_dim = cov_hidden2 
+        self.final_cov_dim = cov_hidden2
 
-        self.fusion_network = FusionNetwork(
+        self.fusion_network = fusion_network(
             emb_dim=output_dim,
             kmer_enc_dim=output_dim,
             coverage_dim=self.final_cov_dim,
@@ -478,7 +478,7 @@ class attentionFusion(nn.Module):
         return self.normal_forward(tnf_feature, coverage_feature)
 
 
-def FusionNetwork(
+def fusion_network(
     emb_dim=128,
     kmer_enc_dim=128,
     coverage_dim=128,

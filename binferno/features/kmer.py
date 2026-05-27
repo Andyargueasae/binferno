@@ -3,7 +3,7 @@ from itertools import product
 from pathlib import Path
 import itertools
 import os
-from .base import BaseFeatures
+from .base import BaseFeatureBuilder
 import pandas as pd
 import numpy as np
 from pydantic import Field
@@ -154,21 +154,19 @@ def generate_kmer_projection(contigs: dict) -> Tuple[np.ndarray, List[str]]:
     return projection_matrix, identifiers
 
 
-class KmerFeatures(BaseFeatures):
+class KmerFeatureBuilder(BaseFeatureBuilder):
     pseudocount: int = Field(
         1,
         description="Pseudocount to add to k-mer counts before normalization. Default is 1, recommended for SimCLR to avoid zero features.",
     )
 
-    def __call__(
-        self,
-        fragments: list
-    ) -> pd.DataFrame:
+    def __call__(self, fragments: list) -> pd.DataFrame:
         # generate hashable 4-mer feature mapping, prepare for counting tnfs.
         # pseudocount = 1 if method == "SimCLR" else 1e-5
         kmer_df = _calculate_kmer_composition(
             fragments, kmer_len=KMER_LEN, pseudocount=self.pseudocount
         )
         return kmer_df
+
 
 # ======= Multisample kmer features. =======

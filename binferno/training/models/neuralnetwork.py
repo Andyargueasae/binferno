@@ -1,145 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
-
-
-# The raw COMEBin's embedding network is a simple MLP with batch normalization and dropout. We can use it as a baseline model for our experiments. We can also implement a more complex fusion network later to see if we can improve the performance.
-class EmbeddingNet(nn.Module):
-    # Useful code from fast.ai tabular model
-    # https://github.com/fastai/fastai/blob/3b7c453cfa3845c6ffc496dd4043c07f3919270e/fastai/tabular/models.py#L6
-    def __init__(self, in_sz, out_sz, emb_szs, ps, use_bn=True, actn=nn.ReLU()):
-        super(EmbeddingNet, self).__init__()
-        self.in_sz = in_sz
-        self.out_sz = out_sz
-        self.n_embs = len(emb_szs) - 1
-        if ps == 0:
-            ps = np.zeros(self.n_embs)
-        # input layer
-        layers = [nn.Linear(self.in_sz, emb_szs[0]), actn]
-        # hidden layers
-        for i in range(self.n_embs):
-            layers += self.bn_drop_lin(
-                n_in=emb_szs[i], n_out=emb_szs[i + 1], bn=use_bn, p=ps[i], actn=actn
-            )
-        # output layer
-        layers.append(nn.Linear(emb_szs[-1], self.out_sz))
-        self.fc = nn.Sequential(*layers)
-
-    def bn_drop_lin(
-        self,
-        n_in: int,
-        n_out: int,
-        bn: bool = True,
-        p: float = 0.0,
-        actn: nn.Module = None,
-    ):
-        # https://github.com/fastai/fastai/blob/3b7c453cfa3845c6ffc496dd4043c07f3919270e/fastai/layers.py#L44
-        "Sequence of batchnorm (if `bn`), dropout (with `p`) and linear (`n_in`,`n_out`) layers followed by `actn`."
-        layers = [nn.BatchNorm1d(n_in)] if bn else []
-        if p != 0:
-            layers.append(nn.Dropout(p))
-        layers.append(nn.Linear(n_in, n_out))
-        if actn is not None:
-            layers.append(actn)
-        return layers
-
-    def forward(self, x):
-        output = self.fc(x)
-        return output  # F.normalize(output) #output #/ torch.linalg.vector_norm(output, dim=-1, keepdim=True)
-
-
-class SimCLRNet(nn.Module):
-    # Useful code from fast.ai tabular model
-    # https://github.com/fastai/fastai/blob/3b7c453cfa3845c6ffc496dd4043c07f3919270e/fastai/tabular/models.py#L6
-    def __init__(
-        self,
-        in_sz,
-        out_sz,
-        emb_szs,
-        ps,
-        use_bn=True,
-        actn=nn.ReLU(),
-        pretrained_model=None,
-        cov_model=None,
-        covmodel_notl2normalize=False,
-    ):
-        super(SimCLRNet, self).__init__()
-        self.pretrained_model = pretrained_model
-        self.cov_model = cov_model
-        self.in_sz = in_sz
-        self.out_sz = out_sz
-        self.n_embs = len(emb_szs) - 1
-        self.covmodel_notl2normalize = covmodel_notl2normalize
-        if ps == 0:
-            ps = np.zeros(self.n_embs)
-        # input layer
-        layers = [nn.Linear(self.in_sz, emb_szs[0]), actn]
-        # hidden layers
-        for i in range(self.n_embs):
-            layers += self.bn_drop_lin(
-                n_in=emb_szs[i], n_out=emb_szs[i + 1], bn=use_bn, p=ps[i], actn=actn
-            )
-        # output layer
-        layers.append(nn.Linear(emb_szs[-1], self.out_sz))
-        self.fc = nn.Sequential(*layers)
-        project_layer = [actn, nn.Linear(self.out_sz, self.out_sz)]
-        # project_layer= [nn.Linear(self.out_sz,self.out_sz),actn,nn.Linear(self.out_sz,self.out_sz)]
-        self.fc2 = nn.Sequential(*project_layer)
-
-    def bn_drop_lin(
-        self,
-        n_in: int,
-        n_out: int,
-        bn: bool = True,
-        p: float = 0.0,
-        actn: nn.Module = None,
-    ):
-        # https://github.com/fastai/fastai/blob/3b7c453cfa3845c6ffc496dd4043c07f3919270e/fastai/layers.py#L44
-        "Sequence of batchnorm (if `bn`), dropout (with `p`) and linear (`n_in`,`n_out`) layers followed by `actn`."
-        layers = [nn.BatchNorm1d(n_in)] if bn else []
-        if p != 0:
-            layers.append(nn.Dropout(p))
-        layers.append(nn.Linear(n_in, n_out))
-        if actn is not None:
-            layers.append(actn)
-        return layers
-
-    def forward(self, x, x2=None):
-        if self.pretrained_model is not None and self.cov_model is None:
-            kmeremb = self.pretrained_model(x)
-            x = torch.cat([F.normalize(self.pretrained_model(x)), x2], dim=-1)
-        if self.pretrained_model is not None and self.cov_model is not None:
-            kmeremb = self.pretrained_model(x)
-            if self.covmodel_notl2normalize:
-                x = torch.cat(
-                    [F.normalize(self.pretrained_model(x)), self.cov_model(x2)], dim=-1
-                )
-            else:
-                x = torch.cat(
-                    [
-                        F.normalize(self.pretrained_model(x)),
-                        F.normalize(self.cov_model(x2)),
-                    ],
-                    dim=-1,
-                )
-        
-        # this is the case.
-        if self.pretrained_model is None and self.cov_model is not None:
-            if self.covmodel_notl2normalize:
-                x = torch.cat([x, self.cov_model(x2)], dim=-1)
-            else:
-                # coverage model feature is normalized by default and concatenated with original features.
-                x = torch.cat([x, F.normalize(self.cov_model(x2))], dim=-1)
-
-        output = self.fc(x)
-
-        if self.cov_model is not None and self.pretrained_model is not None:
-            return output, self.cov_model(x2), kmeremb
-        elif self.cov_model is not None and self.pretrained_model is None:
-            return output, self.cov_model(x2)
-        else:
-            return output  # F.normalize(output) #output #/ torch.linalg.vector_norm(output, dim=-1, keepdim=True)
 
 
 # Then our model got an attention-based fusion network.
@@ -147,7 +7,7 @@ class attentionFusion(nn.Module):
     DEFAULT_NUM_HEADS = 4
     DEFAULT_DROPOUT = 0.1
     GATE_INPUT_MULTIPLIER = 2  # For concatenated features in gates
-    MULTI_SCALE_CONCAT_MULTIPLIER = 6  # 3 scales * 2 (kmer+coverage (+corgi)) features each, so could be 9 if we include corgi as well. But for now we will keep it at 6 for kmer and coverage only. 
+    MULTI_SCALE_CONCAT_MULTIPLIER = 6  # 3 scales * 2 (kmer+coverage (+corgi)) features each, so could be 9 if we include corgi as well. But for now we will keep it at 6 for kmer and coverage only.
     COMPRESSOR_HIDDEN_MULTIPLIER = 4
     COMPRESSOR_OUTPUT_MULTIPLIER = 2
     INTERACTION_HIDDEN_MULTIPLIER = 3
@@ -203,7 +63,7 @@ class attentionFusion(nn.Module):
             embed_dim=self.emb_dim,
             num_heads=self.NUM_HEADS,
             dropout=self.DROPOUT,
-            batch_first=True, # always keep an eye on batch_first: as dimensions matters.
+            batch_first=True,  # always keep an eye on batch_first: as dimensions matters.
         )
         self.MHA_cov2kmer = nn.MultiheadAttention(
             embed_dim=self.emb_dim,
@@ -221,13 +81,13 @@ class attentionFusion(nn.Module):
             nn.Sigmoid(),
         )
 
-        # if corgi_dim > 0, add corgi to cross-attention and fusion as well. But first test with kmer_concat with coverage only. 
+        # if corgi_dim > 0, add corgi to cross-attention and fusion as well. But first test with kmer_concat with coverage only.
         if self.corgi_dim > 0:
             self.corgi_proj = nn.Linear(corgi_dim, self.emb_dim)
             self.corgi_gate = nn.Sequential(
                 nn.Linear(self.emb_dim * self.GATE_INPUT_MULTIPLIER, self.emb_dim),
                 nn.Sigmoid(),
-            ) # equivalent to kmer and coverage.
+            )  # equivalent to kmer and coverage.
             self.MHA_kmer2corgi = nn.MultiheadAttention(
                 embed_dim=self.emb_dim,
                 num_heads=self.NUM_HEADS,
@@ -316,7 +176,9 @@ class attentionFusion(nn.Module):
         cov_emb = self.coverage_proj(coverage_feature).unsqueeze(
             1
         )  # ( batch_size, 1, emb_dim)
-        corgi_emb = self.corgi_proj(corgi_feature).unsqueeze(1)  # ( batch_size, 1, emb_dim)
+        corgi_emb = self.corgi_proj(corgi_feature).unsqueeze(
+            1
+        )  # ( batch_size, 1, emb_dim)
 
         kmer_attended, _ = self.MHA_kmer2cov(
             kmer_emb, cov_emb, cov_emb
@@ -356,8 +218,8 @@ class attentionFusion(nn.Module):
         corgi_gate_weight = self.corgi_gate(
             torch.cat([kmer_emb, cov_emb, corgi_emb], dim=1)
         )
-        
-        # do we want to sum all weights to one? 
+
+        # do we want to sum all weights to one?
         gated_kmer = (
             kmer_gate_weight * kmer_emb
             + (1 - kmer_gate_weight) * kmer_attended.squeeze(1)
@@ -368,9 +230,8 @@ class attentionFusion(nn.Module):
             + (1 - coverage_gate_weight) * cov_attended.squeeze(1)
             + corgi_gate_weight * cov_corgi_attended.squeeze(1)
         )
-        gated_corgi = (
-            corgi_gate_weight * corgi_emb
-            + (1 - corgi_gate_weight) * (corgi_kmer_attended.squeeze(1) + corgi_cov_attended.squeeze(1))
+        gated_corgi = corgi_gate_weight * corgi_emb + (1 - corgi_gate_weight) * (
+            corgi_kmer_attended.squeeze(1) + corgi_cov_attended.squeeze(1)
         )
 
         residual_weight_clamped = torch.clamp(self.residual_weight, min=0.1, max=0.9)
@@ -420,7 +281,7 @@ class attentionFusion(nn.Module):
 
             output = self.fused_proj(final_fused_features)
             return output
-        
+
     def normal_forward(self, tnf_feature, coverage_feature):
         kmer_emb = self.kmer_proj(tnf_feature).unsqueeze(1)  # ( batch_size, 1, emb_dim)
         cov_emb = self.coverage_proj(coverage_feature).unsqueeze(
@@ -494,7 +355,6 @@ class attentionFusion(nn.Module):
             output = self.fused_proj(final_fused_features)
             return output
 
-        
     def forward(self, tnf_feature, coverage_feature, corgi_feature=None):
         if not corgi_feature is None:
             return self.corgi_forward(corgi_feature, tnf_feature, coverage_feature)
@@ -505,7 +365,7 @@ class attentionFusion(nn.Module):
 # We need to encounter the inflated memory and disk usage, and additional computation time.
 
 
-def FusionNetwork(
+def fusion_network(
     emb_dim=128,
     kmer_enc_dim=128,
     coverage_dim=128,
@@ -604,10 +464,10 @@ class NeuralNetwork(nn.Module):
             nn.LeakyReLU(),  # the forgoten leakyrelu after batchnorm can cause the representation to have a lot of zeros, which can lead to worse performance. Adding it back can improve the performance.
         )  # not output dim this time.
 
-        self.final_cov_dim = cov_hidden2 # 128?
+        self.final_cov_dim = cov_hidden2  # 128?
 
         # leave fusion network to be implemented later.
-        self.fusion_network = FusionNetwork(
+        self.fusion_network = fusion_network(
             emb_dim=output_dim,
             kmer_enc_dim=output_dim,
             coverage_dim=self.final_cov_dim,

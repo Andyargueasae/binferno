@@ -180,7 +180,7 @@ class Profile:
 
         fout.close()
 
-    def Profile_setup(self, database):
+    def profile_setup(self, database):
         """Set up CheckM database using checkm data.
         Parameters
         ----------

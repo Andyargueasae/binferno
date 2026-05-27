@@ -1,4 +1,7 @@
+import hashlib
 import itertools
+from typing import Dict
+from pydantic import Field
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -9,28 +12,46 @@ import random
 import pandas as pd
 from tqdm import tqdm
 from pathlib import Path
-from .neuralnetwork import NeuralNetwork
-from ..features import BinfernoFeatures
-from .base import BaseTraining
+from .models.barlow_twins import NeuralNetwork
+from ..features import BinfernoFeatureBuilder
+from .base import BaseTrainer
+import pyfastx
+from collections import OrderedDict
 
 
-class BarlowTwinsTraining(BaseTraining):
-    features: BinfernoFeatures
+class BarlowTwinsTrainer(BaseTrainer):
+    features: BinfernoFeatureBuilder
+
+    learning_rate: float = Field(
+        default=2.5e-3, description="Learning rate for training."
+    )
+    batch_size: int = Field(default=1024, description="Batch size for training.")
+    epochs: int = Field(default=300, description="Number of epochs for training.")
+    weight_decay: float = Field(default=1e-4, description="Weight decay for training.")
+    seed: int = Field(default=42, description="Random seed for training.")
+    output_dim: int = Field(
+        default=128, description="Output dimension for the embeddings."
+    )
+    n_layers: int = Field(
+        default=2, description="Number of layers for the neural network."
+    )
+    contig_length: int = Field(
+        default=1000, description="Minimum contig length to be included in training."
+    )
+    view_num: int = Field(
+        default=6, description="Number of augmented views to generate for each contig."
+    )
+    seed: int = Field(
+        default=42, description="Random seed for training and augmentation."
+    )
 
     def __call__(
         self,
         contigs: str,
         bam: str,
         output_dir: Path,
-        view_num: int = 6,
-        contig_length: int = 1000,
         logger=None,
         threads: int = 4,
-        epochs: int = 300,
-        n_layers: int = 2,
-        output_dim: int = 128,
-        multiscale: bool = False,
-        batch_size: int = 1024,
         multisample: bool = False,
         **kwargs,
     ):
@@ -42,13 +63,14 @@ class BarlowTwinsTraining(BaseTraining):
          - view_num: number of augmented views to generate for each contig.
          - contig_length: minimum length of contigs to consider for augmentation.
         """
+
         fragment_dict, all_fragments, namelist = self.gen_views(
             contigs=contigs,
             simclr=False,
             barlow_twins=True,
             output_dir=output_dir,
-            view_num=view_num,
-            contig_length=contig_length,
+            view_num=self.view_num,
+            contig_length=self.contig_length,
         )
 
         feature_df = self.features(
@@ -58,11 +80,13 @@ class BarlowTwinsTraining(BaseTraining):
             bam_path=bam,
             threads=threads,
             logger=logger,
-            output_dir=output_dir
+            output_dir=output_dir,
         )
 
-        feature_df = self.features.sort_features_by_method(
-            feature_df, contig_ids=namelist, simclr=False,
+        feature_df = self.sort_features_by_method(
+            feature_df,
+            contig_ids=namelist,
+            simclr=False,
         )
 
         if torch.cuda.is_available():
@@ -85,24 +109,26 @@ class BarlowTwinsTraining(BaseTraining):
             composition_dim=composition_dim,
             kmer_dim=kmer_dim,
             proj_head_dim=proj_head_dim,
-            n_layers=n_layers,
-            output_dim=output_dim,
-            multiscale=multiscale,
+            n_layers=self.n_layers,
+            output_dim=self.output_dim,
         ).to(device)
 
-        dataloader, optimizer, scheduler = self.prepare_training(
-            model=model, data_df=feature_df, batch_size=batch_size, epochs=epochs
+        dataloader, optimizer, scheduler = self.prepare_trainer(
+            model=model,
+            data_df=feature_df,
+            batch_size=self.batch_size,
+            epochs=self.epochs,
         )
 
         model_path = output_dir / "best_model.pt"
         if not model_path.exists():
-            model = self.Train(
+            model = self.train(
                 dataloader=dataloader,
                 optimizer=optimizer,
                 scheduler=scheduler,
                 device=device,
                 method="barlow_twins",
-                epochs=epochs,
+                epochs=self.epochs,
                 model=model,
                 output_dir=output_dir,
                 logger=logger,
@@ -121,7 +147,7 @@ class BarlowTwinsTraining(BaseTraining):
                 model=model,
                 data_df=feature_df,
                 output_path=embedding_path,
-                batch_size=batch_size,
+                batch_size=self.batch_size,
                 save_individual_embs=False,
             )
 
@@ -331,7 +357,7 @@ class BarlowTwinsTraining(BaseTraining):
 
             return TensorDataset(features1, features2, base_ids)
 
-    def prepare_training(
+    def prepare_trainer(
         self, model, data_df, batch_size: int = 1024, logger=None, **kwargs
     ):
         dataset_builder = self.BuildDataset(data_df=data_df)
@@ -370,7 +396,7 @@ class BarlowTwinsTraining(BaseTraining):
         )
         return dataloader, optimizer, scheduler
 
-    def Train(
+    def train(
         self,
         dataloader: torch.utils.data.DataLoader,
         optimizer: torch.optim.Optimizer,
@@ -383,7 +409,9 @@ class BarlowTwinsTraining(BaseTraining):
         logger=None,
         **kwargs,
     ):
-
+        self.unify_seeds(
+            self.seed
+        )  # ensure reproducibility by unifying seeds across random, numpy, and torch.
         MODEL_PATH = output_dir / "best_model.pt"
         if logger is None:
             raise ValueError(
@@ -465,3 +493,323 @@ class BarlowTwinsTraining(BaseTraining):
 
         avg_loss = total_loss / len(dataloader)
         return avg_loss, stats
+
+    def barlow_twins_augmentation(
+        self,
+        sequence: str,
+        header: str,
+        min_contig_length: int,
+        num_augmentations: int,
+        max_overlap: float = 0.25,
+    ) -> list[tuple[str, str, int, int]]:
+        """
+        Per-sequence augmentation.
+
+        Returns:
+            List of (fragment_header, fragment_sequence, global_start, fragment_length).
+        """
+        seq_len = len(sequence)
+        fragments: list[tuple[str, str, int, int]] = []
+
+        if seq_len < min_contig_length:
+            return fragments
+
+        fragments.append((f"{header}.original", sequence, 0, seq_len))
+
+        if num_augmentations <= 0:
+            return fragments
+
+        split_threshold = 50000
+
+        if seq_len > split_threshold:
+            mid = seq_len // 2
+
+            left_fragments = self._generate_half_augmentations(
+                sequence=sequence[:mid],
+                base_header=header,
+                half_id="h1",
+                global_offset=0,
+                min_contig_length=min_contig_length,
+                num_augmentations=num_augmentations,
+                max_overlap=max_overlap,
+            )
+            right_fragments = self._generate_half_augmentations(
+                sequence=sequence[mid:],
+                base_header=header,
+                half_id="h2",
+                global_offset=mid,
+                min_contig_length=min_contig_length,
+                num_augmentations=num_augmentations,
+                max_overlap=max_overlap,
+            )
+
+            fragments.extend(left_fragments)
+            fragments.extend(right_fragments)
+
+            print(
+                f"Generated {len(fragments)} fragments for large contig {header} "
+                f"(length {seq_len}): {len(left_fragments)} from first half, "
+                f"{len(right_fragments)} from second half"
+            )
+        else:
+            generated = self._generate_half_augmentations(
+                sequence=sequence,
+                base_header=header,
+                half_id="",
+                global_offset=0,
+                min_contig_length=min_contig_length,
+                num_augmentations=num_augmentations,
+                max_overlap=max_overlap,
+            )
+            fragments.extend(generated)
+
+            print(
+                f"Generated {len(fragments)} fragments for {header} (length {seq_len})"
+            )
+
+        return fragments
+
+    def _generate_half_augmentations(
+        self,
+        sequence: str,
+        base_header: str,
+        half_id: str,
+        global_offset: int,
+        min_contig_length: int,
+        num_augmentations: int,
+        max_overlap: float,
+    ) -> list[tuple[str, str, int, int]]:
+        """
+        Generate augmented fragments for a sequence half (or a full smaller contig).
+
+        Returns:
+            List of (fragment_header, fragment_sequence, global_start, fragment_length).
+        """
+        seq_len = len(sequence)
+        if seq_len < min_contig_length:
+            return []
+
+        seed_material = f"{base_header}_{half_id}".encode("utf-8")
+        seed = int.from_bytes(hashlib.sha256(seed_material).digest()[:4], "big")
+        rng = random.Random(seed)
+
+        fragments: list[tuple[str, str, int, int]] = []
+
+        # Store accepted intervals separately for faster overlap checks:
+        # (global_start, global_end, length)
+        accepted_intervals: list[tuple[int, int, int]] = []
+
+        selected = 0
+        attempts = 0
+        max_attempts = max(1, num_augmentations * 10)
+
+        while selected < num_augmentations and attempts < max_attempts:
+            attempts += 1
+
+            # Same strategy weighting as the original:
+            # 50% "both", otherwise choose left/right/center uniformly.
+            if rng.getrandbits(1):  # 50% chance to choose "both" edges masking
+                strategy = "both"
+            else:
+                strategy = rng.choice(("left", "right", "center"))
+
+            if strategy == "left":
+                max_mask = seq_len - min_contig_length
+                if max_mask <= 0:
+                    continue
+                start_pos = rng.randint(1, max_mask)
+                end_pos = seq_len
+
+            elif strategy == "right":
+                max_mask = seq_len - min_contig_length
+                if max_mask <= 0:
+                    continue
+                start_pos = 0
+                end_pos = seq_len - rng.randint(1, max_mask)
+
+            elif strategy == "both":
+                max_total_mask = seq_len - min_contig_length
+                if max_total_mask <= 0:
+                    continue
+                total_mask = rng.randint(1, max_total_mask)
+                left_mask = rng.randint(0, total_mask)
+                right_mask = total_mask - left_mask
+                start_pos = left_mask
+                end_pos = seq_len - right_mask
+
+            else:  # center
+                if seq_len < 2 * min_contig_length:
+                    continue
+
+                max_center_mask = seq_len - 2 * min_contig_length
+                if max_center_mask <= 0:
+                    continue
+
+                center_mask_size = rng.randint(1, max_center_mask)
+                center_start = rng.randint(
+                    min_contig_length,
+                    seq_len - min_contig_length - center_mask_size,
+                )
+                center_end = center_start + center_mask_size
+
+                if rng.getrandbits(1):
+                    start_pos = 0
+                    end_pos = center_start
+                else:
+                    start_pos = center_end
+                    end_pos = seq_len
+
+            frag_len = end_pos - start_pos
+            if frag_len < min_contig_length:
+                continue
+
+            global_start = start_pos + global_offset
+            global_end = end_pos + global_offset
+
+            # Faster overlap scan over compact interval data.
+            valid = True
+            for prev_start, prev_end, prev_len in accepted_intervals:
+                overlap_start = (
+                    global_start if global_start > prev_start else prev_start
+                )
+                overlap_end = global_end if global_end < prev_end else prev_end
+                overlap_len = overlap_end - overlap_start
+
+                if overlap_len > 0:
+                    denom = frag_len if frag_len > prev_len else prev_len
+                    if (overlap_len / denom) >= max_overlap:
+                        valid = False
+                        break
+
+            if not valid:
+                continue
+
+            fragment_header = (
+                f"{base_header}.{half_id}.{selected}"
+                if half_id
+                else f"{base_header}.{selected}"
+            )
+            fragment_seq = sequence[start_pos:end_pos]
+
+            fragments.append((fragment_header, fragment_seq, global_start, frag_len))
+            accepted_intervals.append((global_start, global_end, frag_len))
+            selected += 1
+
+        return fragments
+
+    def augmentation(
+        self,
+        fasta_file=None,
+        num_views=6,
+        length_threshold=1000,
+        method: str = "barlow_twins",
+    ):
+        # initialize the augmentation.
+        seqs = pyfastx.Fastx(fasta_file)
+        all_fragments = []
+        fragment_to_contig = {}
+        short_fragment_count = 0
+        sequence_count = 0
+        # apply augmentation.
+        fragments_dict = OrderedDict()
+        fragment_count = 0
+
+        assert method in [
+            "barlow_twins",
+            "simclr",
+        ], "Method must be either 'barlow_twins' or 'simclr'. \
+            Please set the method parameter accordingly."
+
+        # the loop over sequences to generate augmentations.
+        for header, seq in seqs:
+            if len(seq) < length_threshold:
+                continue
+            clean_header = str(header.split()[0])
+            fragments_dict[clean_header] = {
+                "sequence": seq,
+                "fragments": [],
+                "fragment_info": {},
+            }
+
+            augmented_fragments = self.barlow_twins_augmentation(
+                sequence=seq,
+                header=clean_header,
+                min_contig_length=length_threshold,
+                num_augmentations=num_views,
+            )
+
+            for (
+                fragment_header,
+                fragment_seq,
+                start_pos,
+                frag_len,
+            ) in augmented_fragments:
+                fragments_dict[clean_header]["fragments"].append(fragment_header)
+                fragments_dict[clean_header]["fragment_info"][fragment_header] = {
+                    "start_pos": start_pos,
+                    "length": frag_len,
+                }
+
+                if len(fragment_seq) < length_threshold:
+                    short_fragment_count += 1
+                    continue
+
+                all_fragments.append((fragment_header, fragment_seq))
+                fragment_to_contig[fragment_header] = clean_header
+                fragment_count += 1
+
+            sequence_count += 1
+
+        print(f"Total sequences processed: {sequence_count}")
+        print(f"Total fragments generated: {len(all_fragments)}")
+        return fragments_dict, all_fragments
+
+    def augment_views(
+        self,
+        contigs: Path,
+        view_num: int,
+        contig_length: int,
+        output_dir: Path,
+    ) -> Dict[str, Dict]:
+        """
+        Augmentation of contigs only. The returned data is a dictionary storing: raw contig -> ( seq, header, (start, end) )
+        """
+        # three things used across the stage:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        FragMent_Dict: OrderedDict = OrderedDict()
+        All_Fragments: list = []
+
+        FragMent_Dict, All_Fragments = self.augmentation(
+            fasta_file=str(contigs),
+            output_dir=str(output_dir),
+            num_views=view_num,
+            length_threshold=contig_length,
+            method="barlow_twins",
+        )
+
+        return FragMent_Dict, All_Fragments
+
+    def gen_views(
+        self,
+        contigs=None,
+        simclr=False,
+        barlow_twins=False,
+        output_dir=None,
+        view_num=6,
+        contig_length=1000,
+    ) -> Dict[str, pd.DataFrame]:
+        # process input contigs into augmented fragments.
+        FragMent_Dict, All_Fragments = self.augment_views(
+            contigs=contigs,
+            view_num=view_num,
+            contig_length=contig_length,
+            output_dir=output_dir,
+            simclr=simclr,
+            barlow_twins=barlow_twins,
+        )
+
+        namelist = list(
+            FragMent_Dict.keys()
+        )  # the ordered contig names which will be used for indexing the features.
+
+        return FragMent_Dict, All_Fragments, namelist

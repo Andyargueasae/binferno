@@ -5,7 +5,7 @@ import numpy as np
 import glob
 import pandas as pd
 import torch
-from binferno.utils import get_kmerMetric_emb
+from binferno.utils import get_kmer_metric_emb
 from sklearn.preprocessing import normalize
 
 
@@ -56,7 +56,7 @@ def read_memmap(path, count, dtype: str = "float16") -> np.memmap:
     return np.memmap(path, dtype=dtype, mode="r", shape=shape)
 
 
-def get_Corgi_coverage(
+def get_corgi_coverage(
     data_path: str,
     n_views: int = 2,
     device=torch.device("cpu"),
@@ -351,7 +351,7 @@ def get_kmer_coverage(
         if kmer_l2_normalize:
             compositMats = normalize(compositMats)
         if kmer_model_path != "empty":
-            compositMats = get_kmerMetric_emb(
+            compositMats = get_kmer_metric_emb(
                 kmer_model_path, compositMats, device, kmerMetric_notl2normalize
             )
 
@@ -366,7 +366,7 @@ def get_kmer_coverage(
     return list(torch.split(torch.from_numpy(X_ts).float(), len(namelist))), namelist
 
 
-def get_ContrastiveLearningDataset(
+def get_contrastive_learning_dataset(
     data_path: str,
     n_views: int = 2,
     kmer_model_path: str = "empty",
@@ -417,7 +417,7 @@ def get_ContrastiveLearningDataset(
     return dataset, namelist
 
 
-def GetCorgiContrastiveDataset(
+def get_corgi_contrastive_dataset(
     data_path: str,
     n_views: int = 2,
     device=torch.device("cpu"),
@@ -439,7 +439,7 @@ def GetCorgiContrastiveDataset(
     """
     if not data_path.endswith("/"):
         data_path = data_path + "/"
-    dataset, namelist = get_Corgi_coverage(
+    dataset, namelist = get_corgi_coverage(
         data_path=data_path,
         n_views=n_views,
         device=device,

@@ -2,32 +2,29 @@ import glob
 from pathlib import Path
 import tyro
 
-from binferno.training import BinfernoTraining
+from binferno.training import BinfernoTrainer
 from binferno.clustering import BinfernoClustering
 from binferno.gen_results import BinfernoResults
 from loguru import logger
-from .utils import gen_seed, calc_N50
+from .utils import gen_seed, calc_n50
+
 
 def binferno(
     fasta: str,
     bam: str,
     output_dir: Path,
-    training: BinfernoTraining,
+    training: BinfernoTrainer,
     clustering: BinfernoClustering,
     results: BinfernoResults,
-    simclr: bool = True,
-    barlow_twins: bool = False,
-    threads: int = 10,
+    threads: int = 4,
     only_training: bool = True,  # True: only run training, False: full process.
     plastid: bool = False,
-    view_num: int = 6,
-    multisample: bool = False,
 ):
 
     output_dir.mkdir(parents=True, exist_ok=True)
     logger.add(f"{output_dir}/binferno.log", rotation="1 MB", retention="10 days")
 
-    N_50 = calc_N50(fasta)
+    N_50 = calc_n50(fasta)
     logger.info(f"N50 of the input contigs: {N_50}")
     temperature = 0.15
     if N_50 > 10000:
@@ -36,13 +33,10 @@ def binferno(
     embeddings = training(
         contigs=fasta,
         bam=bam,
-        threads=threads,
         output_dir=output_dir,
-        training_method=(simclr, barlow_twins),
         temperature=temperature,
-        multisample=multisample,
-        view_num=view_num,
         logger=logger,
+        threads=threads,
     )
 
     if only_training:

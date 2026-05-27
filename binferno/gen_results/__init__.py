@@ -1,7 +1,6 @@
 from __future__ import annotations
 from pathlib import Path
 
-import loguru
 from .base import BaseResults
 from pydantic import Field
 import os
@@ -359,7 +358,7 @@ class BinfernoResults(BaseResults):
         if not unitem_profile_dir.exists():
             make_sure_path_exists(str(unitem_profile_dir))
             profile = self.Profile(cpus=num_threads)
-            profile.Profile_setup(checkm_database)
+            profile.profile_setup(checkm_database)
 
             if plastid:
                 profile.run_pltd(bin_dirs, str(unitem_profile_dir))

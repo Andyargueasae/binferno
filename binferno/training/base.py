@@ -1,375 +1,65 @@
-# from binferno.binferno.features.base import BaseFeatures
-import hashlib
 import math
 import os
 import random
-import pyfastx
 import numpy as np
 from pydantic import BaseModel
 import pandas as pd
 from pathlib import Path
 import torch
-from typing import Dict, List
-from collections import OrderedDict
 
 
-class BaseTraining(BaseModel):
-    def gen_views(
-        self,
-        contigs=None,
-        simclr=False,
-        barlow_twins=False,
-        output_dir=None,
-        view_num=6,
-        contig_length=1000,
-    ) -> Dict[str, pd.DataFrame]:
-        # process input contigs into augmented fragments.
-        FragMent_Dict, All_Fragments = self.augment_views(
-            contigs=contigs,
-            view_num=view_num,
-            contig_length=contig_length,
-            output_dir=output_dir,
-            simclr=simclr,
-            barlow_twins=barlow_twins,
+class BaseTrainer(BaseModel):
+
+    def __call__(self, contigs: Path, bam: Path, output_dir: Path = None):
+        raise NotImplementedError(
+            "The __call__ method must be implemented by the subclass."
         )
 
-        namelist = list(
-            FragMent_Dict.keys()
-        )  # the ordered contig names which will be used for indexing the features.
-
-        return FragMent_Dict, All_Fragments, namelist
-
-    def barlow_twins_augmentation(
+    def sort_features_by_method(
         self,
-        sequence: str,
-        header: str,
-        min_contig_length: int,
-        num_augmentations: int,
-        max_overlap: float = 0.25,
-    ) -> list[tuple[str, str, int, int]]:
-        """
-        Per-sequence augmentation.
-
-        Returns:
-            List of (fragment_header, fragment_sequence, global_start, fragment_length).
-        """
-        seq_len = len(sequence)
-        fragments: list[tuple[str, str, int, int]] = []
-
-        if seq_len < min_contig_length:
-            return fragments
-
-        fragments.append((f"{header}.original", sequence, 0, seq_len))
-
-        if num_augmentations <= 0:
-            return fragments
-
-        split_threshold = 50000
-
-        if seq_len > split_threshold:
-            mid = seq_len // 2
-
-            left_fragments = self._generate_half_augmentations(
-                sequence=sequence[:mid],
-                base_header=header,
-                half_id="h1",
-                global_offset=0,
-                min_contig_length=min_contig_length,
-                num_augmentations=num_augmentations,
-                max_overlap=max_overlap,
+        features_df: pd.DataFrame,
+        simclr: bool = False,
+        contig_ids: list = None,
+    ) -> pd.DataFrame:
+        if not contig_ids:
+            raise ValueError(
+                "contig_ids is required for sorting features. Please provide the list of contig names in the "
+                "order they were processed during augmentation."
             )
-            right_fragments = self._generate_half_augmentations(
-                sequence=sequence[mid:],
-                base_header=header,
-                half_id="h2",
-                global_offset=mid,
-                min_contig_length=min_contig_length,
-                num_augmentations=num_augmentations,
-                max_overlap=max_overlap,
-            )
-
-            fragments.extend(left_fragments)
-            fragments.extend(right_fragments)
-
-            print(
-                f"Generated {len(fragments)} fragments for large contig {header} "
-                f"(length {seq_len}): {len(left_fragments)} from first half, "
-                f"{len(right_fragments)} from second half"
-            )
+        if not simclr:
+            # sort the features_df by index.
+            features_df = features_df.sort_index()
+            return features_df
         else:
-            generated = self._generate_half_augmentations(
-                sequence=sequence,
-                base_header=header,
-                half_id="",
-                global_offset=0,
-                min_contig_length=min_contig_length,
-                num_augmentations=num_augmentations,
-                max_overlap=max_overlap,
+            # for simclr, group by view, stack the features of same view together, then concatenate the features.
+            features_df["view"] = (
+                features_df.index.str.rsplit(".", n=1).str[-1].astype(str)
             )
-            fragments.extend(generated)
+            # replace "original" as "0".
+            # features_df["view"] = features_df["view"].replace("original", "0")
+            features_df["view"] = features_df["view"].astype(int)
 
-            print(
-                f"Generated {len(fragments)} fragments for {header} (length {seq_len})"
-            )
-
-        return fragments
-
-    def _generate_half_augmentations(
-        sequence: str,
-        base_header: str,
-        half_id: str,
-        global_offset: int,
-        min_contig_length: int,
-        num_augmentations: int,
-        max_overlap: float,
-    ) -> list[tuple[str, str, int, int]]:
-        """
-        Generate augmented fragments for a sequence half (or a full smaller contig).
-
-        Returns:
-            List of (fragment_header, fragment_sequence, global_start, fragment_length).
-        """
-        seq_len = len(sequence)
-        if seq_len < min_contig_length:
-            return []
-
-        seed_material = f"{base_header}_{half_id}".encode("utf-8")
-        seed = int.from_bytes(hashlib.sha256(seed_material).digest()[:4], "big")
-        rng = random.Random(seed)
-
-        fragments: list[tuple[str, str, int, int]] = []
-
-        # Store accepted intervals separately for faster overlap checks:
-        # (global_start, global_end, length)
-        accepted_intervals: list[tuple[int, int, int]] = []
-
-        selected = 0
-        attempts = 0
-        max_attempts = max(1, num_augmentations * 10)
-
-        while selected < num_augmentations and attempts < max_attempts:
-            attempts += 1
-
-            # Same strategy weighting as the original:
-            # 50% "both", otherwise choose left/right/center uniformly.
-            if rng.getrandbits(1):  # 50% chance to choose "both" edges masking
-                strategy = "both"
-            else:
-                strategy = rng.choice(("left", "right", "center"))
-
-            if strategy == "left":
-                max_mask = seq_len - min_contig_length
-                if max_mask <= 0:
-                    continue
-                start_pos = rng.randint(1, max_mask)
-                end_pos = seq_len
-
-            elif strategy == "right":
-                max_mask = seq_len - min_contig_length
-                if max_mask <= 0:
-                    continue
-                start_pos = 0
-                end_pos = seq_len - rng.randint(1, max_mask)
-
-            elif strategy == "both":
-                max_total_mask = seq_len - min_contig_length
-                if max_total_mask <= 0:
-                    continue
-                total_mask = rng.randint(1, max_total_mask)
-                left_mask = rng.randint(0, total_mask)
-                right_mask = total_mask - left_mask
-                start_pos = left_mask
-                end_pos = seq_len - right_mask
-
-            else:  # center
-                if seq_len < 2 * min_contig_length:
-                    continue
-
-                max_center_mask = seq_len - 2 * min_contig_length
-                if max_center_mask <= 0:
-                    continue
-
-                center_mask_size = rng.randint(1, max_center_mask)
-                center_start = rng.randint(
-                    min_contig_length,
-                    seq_len - min_contig_length - center_mask_size,
-                )
-                center_end = center_start + center_mask_size
-
-                if rng.getrandbits(1):
-                    start_pos = 0
-                    end_pos = center_start
+            features_df = features_df.sort_values(by=["view"], ascending=True)
+            for i, view in enumerate(features_df["view"].unique()):
+                view_df = features_df[features_df["view"] == view]
+                # reindex view_df to make sure the order of features is the same across views.
+                view_df.index = [ind.rsplit(".", 1)[0] for ind in view_df.index]
+                view_df = view_df.reindex(
+                    contig_ids
+                )  # reindexing to ensure the same order of contigs across views
+                view_df.index = [
+                    f"{idx}.{view}" for idx in view_df.index
+                ]  # restore the original index format after reindexing
+                if i == 0:
+                    sorted_features_df = view_df
                 else:
-                    start_pos = center_end
-                    end_pos = seq_len
+                    sorted_features_df = pd.concat(
+                        [sorted_features_df, view_df], axis=0
+                    )
+            # for each view, make sure to sort the features by index.
+            features_df = sorted_features_df.drop(columns=["view"])
+            return features_df
 
-            frag_len = end_pos - start_pos
-            if frag_len < min_contig_length:
-                continue
-
-            global_start = start_pos + global_offset
-            global_end = end_pos + global_offset
-
-            # Faster overlap scan over compact interval data.
-            valid = True
-            for prev_start, prev_end, prev_len in accepted_intervals:
-                overlap_start = (
-                    global_start if global_start > prev_start else prev_start
-                )
-                overlap_end = global_end if global_end < prev_end else prev_end
-                overlap_len = overlap_end - overlap_start
-
-                if overlap_len > 0:
-                    denom = frag_len if frag_len > prev_len else prev_len
-                    if (overlap_len / denom) >= max_overlap:
-                        valid = False
-                        break
-
-            if not valid:
-                continue
-
-            fragment_header = (
-                f"{base_header}.{half_id}.{selected}"
-                if half_id
-                else f"{base_header}.{selected}"
-            )
-            fragment_seq = sequence[start_pos:end_pos]
-
-            fragments.append((fragment_header, fragment_seq, global_start, frag_len))
-            accepted_intervals.append((global_start, global_end, frag_len))
-            selected += 1
-
-        return fragments
-
-    def augmentation(
-        self,
-        fasta_file=None,
-        output_dir=None,
-        num_views=6,
-        length_threshold=1000,
-        method: str = "barlow_twins",
-    ):
-        # initialize the augmentation.
-        seqs = pyfastx.Fastx(fasta_file)
-        all_fragments = []
-        fragment_to_contig = {}
-        short_fragment_count = 0
-        sequence_count = 0
-        # apply augmentation.
-        fragments_dict = OrderedDict()
-        fragment_count = 0
-
-        assert method in [
-            "barlow_twins",
-            "simclr",
-        ], "Method must be either 'barlow_twins' or 'simclr'. \
-            Please set the method parameter accordingly."
-
-        # the loop over sequences to generate augmentations.
-        for header, seq in seqs:
-            if len(seq) < length_threshold:
-                continue
-            clean_header = str(header.split()[0])
-            fragments_dict[clean_header] = {
-                "sequence": seq,
-                "fragments": [],
-                "fragment_info": {},
-            }
-
-            if method == "barlow_twins":
-                augmented_fragments = self.barlow_twins_augmentation(
-                    sequence=seq,
-                    header=clean_header,
-                    min_contig_length=length_threshold,
-                    num_augmentations=num_views,
-                )
-            else:
-                augmented_fragments = self.simclr_augmentation(
-                    sequence=seq,
-                    header=clean_header,
-                    min_contig_length=length_threshold,
-                    num_augmentations=num_views,
-                )
-
-            for (
-                fragment_header,
-                fragment_seq,
-                start_pos,
-                frag_len,
-            ) in augmented_fragments:
-                fragments_dict[clean_header]["fragments"].append(fragment_header)
-                fragments_dict[clean_header]["fragment_info"][fragment_header] = {
-                    "start_pos": start_pos,
-                    "length": frag_len,
-                }
-
-                if len(fragment_seq) < length_threshold:
-                    short_fragment_count += 1
-                    continue
-
-                all_fragments.append((fragment_header, fragment_seq))
-                fragment_to_contig[fragment_header] = clean_header
-                fragment_count += 1
-
-            sequence_count += 1
-
-        print(f"Total sequences processed: {sequence_count}")
-        print(f"Total fragments generated: {len(all_fragments)}")
-        return fragments_dict, all_fragments
-
-    def simclr_augmentation(
-        seqs: str,
-        clean_header: str,
-        length_threshold: int,
-        num_views: int,
-    ) -> List:
-        seq_len = len(seqs)
-        fragments = []
-        fragments.append((f"{clean_header}.0", seqs, 0, seq_len))
-        for i in range(1, num_views):
-            try:
-                start = random.randint(0, seq_len - (length_threshold + 1))
-            except ValueError:
-                start = 0
-            sim_len = random.randint(length_threshold, seq_len - start)
-            end = start + sim_len - 1
-            sequence = str(seqs[start : end + 1])
-            seq_id = f"{clean_header}.{i}"
-            fragments.append((seq_id, sequence, start, sim_len))
-        return fragments
-
-    def augment_views(
-        self,
-        contigs: Path,
-        view_num: int,
-        contig_length: int,
-        output_dir: Path,
-        barlow_twins: bool = False,
-        simclr: bool = True,
-    ) -> Dict[str, Dict]:
-        """
-        Augmentation of contigs only. The returned data is a dictionary storing: raw contig -> ( seq, header, (start, end) )
-        """
-        # three things used across the stage:
-        output_dir.mkdir(parents=True, exist_ok=True)
-        FragMent_Dict: OrderedDict = OrderedDict()
-        All_Fragments: list = []
-
-        assert (
-            barlow_twins != simclr
-        ), "Only one of barlow_twins and simclr can be True. Please set one to False."
-
-        FragMent_Dict, All_Fragments = self.augmentation(
-            fasta_file=str(contigs),
-            output_dir=str(output_dir),
-            num_views=view_num,
-            length_threshold=contig_length,
-            method="barlow_twins" if barlow_twins else "simclr",
-        )
-
-        return FragMent_Dict, All_Fragments
-
-    # Three helper functions for training.
     def unify_seeds(self, seed):
         # synchronize random seeds for reproducibility.
         random.seed(seed)
@@ -525,3 +215,48 @@ class BaseTraining(BaseModel):
             cov_emb_df.to_csv(coverage_embeddings, sep="\t")
 
         return embeddings_df
+
+    def sort_features_by_method(
+        self,
+        features_df: pd.DataFrame,
+        simclr: bool = False,
+        contig_ids: list = None,
+    ) -> pd.DataFrame:
+        if not contig_ids:
+            raise ValueError(
+                "contig_ids is required for sorting features. Please provide the list of contig names in the "
+                "order they were processed during augmentation."
+            )
+        if not simclr:
+            # sort the features_df by index.
+            features_df = features_df.sort_index()
+            return features_df
+        else:
+            # for simclr, group by view, stack the features of same view together, then concatenate the features.
+            features_df["view"] = (
+                features_df.index.str.rsplit(".", n=1).str[-1].astype(str)
+            )
+            # replace "original" as "0".
+            # features_df["view"] = features_df["view"].replace("original", "0")
+            features_df["view"] = features_df["view"].astype(int)
+
+            features_df = features_df.sort_values(by=["view"], ascending=True)
+            for i, view in enumerate(features_df["view"].unique()):
+                view_df = features_df[features_df["view"] == view]
+                # reindex view_df to make sure the order of features is the same across views.
+                view_df.index = [ind.rsplit(".", 1)[0] for ind in view_df.index]
+                view_df = view_df.reindex(
+                    contig_ids
+                )  # reindexing to ensure the same order of contigs across views
+                view_df.index = [
+                    f"{idx}.{view}" for idx in view_df.index
+                ]  # restore the original index format after reindexing
+                if i == 0:
+                    sorted_features_df = view_df
+                else:
+                    sorted_features_df = pd.concat(
+                        [sorted_features_df, view_df], axis=0
+                    )
+            # for each view, make sure to sort the features by index.
+            features_df = sorted_features_df.drop(columns=["view"])
+            return features_df
