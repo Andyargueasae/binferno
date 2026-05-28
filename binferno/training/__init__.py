@@ -4,12 +4,13 @@ from pathlib import Path
 from .barlowtwins import BarlowTwinsTrainer
 from .simclr import SimCLRTrainer
 from .base import BaseTrainer
-
+from ..features import BinfernoFeatureBuilder
+import torch.nn.functional as F
 
 class BinfernoTrainer(BaseTrainer):
     simclr: SimCLRTrainer
     use_simclr: bool = Field(
-        default=True,
+        default=False,
         description="Whether to use SimCLR for training. If False, only Barlow Twins will be used for training.",
     )
     barlowtwins: BarlowTwinsTrainer
@@ -30,6 +31,7 @@ class BinfernoTrainer(BaseTrainer):
         temperature: float = 0.15,
         logger=None,
         threads: int = 4,
+        features: BinfernoFeatureBuilder = None,
     ) -> pd.DataFrame:
         """
         The step incorporates both augmentation-data generation and training.
@@ -72,7 +74,10 @@ class BinfernoTrainer(BaseTrainer):
                 multisample=self.multisample,
                 logger=logger,
                 threads=threads,
+                features=features,
             )
+            # normalized output_emb before concatenations, use F.normalize from torch.
+
             embeddings = pd.concat([embeddings, output_emb], axis=1)
 
         return embeddings

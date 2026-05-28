@@ -91,7 +91,7 @@ class BinfernoClustering(BaseClustering):
 
         num_workers = max(1, int(threads or 1))
 
-        parameter_list = [0.5, 1, 10]  # 30/70/90/110 may be too noisy.
+        parameter_list = [0.5, 1, 10]
         bandwidth_list = [0.05, 0.1, 0.2, 0.3]
         partgraph_ratio_list = [50, 80, 100]
         max_edges_list = [15, 100]
@@ -174,7 +174,7 @@ class BinfernoClustering(BaseClustering):
 
             for job in jobs:
                 job.get()
-                return
+        return
 
     def run_leiden_memmap(
         self,

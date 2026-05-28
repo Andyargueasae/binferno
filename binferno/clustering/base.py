@@ -263,13 +263,13 @@ class BaseClustering(BaseModel):
 
         return X
 
-    def file_len(fname):
+    def file_len(self, fname):
         with open(fname) as f:
             for i, l in enumerate(f):
                 pass
         return i + 1
 
-    def save_result(result, filepath, namelist):
+    def save_result(self, result, filepath, namelist):
         filedir, filename = os.path.split(filepath)
         if not filename:
             filename = "result.tsv"
@@ -280,7 +280,7 @@ class BaseClustering(BaseModel):
             f.write(namelist[contigIdx] + "\t" + str(result[contigIdx].item(0)) + "\n")
         f.close()
 
-    def gen_bins(fastafile, resultfile, outputdir):
+    def gen_bins(self, fastafile, resultfile, outputdir):
         # read fasta file
         print("Processing file:\t{}".format(fastafile))
         sequences = {}

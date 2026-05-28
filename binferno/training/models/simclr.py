@@ -13,16 +13,17 @@ class NeuralNetwork(nn.Module):
         output_dim=128,
         n_layers=3,
         kmer_dim=136,
+        corgi_dim=0,
         proj_head_dim=128,
-        multiscale=False,
-        no_proj=False,
+        proj=False,
+        gated=False,
     ):
         super(NeuralNetwork, self).__init__()
         self.coverage_dim = coverage_dim  # by default we ask users to provide coverage.
         self.output_dim = output_dim
         self.kmer_dim = kmer_dim
         self.proj_head_dim = proj_head_dim
-        self.no_proj = no_proj
+        self.proj = proj
         self.tnf_dim = tnf_dim
 
         self.tnf_enc_dim = tnf_dim
@@ -31,7 +32,21 @@ class NeuralNetwork(nn.Module):
         else:
             self.tnf_enc_dim = tnf_dim
 
-        if n_layers == 3:  # tnf->512->256->128
+        if corgi_dim > 0:
+            self.corgi_encoder = nn.Sequential(
+                nn.Linear(corgi_dim, 256),
+                nn.BatchNorm1d(256),
+                nn.LeakyReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(256, output_dim),
+                nn.BatchNorm1d(output_dim),
+                nn.LeakyReLU(),
+            )
+            self.tnf_enc_dim += corgi_dim  # update tnf_enc_dim to include corgi features.
+
+
+        if n_layers == 3:  # tnf->512->256->128 
+            # tnf_encoder can then take concatenated tnf features and corgi features.
             self.tnf_encoder = nn.Sequential(
                 nn.Linear(self.tnf_enc_dim, 512),
                 nn.BatchNorm1d(512),
@@ -56,6 +71,7 @@ class NeuralNetwork(nn.Module):
                 nn.LeakyReLU(),  # the forgoten leakyrelu after batchnorm can cause the representation to have a lot of zeros, which can lead to worse performance. Adding it back can improve the performance.
             )
 
+        # set up corgi encoder if corgi_dim > 0.
         # apply adaptive coverage dim choices.
         n_samples = max(
             1, coverage_dim // 2
@@ -83,10 +99,7 @@ class NeuralNetwork(nn.Module):
         # leave fusion network to be implemented later.
         self.fusion_network = fusion_network(
             emb_dim=output_dim,
-            kmer_enc_dim=output_dim,
-            coverage_dim=self.final_cov_dim,
-            corgi_dim=0,
-            multiscale=multiscale,
+            gated=gated,
         )
         self.representation_dim = output_dim
         self.proj_head = nn.Sequential(
@@ -120,7 +133,7 @@ class NeuralNetwork(nn.Module):
 
     def forward_one(self, x):
         fused_emb = self._encode(x)
-        if self.no_proj:
+        if not self.proj:
             return fused_emb
         proj_emb = self.proj_head(fused_emb)  # 512
         return proj_emb
@@ -132,298 +145,52 @@ class NeuralNetwork(nn.Module):
 
 
 # Then our model got an attention-based fusion network.
-class attentionFusion(nn.Module):
-    DEFAULT_NUM_HEADS = 4
-    DEFAULT_DROPOUT = 0.1
-    GATE_INPUT_MULTIPLIER = 2  # For concatenated features in gates
-    FINAL_FUSION_INPUT_MULTIPLIER = (
-        4  # gated_kmer + gated_coverage + interaction + alignment
-    )
-    FINAL_FUSION_HIDDEN_MULTIPLIER = 2
-    RESIDUAL_WEIGHT_INIT = 0.5
+class AttentionFusion(nn.Module):
+    def __init__(self, emb_dim=128, num_heads=4, dropout=0.1):
+        super().__init__()
 
-    def __init__(
-        self,
-        kmer_enc_dim,
-        emb_dim,
-        coverage_dim,
-        corgi_dim=0,
-        multiscale: bool = False,
-    ):
-        super(attentionFusion, self).__init__()
-        # we will implement the attention fusion later, for now we can simply concatenate the features.
-        self.kmer_enc_dim = kmer_enc_dim
         self.emb_dim = emb_dim
-        self.NUM_HEADS = self.DEFAULT_NUM_HEADS
-        self.DROPOUT = self.DEFAULT_DROPOUT
-        self.coverage_dim = coverage_dim
-        self.RESIDUAL_WEIGHT_INIT = self.RESIDUAL_WEIGHT_INIT
-        self.multiscale = multiscale
-        self.corgi_dim = corgi_dim
 
-        # Waiting for optional appends.
-
-        self.GATE_INPUT_MULTIPLIER = 2 if corgi_dim == 0 else 3
-        self.FUSE_INPUT_MULTIPLIER = (
-            3 if not corgi_dim > 0 else self.FINAL_FUSION_INPUT_MULTIPLIER
-        )
-        self.HIDDEN_MULTIPLIER = 2
-
-        self.kmer_proj = nn.Linear(self.kmer_enc_dim, self.emb_dim)
-        self.coverage_proj = nn.Linear(self.coverage_dim, self.emb_dim)
-
-        self.batch_norm1 = nn.BatchNorm1d(self.emb_dim)
-        self.batch_norm2 = nn.BatchNorm1d(self.emb_dim)
-
-        self.residual_weight = nn.Parameter(torch.tensor(self.RESIDUAL_WEIGHT_INIT))
-
-        # implement attention-based fusion
-        self.MHA_kmer2cov = nn.MultiheadAttention(
-            embed_dim=self.emb_dim,
-            num_heads=self.NUM_HEADS,
-            dropout=self.DROPOUT,
-            batch_first=True,  # always keep an eye on batch_first: as dimensions matters.
-        )
-        self.MHA_cov2kmer = nn.MultiheadAttention(
-            embed_dim=self.emb_dim,
-            num_heads=self.NUM_HEADS,
-            dropout=self.DROPOUT,
+        self.self_attn = nn.MultiheadAttention(
+            embed_dim=emb_dim,
+            num_heads=num_heads,
+            dropout=dropout,
             batch_first=True,
         )
 
-        self.kmer_gate = nn.Sequential(
-            nn.Linear(self.emb_dim * self.GATE_INPUT_MULTIPLIER, self.emb_dim),
-            nn.Sigmoid(),
-        )
-        self.coverage_gate = nn.Sequential(
-            nn.Linear(self.emb_dim * self.GATE_INPUT_MULTIPLIER, self.emb_dim),
-            nn.Sigmoid(),
-        )
-
-        # if corgi_dim > 0, add corgi to cross-attention and fusion as well. But first test with kmer_concat with coverage only.
-        if self.corgi_dim > 0:
-            self.corgi_proj = nn.Linear(corgi_dim, self.emb_dim)
-            self.corgi_gate = nn.Sequential(
-                nn.Linear(self.emb_dim * self.GATE_INPUT_MULTIPLIER, self.emb_dim),
-                nn.Sigmoid(),
-            )  # equivalent to kmer and coverage.
-            self.MHA_kmer2corgi = nn.MultiheadAttention(
-                embed_dim=self.emb_dim,
-                num_heads=self.NUM_HEADS,
-                dropout=self.DROPOUT,
-                batch_first=True,
-            )
-            self.MHA_cov2corgi = nn.MultiheadAttention(
-                embed_dim=self.emb_dim,
-                num_heads=self.NUM_HEADS,
-                dropout=self.DROPOUT,
-                batch_first=True,
-            )
-            self.MHA_corgi2kmer = nn.MultiheadAttention(
-                embed_dim=self.emb_dim,
-                num_heads=self.NUM_HEADS,
-                dropout=self.DROPOUT,
-                batch_first=True,
-            )
-            self.MHA_corgi2cov = nn.MultiheadAttention(
-                embed_dim=self.emb_dim,
-                num_heads=self.NUM_HEADS,
-                dropout=self.DROPOUT,
-                batch_first=True,
-            )
-
         self.fused_proj = nn.Sequential(
-            nn.Linear(
-                self.emb_dim * self.FUSE_INPUT_MULTIPLIER,
-                2048,
-            ),
-            nn.BatchNorm1d(2048),
+            nn.Linear(emb_dim * 2, emb_dim * 2),
+            nn.BatchNorm1d(emb_dim * 2),
             nn.LeakyReLU(),
-            nn.Dropout(self.DROPOUT),
-            nn.Linear(2048, 1024),
-            nn.BatchNorm1d(1024),
-            nn.LeakyReLU(),
-            nn.Dropout(self.DROPOUT),
-            nn.Linear(1024, self.emb_dim),
-            nn.BatchNorm1d(self.emb_dim),
+            nn.Dropout(dropout),
+
+            nn.Linear(emb_dim * 2, emb_dim),
+            nn.BatchNorm1d(emb_dim),
             nn.LeakyReLU(),
         )
 
-        # apply multi-scale transformation.
-        self.multiscale_fusion = nn.ModuleList(
-            [
-                nn.Sequential(
-                    nn.Linear(emb_dim, emb_dim // 2),
-                    nn.ReLU(),
-                    nn.Linear(emb_dim // 2, emb_dim),  # Project back to common dim
-                ),
-                nn.Linear(emb_dim, emb_dim),  # Identity scale
-                nn.Sequential(
-                    nn.Linear(emb_dim, emb_dim * 2),
-                    nn.ReLU(),
-                    nn.Linear(emb_dim * 2, emb_dim),  # Project back to common dim
-                ),
-            ]
-        )
+    def forward(self, kmer_emb, cov_emb):
+        # kmer_emb = F.normalize(kmer_emb, dim=-1)
+        # cov_emb = F.normalize(cov_emb, dim=-1)
 
-    def corgi_forward(self, corgi_feature, tnf_feature, coverage_feature):
-        kmer_emb = self.kmer_proj(tnf_feature).unsqueeze(1)  # ( batch_size, 1, emb_dim)
-        cov_emb = self.coverage_proj(coverage_feature).unsqueeze(
-            1
-        )  # ( batch_size, 1, emb_dim)
-        corgi_emb = self.corgi_proj(corgi_feature).unsqueeze(
-            1
-        )  # ( batch_size, 1, emb_dim)
+        tokens = torch.stack([kmer_emb, cov_emb], dim=1)
+        attended, _ = self.self_attn(tokens, tokens, tokens)
 
-        kmer_attended, _ = self.MHA_kmer2cov(
-            kmer_emb, cov_emb, cov_emb
-        )  # ( batch_size, 1, emb_dim)
-        cov_attended, _ = self.MHA_cov2kmer(
-            cov_emb, kmer_emb, kmer_emb
-        )  # ( batch_size, 1, emb_dim)
-        kmer_corgi_attended, _ = self.MHA_kmer2corgi(
-            kmer_emb, corgi_emb, corgi_emb
-        )  # ( batch_size, 1, emb_dim)
-        cov_corgi_attended, _ = self.MHA_cov2corgi(
-            cov_emb, corgi_emb, corgi_emb
-        )  # ( batch_size, 1, emb_dim)
-        corgi_kmer_attended, _ = self.MHA_corgi2kmer(
-            corgi_emb, kmer_emb, kmer_emb
-        )  # ( batch_size, 1, emb_dim)
-        corgi_cov_attended, _ = self.MHA_corgi2cov(
-            corgi_emb, cov_emb, cov_emb
-        )  # ( batch_size, 1, emb_dim)
+        fused = attended.flatten(1)
+        fused = self.fused_proj(fused)
 
-        attended_feature = (
-            kmer_attended.squeeze(1)
-            + cov_attended.squeeze(1)
-            + kmer_corgi_attended.squeeze(1)
-            + cov_corgi_attended.squeeze(1)
-        )  # ( batch_size, emb_dim)
-
-        kmer_emb = kmer_emb.squeeze(1)
-        cov_emb = cov_emb.squeeze(1)
-        corgi_emb = corgi_emb.squeeze(1)
-        kmer_gate_weight = self.kmer_gate(
-            torch.cat([kmer_emb, cov_emb, corgi_emb], dim=1)
-        )
-        coverage_gate_weight = self.coverage_gate(
-            torch.cat([kmer_emb, cov_emb, corgi_emb], dim=1)
-        )
-        corgi_gate_weight = self.corgi_gate(
-            torch.cat([kmer_emb, cov_emb, corgi_emb], dim=1)
-        )
-
-        # do we want to sum all weights to one?
-        gated_kmer = (
-            kmer_gate_weight * kmer_emb
-            + (1 - kmer_gate_weight) * kmer_attended.squeeze(1)
-            + corgi_gate_weight * kmer_corgi_attended.squeeze(1)
-        )
-        gated_coverage = (
-            coverage_gate_weight * cov_emb
-            + (1 - coverage_gate_weight) * cov_attended.squeeze(1)
-            + corgi_gate_weight * cov_corgi_attended.squeeze(1)
-        )
-        gated_corgi = corgi_gate_weight * corgi_emb + (1 - corgi_gate_weight) * (
-            corgi_kmer_attended.squeeze(1) + corgi_cov_attended.squeeze(1)
-        )
-
-        residual_weight_clamped = torch.clamp(self.residual_weight, min=0.1, max=0.9)
-
-        gated_kmer = self.batch_norm1(
-            (1 - residual_weight_clamped) * gated_kmer
-            + residual_weight_clamped * kmer_emb
-        )
-        gated_coverage = self.batch_norm2(
-            (1 - residual_weight_clamped) * gated_coverage
-            + residual_weight_clamped * cov_emb
-        )
-        gated_corgi = self.batch_norm1(
-            (1 - residual_weight_clamped) * gated_corgi
-            + residual_weight_clamped * corgi_emb
-        )
-
-        final_fused_features = torch.cat(
-            [gated_kmer, gated_coverage, gated_corgi, attended_feature], dim=1
-        )
-
-        output = self.fused_proj(final_fused_features)
-        return output
-
-    def normal_forward(self, tnf_feature, coverage_feature):
-        kmer_emb = self.kmer_proj(tnf_feature).unsqueeze(1)  # ( batch_size, 1, emb_dim)
-        cov_emb = self.coverage_proj(coverage_feature).unsqueeze(
-            1
-        )  # ( batch_size, 1, emb_dim)
-
-        kmer_attended, _ = self.MHA_kmer2cov(
-            kmer_emb, cov_emb, cov_emb
-        )  # ( batch_size, 1, emb_dim)
-        cov_attended, _ = self.MHA_cov2kmer(
-            cov_emb, kmer_emb, kmer_emb
-        )  # ( batch_size, 1, emb_dim)
-
-        attended_feature = kmer_attended.squeeze(1) + cov_attended.squeeze(
-            1
-        )  # ( batch_size, emb_dim)
-
-        kmer_emb = kmer_emb.squeeze(1)
-        cov_emb = cov_emb.squeeze(1)
-        kmer_gate_weight = self.kmer_gate(torch.cat([kmer_emb, cov_emb], dim=1))
-        coverage_gate_weight = self.coverage_gate(torch.cat([kmer_emb, cov_emb], dim=1))
-
-        kmer_attended = kmer_attended.squeeze(1)
-        cov_attended = cov_attended.squeeze(1)
-        gated_kmer = (
-            kmer_gate_weight * kmer_emb + (1 - kmer_gate_weight) * kmer_attended
-        )
-        gated_coverage = (
-            coverage_gate_weight * cov_emb + (1 - coverage_gate_weight) * cov_attended
-        )
-
-        residual_weight_clamped = torch.clamp(self.residual_weight, min=0.1, max=0.9)
-
-        gated_kmer = self.batch_norm1(
-            (1 - residual_weight_clamped) * gated_kmer
-            + residual_weight_clamped * kmer_emb
-        )
-        gated_coverage = self.batch_norm2(
-            (1 - residual_weight_clamped) * gated_coverage
-            + residual_weight_clamped * cov_emb
-        )
-
-        # apply when corgi dim is determined.
-
-        final_fused_features = torch.cat(
-            [gated_kmer, gated_coverage, attended_feature], dim=1
-        )
-
-        output = self.fused_proj(final_fused_features)
-        return output
-
-    def forward(self, tnf_feature, coverage_feature, corgi_feature=None):
-        if not corgi_feature is None:
-            return self.corgi_forward(corgi_feature, tnf_feature, coverage_feature)
-        return self.normal_forward(tnf_feature, coverage_feature)
-
+        return fused
 
 def fusion_network(
     emb_dim=128,
-    kmer_enc_dim=128,
-    coverage_dim=128,
-    corgi_dim=128,
-    multiscale=False,
     gated=False,
 ):
     if gated:
         return gated_fusion(emb_dim=emb_dim)
-    return attentionFusion(
-        kmer_enc_dim=kmer_enc_dim,
+    return AttentionFusion(
         emb_dim=emb_dim,
-        coverage_dim=coverage_dim,
-        corgi_dim=corgi_dim,
-        multiscale=multiscale,
+        num_heads=4,
+        dropout=0.1,
     )
 
 

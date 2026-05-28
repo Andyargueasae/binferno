@@ -5,6 +5,7 @@ import tyro
 from binferno.training import BinfernoTrainer
 from binferno.clustering import BinfernoClustering
 from binferno.gen_results import BinfernoResults
+from binferno.features import BinfernoFeatureBuilder
 from loguru import logger
 from .utils import gen_seed, calc_n50
 
@@ -16,8 +17,9 @@ def binferno(
     training: BinfernoTrainer,
     clustering: BinfernoClustering,
     results: BinfernoResults,
+    features: BinfernoFeatureBuilder,
     threads: int = 4,
-    only_training: bool = True,  # True: only run training, False: full process.
+    only_training: bool = False,  # True: only run training, False: full process.
     plastid: bool = False,
 ):
 
@@ -37,6 +39,7 @@ def binferno(
         temperature=temperature,
         logger=logger,
         threads=threads,
+        features=features,
     )
 
     if only_training:
@@ -77,6 +80,7 @@ def binferno(
             seed_file=seed_file,
             output_path=cluster_output_dir,
             logger=logger,
+            threads=threads,
         )
     else:
         logger.info("Clustering results already exist, skipping clustering step.")
@@ -97,7 +101,6 @@ def binferno(
 
     logger.info("Binferno pipeline completed successfully.")
     return
-
 
 def main():
     tyro.cli(binferno)

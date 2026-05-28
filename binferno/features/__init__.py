@@ -45,34 +45,49 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
 
         resulting_features = pd.DataFrame()
         if self.use_kmer:
-            logger.info("Generating k-mer features...")
-            kmer_df = self.kmer(All_Fragments)
-            kmer_df.to_csv(
-                output_dir / "kmer_features.tsv", index=True, header=True, sep="\t"
-            )
+            kmer_data = output_dir / "kmer_features.tsv"
+            if kmer_data.exists():
+                logger.info("Loading existing k-mer features...")
+                kmer_df = pd.read_csv(kmer_data, sep="\t", index_col=0, header=0)
+            else:
+                logger.info("Generating k-mer features...")
+                kmer_df = self.kmer(All_Fragments)
+                kmer_df.to_csv(
+                    kmer_data, index=True, header=True, sep="\t"
+                )
             resulting_features = pd.concat(
-                [resulting_features, kmer_df], axis=1
-            )  # the first to add is k-mer features.
+                    [resulting_features, kmer_df], axis=1
+                )  # the first to add is k-mer features.
         if self.use_corgi:
             logger.info("Generating Corgi features...")
-            corgi_df = self.corgi(output_dir, contigs=contigs)
-            corgi_df.to_csv(
-                output_dir / "corgi_features.tsv", index=True, header=True, sep="\t"
-            )
+            corgi_data = output_dir / "corgi_features.tsv"
+            if corgi_data.exists():
+                logger.info("Loading existing Corgi features...")
+                corgi_df = pd.read_csv(corgi_data, sep="\t", index_col=0, header=0)
+            else:
+                corgi_df = self.corgi(output_dir, contigs=contigs)
+                corgi_df.to_csv(
+                    corgi_data, index=True, header=True, sep="\t"
+                )
             resulting_features = pd.concat(
                 [resulting_features, corgi_df], axis=1
             )  # if applicable, the second is corgi features.
         if self.use_coverage:
             logger.info("Generating coverage features...")
-            coverage_df = self.coverage(FragMent_Dict, bam_path, threads, logger)
-            if coverage_df.shape[0] != resulting_features.shape[0]:
-                raise ValueError(
-                    f"Coverage features have different number of rows ({coverage_df.shape[0]}) compared to other features ({resulting_features.shape[0]}). Please check the coverage feature generation."
-                )
-            resulting_features = pd.concat([resulting_features, coverage_df], axis=1)
-            coverage_df.to_csv(
-                output_dir / "coverage_features.tsv", index=True, header=True, sep="\t"
-            )  # if applicable, the last is coverage features.
+            coverage_data = output_dir / "coverage_features.tsv"
+            if coverage_data.exists():
+                logger.info("Loading existing coverage features...")
+                coverage_df = pd.read_csv(coverage_data, sep="\t", index_col=0, header=0)
+            else:
+                coverage_df = self.coverage(FragMent_Dict, bam_path, threads, logger)
+                if coverage_df.shape[0] != resulting_features.shape[0]:
+                    raise ValueError(
+                        f"Coverage features have different number of rows ({coverage_df.shape[0]}) compared to other features ({resulting_features.shape[0]}). Please check the coverage feature generation."
+                    )
+                coverage_df.to_csv(
+                    coverage_data, index=True, header=True, sep="\t"
+                )  # if applicable, the last is coverage features.
+            resulting_features = pd.concat([resulting_features, coverage_df], axis=1)      
 
         del (
             FragMent_Dict,
@@ -80,11 +95,8 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
         )  # free up memory after generating the features.
         del (
             kmer_df,
-            corgi_df,
             coverage_df,
         )  # free up memory after generating the features.
-
-        namelist = list(FragMent_Dict.keys())
         # [kmer, corgi, coverage] features are already sorted by method in the sort_features_by_method function,
         # so we can directly save the resulting features without further sorting.
 

@@ -21,12 +21,11 @@ KMER_DIM = 136
 
 
 class SimCLRTrainer(BaseTrainer):
-    features: BinfernoFeatureBuilder
     simclrnet: bool = Field(
         default=False,
         description="Whether to use SimCLRNet architecture for training. If False, use a simpler MLP architecture.",
     )
-    no_proj: bool = Field(
+    proj: bool = Field(
         default=False,
         description="Whether to use a projection head in the NeuralNetwork architecture.",
     )
@@ -52,6 +51,10 @@ class SimCLRTrainer(BaseTrainer):
     seed: int = Field(
         default=42, description="Random seed for training and augmentation."
     )
+    gated: bool = Field(
+        default=False,
+        description="Whether to use gated fusion in the Fusion module instead of attention fusion.",
+    )
 
     def __call__(
         self,
@@ -62,6 +65,7 @@ class SimCLRTrainer(BaseTrainer):
         threads: int = 4,
         temperature: float = 0.15,
         multisample: bool = False,
+        features: BinfernoFeatureBuilder = None,
         **kwargs,
     ):
         """
@@ -71,24 +75,37 @@ class SimCLRTrainer(BaseTrainer):
         """
 
         # the first step is to generate the augmented views and then turn views into vectors.
+        output_aug_dir = output_dir / "augmentation"
+        output_aug_dir.mkdir(parents=True, exist_ok=True)
+        output_train_dir = output_dir / "training"
+        output_train_dir.mkdir(parents=True, exist_ok=True)
+        embedding_path = output_train_dir / "embeddings.tsv"
+
+        if embedding_path.exists():
+            logger.info(
+                f"Embeddings already exist at {embedding_path}. Loading embeddings from file."
+            )
+            embeddings = pd.read_csv(embedding_path, sep="\t", header=0, index_col=0)
+            return embeddings
+        
         fragment_dict, all_fragments, namelist = self.gen_views(
             contigs=contigs,
             simclr=True,
             barlow_twins=False,
-            output_dir=output_dir,
+            output_dir=output_aug_dir,
             view_num=self.view_num,
             contig_length=self.contig_length,
         )
 
         # after getting the augmented views, pass to binfernofeatures to get the features pooled.
-        feature_df = self.features(
+        feature_df = features(
             FragMent_Dict=fragment_dict,
             All_Fragments=all_fragments,
             contigs=contigs,
             bam_path=bam,
             threads=threads,
             logger=logger,
-            output_dir=output_dir,
+            output_dir=output_aug_dir,
         )
 
         # after getting the features, sort the features by method to ensure integrity before training.
@@ -139,9 +156,9 @@ class SimCLRTrainer(BaseTrainer):
                 output_dim=self.output_dim,
                 kmer_dim=kmer_dim,
                 n_layers=self.n_layers,
+                gated=self.gated,
                 proj_head_dim=proj_head_dim,
-                apply_multiscale=True,
-                no_proj=self.no_proj,
+                proj=self.proj,
             ).to(device)
 
         # prepare training.
@@ -152,11 +169,14 @@ class SimCLRTrainer(BaseTrainer):
             model=model,
             n_views=self.view_num,
             simclrnet=self.simclrnet,
+            contigs=contigs,
+            num_workers=threads,
             **kwargs,
         )
 
         # train loop.
-        model_path = output_dir / "best_model.pt"
+        
+        model_path = output_train_dir / "best_model.pt"
         if model_path.exists():
             logger.info(
                 f"Model already exists at {model_path}. Loading the model and skipping training."
@@ -173,7 +193,7 @@ class SimCLRTrainer(BaseTrainer):
                 n_cov=cov_dim,
                 n_views=self.view_num,
                 temperature=temperature,
-                output_dir=output_dir,
+                output_dir=output_train_dir,
                 logger=logger,
             )
         else:
@@ -185,33 +205,81 @@ class SimCLRTrainer(BaseTrainer):
                 method="simclr",
                 model=model,
                 n_views=self.view_num,
+                logger=logger,
+                n_cov=cov_dim,
+                output_dir=output_train_dir,
                 **kwargs,
             )
 
-        embedding_path = output_dir / "embeddings.tsv"
-        if not embedding_path.exists():
-            if self.simclrnet:
-                embeddings = self.simclr_get_embs(
-                    model=model,
-                    data=dataset,
-                    output_path=embedding_path,
-                    device=device,
-                    kmer_len=kmer_dim,
-                )
-            else:
-                embeddings = self.get_embeddings(
-                    model=model,
-                    data_df=feature_df,
-                    output_path=embedding_path,
-                    batch_size=self.batch_size,
-                    save_individual_embs=False,
-                )
-        else:
-            logger.info(
-                f"Embeddings already exist at {embedding_path}. Loading embeddings from file."
+        # in case embeddings isn't exist, get embeddings from the trained model and save to file.
+        if self.simclrnet:
+            embeddings = self.simclr_get_embs(
+                model=model,
+                data=dataset,
+                output_path=embedding_path,
+                device=device,
+                kmer_len=kmer_dim,
             )
-            embeddings = pd.read_csv(embedding_path, sep="\t", header=0, index_col=0)
+        else:
+            embeddings = self.get_embeddings(
+                model=model,
+                data_df=feature_df,
+                output_path=embedding_path,
+                batch_size=self.batch_size,
+                save_individual_embs=False,
+            )
+
+        # normalize embeddings, but here the embedding is pd.dataframe, so we can use F.normalize from torch after converting the dataframe to tensor, then convert back to dataframe.
+        embeddings = pd.DataFrame(
+            F.normalize(torch.from_numpy(embeddings.values).float(), dim=1).numpy(),
+            index=embeddings.index,
+            columns=embeddings.columns,
+        )
+        
         return embeddings
+    
+    def sort_features_by_method(
+        self,
+        features_df: pd.DataFrame,
+        simclr: bool = False,
+        contig_ids: list = None,
+    ) -> pd.DataFrame:
+        if not contig_ids:
+            raise ValueError(
+                "contig_ids is required for sorting features. Please provide the list of contig names in the "
+                "order they were processed during augmentation."
+            )
+        if not simclr:
+            # sort the features_df by index.
+            features_df = features_df.sort_index()
+            return features_df
+        else:
+            # for simclr, group by view, stack the features of same view together, then concatenate the features.
+            features_df["view"] = features_df.index.str.rsplit(".", n=1).str[-1].astype(str)
+            # replace "original" as "0".
+            # features_df["view"] = features_df["view"].replace("original", "0")
+            features_df["view"] = features_df["view"].astype(int)
+
+            features_df = features_df.sort_values(by=["view"], ascending=True)
+            for i, view in enumerate(features_df["view"].unique()):
+                view_df = features_df[features_df["view"] == view]
+                # reindex view_df to make sure the order of features is the same across views.
+                view_df.index = [ind.rsplit(".", 1)[0] for ind in view_df.index]
+                view_df = view_df.reindex(
+                    contig_ids
+                )  # reindexing to ensure the same order of contigs across views
+                view_df.index = [
+                    f"{idx}.{view}" for idx in view_df.index
+                ]  # restore the original index format after reindexing
+                if i == 0:
+                    sorted_features_df = view_df
+                else:
+                    sorted_features_df = pd.concat(
+                        [sorted_features_df, view_df], axis=0
+                    )
+            # for each view, make sure to sort the features by index.
+            features_df = sorted_features_df.drop(columns=["view"])
+            return features_df
 
     def prepare_trainer(
         self,
@@ -221,6 +289,8 @@ class SimCLRTrainer(BaseTrainer):
         model=None,
         n_views=6,
         simclrnet=False,
+        contigs=None,
+        num_workers=4,
         **kwargs,
     ):
         # determine the namelist for the dataset.
@@ -236,7 +306,7 @@ class SimCLRTrainer(BaseTrainer):
         ), f"Number of views in the dataset ({len(dataset)}) does not match the expected number of views ({n_views}). \
             Please check the data_df and the n_views parameter."
 
-        length_weight = self.length_weight(contig=kwargs.get("contigs", None))
+        length_weight = self.length_weight(contig=contigs)
         if not length_weight:
             raise ValueError(
                 "Length weight is empty. Please check the contigs input and the length_weight function."
@@ -253,16 +323,31 @@ class SimCLRTrainer(BaseTrainer):
             ]
         )
 
-        train_loader = torch.utils.data.DataLoader(
-            train_dataset,
-            batch_size=batch_size,
-            shuffle=True,
-            num_workers=4,
-            pin_memory=True,
-            drop_last=True,
-            persistent_workers=True,
-            prefetch_factor=4,
-        )
+        # Keep multiprocessing options conservative to avoid native worker crashes
+        # on some PyTorch/HPC stacks (fork + pinned memory + persistent workers).
+        requested_workers = num_workers
+        if requested_workers < 0:
+            requested_workers = 0
+
+        dataloader_kwargs = {
+            "dataset": train_dataset,
+            "batch_size": batch_size,
+            "shuffle": True,
+            "num_workers": requested_workers,
+            "pin_memory": torch.cuda.is_available(),
+            "drop_last": True,
+        }
+
+        if requested_workers > 0:
+            dataloader_kwargs.update(
+                {
+                    "persistent_workers": True,
+                    "prefetch_factor": 2,
+                    "multiprocessing_context": "spawn",
+                }
+            )
+
+        train_loader = torch.utils.data.DataLoader(**dataloader_kwargs)
 
         if simclrnet:
             optimizer = torch.optim.AdamW(
@@ -289,20 +374,36 @@ class SimCLRTrainer(BaseTrainer):
         def __init__(self, temperature=0.15):
             super().__init__()
             self.temperature = temperature
+            self._cache = {}
+
+        def _get_cached_tensors(self, batch_size, n_views, device):
+            key = (batch_size, n_views, str(device))
+            if key in self._cache:
+                return self._cache[key]
+
+            N = batch_size * n_views
+            sample_ids = torch.arange(batch_size, device=device).repeat(n_views)
+            same_sample = sample_ids.unsqueeze(0) == sample_ids.unsqueeze(1)
+            self_mask = torch.eye(N, dtype=torch.bool, device=device)
+            positives_mask = same_sample & ~self_mask
+            negatives_mask = ~same_sample
+            labels = torch.zeros(N * (n_views - 1), dtype=torch.long, device=device)
+
+            cached = (positives_mask, negatives_mask, labels)
+            self._cache[key] = cached
+            return cached
 
         def forward(self, features, batch_size, n_views, device):
             features = F.normalize(features, dim=1)
-
-            N = batch_size * n_views
             similarity_matrix = torch.matmul(features, features.T) / self.temperature
 
-            labels = torch.arange(batch_size, device=device).repeat(n_views)
+            positives_mask, negatives_mask, labels = self._get_cached_tensors(
+                batch_size=batch_size,
+                n_views=n_views,
+                device=device,
+            )
 
-            same_sample = labels.unsqueeze(0) == labels.unsqueeze(1)
-            self_mask = torch.eye(N, dtype=torch.bool, device=device)
-
-            positives_mask = same_sample & ~self_mask
-            negatives_mask = ~same_sample
+            N = batch_size * n_views
 
             positives = similarity_matrix[positives_mask].view(N, n_views - 1)
             negatives = similarity_matrix[negatives_mask].view(N, N - n_views)
@@ -310,12 +411,12 @@ class SimCLRTrainer(BaseTrainer):
             logits = torch.cat(
                 [
                     positives.reshape(-1, 1),
-                    negatives.repeat_interleave(n_views - 1, dim=0),
+                    negatives[:, None].expand(-1, n_views - 1, -1).reshape(
+                        -1, N - n_views
+                    ),
                 ],
                 dim=1,
             )
-
-            labels = torch.zeros(logits.shape[0], dtype=torch.long, device=device)
 
             return logits, labels
 
@@ -353,14 +454,14 @@ class SimCLRTrainer(BaseTrainer):
         model=None,
         n_cov: int = 0,
         n_views: int = 6,
+        output_dir: Path = None,
         **kwargs,
     ):
         self.unify_seeds(
             self.seed
         )  # ensure reproducibility by unifying seeds across random, numpy, and torch.
         temperature = kwargs.get("temperature", 0.15)
-        output_dir = kwargs.get("output_dir", None)
-        MODEL_PATH = output_dir / "best_model.pt" if output_dir else "best_model.pt"
+        MODEL_PATH = output_dir / "best_model.pt" 
         logger = kwargs.get("logger", None)
         if logger is None:
             raise ValueError(
@@ -419,6 +520,7 @@ class SimCLRTrainer(BaseTrainer):
         batch_size=1024,
         temperature=0.15,
         n_views=6,
+        n_cov=0,
         **kwargs,
     ):
         criterion = nn.CrossEntropyLoss().to(device)
@@ -426,13 +528,13 @@ class SimCLRTrainer(BaseTrainer):
         model.train()
         stats = None
         total_loss = 0.0
-        n_cov = kwargs.get("n_cov", 0)
+        total_acc = 0.0
         if n_cov < 0 or n_cov == 0:
             raise ValueError("n_cov must be non-negative.")
 
         for i, features in enumerate(dataloader):
-            contig_features = torch.cat(features, dim=0).to(device)
-            optimizer.zero_grad()
+            contig_features = torch.cat(features, dim=0).to(device, non_blocking=True)
+            optimizer.zero_grad(set_to_none=True)
 
             enc_feature = model.forward_one(contig_features)
             logits, labels = info_nceloss_fn(
@@ -444,11 +546,14 @@ class SimCLRTrainer(BaseTrainer):
             optimizer.step()
 
             total_loss += loss.item()
+            total_acc += self.accuracy(logits, labels, topk=(1,))[0].item()
             last_batch = i == len(dataloader) - 1
-            top1_acc = self.accuracy(logits, labels, topk=(1,))[0].item()
 
             if last_batch:
-                stats = {"loss": total_loss / len(dataloader), "top1_acc": top1_acc}
+                stats = {
+                    "loss": total_loss / len(dataloader),
+                    "top1_acc": total_acc / len(dataloader),
+                }
 
         return total_loss / len(dataloader), stats
 
@@ -470,60 +575,18 @@ class SimCLRTrainer(BaseTrainer):
             self.seed
         )  # ensure reproducibility by unifying seeds across random, numpy, and torch.
         criterion = torch.nn.CrossEntropyLoss().to(device)
-
+        info_nceloss_fn = self.info_nce_loss(temperature=temperature).to(device)
         if n_cov <= 0:
             raise ValueError(
                 "n_cov must be a positive integer representing the number of coverage features in the input data."
             )
 
-        scaler = GradScaler(enabled=False)
+        scaler = GradScaler(enabled=device.type == "cuda")
         logger = kwargs.get("logger", None)
         if logger is None:
             raise ValueError(
                 "Logger is not provided for training. Please provide a logger in the kwargs with key 'logger'."
             )
-
-        def info_nce_loss(self, features, device, batch_size=1024, n_views=6, **kwargs):
-            """
-            Calculate the InfoNCE loss for SimCLR.
-
-            :param features: Input features.
-            :return: Logits and labels for the loss.
-            """
-
-            labels = torch.cat(
-                [torch.arange(batch_size) for i in range(n_views)],
-                dim=0,
-            )
-
-            # labels are labelled in arrange format: 0,1,2,...,batch_size-1,0,1,2,...,batch_size-1,... for n_views times.
-            # so... ordering dataloader as 1,2,3,4,5,0 will not work, because the positive pairs will not be in the same order as the labels. We need to order the dataloader as 0,1,2,3,4,5 to match the labels.
-            labels = (labels.unsqueeze(0) == labels.unsqueeze(1)).float()
-            labels = labels.to(device)
-            features = F.normalize(features, dim=1)
-
-            similarity_matrix = torch.matmul(features, features.T)
-
-            # discard the main diagonal from both: labels and similarities matrix
-            mask = torch.eye(labels.shape[0], dtype=torch.bool).to(device)
-            labels = labels[~mask].view(labels.shape[0], -1)
-            similarity_matrix = similarity_matrix[~mask].view(
-                similarity_matrix.shape[0], -1
-            )
-            # assert similarity_matrix.shape == labels.shape
-
-            # select and combine multiple positives
-            positives = similarity_matrix[labels.bool()].view(-1, 1)
-            # select only the negatives the negatives
-            negatives = similarity_matrix[~labels.bool()].view(
-                similarity_matrix.shape[0], -1
-            )
-            negatives = negatives[:, None].expand(-1, n_views - 1, -1).flatten(0, 1)
-
-            logits = torch.cat([positives, negatives], dim=1)
-            labels = torch.zeros(logits.shape[0], dtype=torch.long).to(device)
-            logits = logits / kwargs.get("temperature", 0.15)
-            return logits, labels
 
         logger.info("Starting SimCLR training with {} epochs.".format(epochs))
         earlystop_epoch = 0
@@ -532,26 +595,27 @@ class SimCLRTrainer(BaseTrainer):
             total_acc1 = 0.0
             for _, contig_features in enumerate(dataloader):
                 contig_features = torch.cat(contig_features, dim=0)
-                contig_features = contig_features.to(device)
+                contig_features = contig_features.to(device, non_blocking=True)
 
-                with torch.amp.autocast(enabled=False, device_type=device.type):
+                optimizer.zero_grad(set_to_none=True)
+
+                with torch.amp.autocast(
+                    enabled=device.type == "cuda", device_type=device.type
+                ):
                     features, _ = model(
                         contig_features[:, :-n_cov], contig_features[:, -n_cov:]
                     )
                     actual_batch_size = contig_features.shape[0] // n_views
-                    logits, labels = info_nce_loss(
+                    logits, labels = info_nceloss_fn(
                         features,
-                        device,
                         batch_size=actual_batch_size,
+                        device=device,
                         n_views=n_views,
-                        temperature=temperature,
                     )
                     loss = criterion(logits, labels)
-                    top1_acc = self.accuracy(logits, labels, topk=(1,))[0].item()
                     total_loss += loss.item()
-                    total_acc1 += top1_acc
+                    total_acc1 += self.accuracy(logits, labels, topk=(1,))[0].item()
 
-                optimizer.zero_grad()
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
@@ -633,9 +697,7 @@ class SimCLRTrainer(BaseTrainer):
             contigs=contigs,
             view_num=view_num,
             contig_length=contig_length,
-            output_dir=output_dir,
-            simclr=simclr,
-            barlow_twins=barlow_twins,
+            output_dir=output_dir
         )
 
         namelist = list(
@@ -648,8 +710,7 @@ class SimCLRTrainer(BaseTrainer):
         self,
         fasta_file=None,
         num_views=6,
-        length_threshold=1000,
-        method: str = "barlow_twins",
+        length_threshold=1000
     ):
         # initialize the augmentation.
         seqs = pyfastx.Fastx(fasta_file)
@@ -660,12 +721,6 @@ class SimCLRTrainer(BaseTrainer):
         # apply augmentation.
         fragments_dict = OrderedDict()
         fragment_count = 0
-
-        assert method in [
-            "barlow_twins",
-            "simclr",
-        ], "Method must be either 'barlow_twins' or 'simclr'. \
-            Please set the method parameter accordingly."
 
         # the loop over sequences to generate augmentations.
         for header, seq in seqs:
@@ -679,10 +734,10 @@ class SimCLRTrainer(BaseTrainer):
             }
 
             augmented_fragments = self.simclr_augmentation(
-                sequence=seq,
-                header=clean_header,
-                min_contig_length=length_threshold,
-                num_augmentations=num_views,
+                seqs=seq,
+                clean_header=clean_header,
+                length_threshold=length_threshold,
+                num_views=num_views,
             )
 
             for (
@@ -712,6 +767,7 @@ class SimCLRTrainer(BaseTrainer):
         return fragments_dict, all_fragments
 
     def simclr_augmentation(
+        self,
         seqs: str,
         clean_header: str,
         length_threshold: int,
@@ -749,10 +805,25 @@ class SimCLRTrainer(BaseTrainer):
 
         FragMent_Dict, All_Fragments = self.augmentation(
             fasta_file=str(contigs),
-            output_dir=str(output_dir),
             num_views=view_num,
             length_threshold=contig_length,
-            method="simclr",
         )
+
+        # save the fragments to file for potential reuse in the future stages, to save time for augmentation in the future.
+        
+        for view in range(view_num):
+            output_fasta = os.path.join(output_dir, f"augmented_fragments_view{view}.fasta")
+            view_fragments = [
+                    (header, seq) for header, seq in All_Fragments if header.endswith(f".{view}")
+            ]
+            with open(output_fasta, "w") as f:
+                for fragment_header, fragment_seq in view_fragments:
+                    f.write(f">{fragment_header}\n")
+                    f.write(f"{fragment_seq}\n")
+
+        # copy raw fasta file to augmented_fragments_view0.fasta.
+        # raw_fasta = os.path.join(output_dir, f"augmented_fragments_view0.fasta")
+        # if not os.path.exists(raw_fasta):
+        #     os.symlink(os.path.abspath(contigs), raw_fasta) # create a symbolic link to the original contigs fasta file for view 0, which is the unaugmented view.
 
         return FragMent_Dict, All_Fragments

@@ -1,5 +1,6 @@
 import hashlib
 import itertools
+import os
 from typing import Dict
 from pydantic import Field
 import torch
@@ -7,6 +8,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from torch.backends import cudnn
+import torch.nn.functional as F
 import numpy as np
 import random
 import pandas as pd
@@ -20,7 +22,6 @@ from collections import OrderedDict
 
 
 class BarlowTwinsTrainer(BaseTrainer):
-    features: BinfernoFeatureBuilder
 
     learning_rate: float = Field(
         default=2.5e-3, description="Learning rate for training."
@@ -39,7 +40,7 @@ class BarlowTwinsTrainer(BaseTrainer):
         default=1000, description="Minimum contig length to be included in training."
     )
     view_num: int = Field(
-        default=6, description="Number of augmented views to generate for each contig."
+        default=8, description="Number of augmented views to generate for each contig."
     )
     seed: int = Field(
         default=42, description="Random seed for training and augmentation."
@@ -53,6 +54,7 @@ class BarlowTwinsTrainer(BaseTrainer):
         logger=None,
         threads: int = 4,
         multisample: bool = False,
+        features: BinfernoFeatureBuilder = None,
         **kwargs,
     ):
         """
@@ -63,24 +65,35 @@ class BarlowTwinsTrainer(BaseTrainer):
          - view_num: number of augmented views to generate for each contig.
          - contig_length: minimum length of contigs to consider for augmentation.
         """
+        output_aug_dir = output_dir / "augmentation"
+        output_aug_dir.mkdir(parents=True, exist_ok=True)
+        output_train_dir = output_dir / "training"
+        output_train_dir.mkdir(parents=True, exist_ok=True)
+        embedding_path = output_train_dir / "embeddings.tsv"
+        if embedding_path.exists():
+            logger.info(
+                f"Embeddings already exist at {embedding_path}. Loading embeddings from file."
+            )
+            embeddings = pd.read_csv(embedding_path, sep="\t", header=0, index_col=0)
+            return embeddings
 
         fragment_dict, all_fragments, namelist = self.gen_views(
             contigs=contigs,
             simclr=False,
             barlow_twins=True,
-            output_dir=output_dir,
+            output_dir=output_aug_dir,
             view_num=self.view_num,
             contig_length=self.contig_length,
         )
 
-        feature_df = self.features(
+        feature_df = features(
             FragMent_Dict=fragment_dict,
             All_Fragments=all_fragments,
             contigs=contigs,
             bam_path=bam,
             threads=threads,
             logger=logger,
-            output_dir=output_dir,
+            output_dir=output_aug_dir,
         )
 
         feature_df = self.sort_features_by_method(
@@ -104,9 +117,8 @@ class BarlowTwinsTrainer(BaseTrainer):
         kmer_dim = 136
         proj_head_dim = 512
         model = NeuralNetwork(
-            input_dim=feature_df.shape[1],
-            cov_dim=cov_dim,
-            composition_dim=composition_dim,
+            tnf_dim=composition_dim,
+            coverage_dim=cov_dim,
             kmer_dim=kmer_dim,
             proj_head_dim=proj_head_dim,
             n_layers=self.n_layers,
@@ -118,9 +130,10 @@ class BarlowTwinsTrainer(BaseTrainer):
             data_df=feature_df,
             batch_size=self.batch_size,
             epochs=self.epochs,
+            num_workers=threads,
         )
-
-        model_path = output_dir / "best_model.pt"
+        
+        model_path = output_train_dir / "best_model.pt"
         if not model_path.exists():
             model = self.train(
                 dataloader=dataloader,
@@ -130,7 +143,7 @@ class BarlowTwinsTrainer(BaseTrainer):
                 method="barlow_twins",
                 epochs=self.epochs,
                 model=model,
-                output_dir=output_dir,
+                output_dir=output_train_dir,
                 logger=logger,
             )
         else:
@@ -139,7 +152,7 @@ class BarlowTwinsTrainer(BaseTrainer):
             )
             model.load_state_dict(torch.load(model_path, map_location=device))
 
-        embedding_path = output_dir / "embeddings.tsv"
+        
         if not embedding_path.exists():
             orig_df = feature_df[feature_df.index.str.endswith(".original")]
             namelist = [index.rsplit(".", 1)[0] for index in orig_df.index]
@@ -151,15 +164,15 @@ class BarlowTwinsTrainer(BaseTrainer):
                 save_individual_embs=False,
             )
 
-        else:
-            logger.info(
-                f"Embeddings already exist at {embedding_path}. Loading embeddings from file."
-            )
-            embeddings = pd.read_csv(embedding_path, sep="\t", header=0, index_col=0)
+        embeddings = pd.DataFrame(
+            F.normalize(torch.from_numpy(embeddings.values).float(), dim=1).numpy(),
+            index=embeddings.index,
+            columns=embeddings.columns,
+        )
 
         return embeddings
 
-    def seed_worker():
+    def seed_worker(self, worker_id: int):
         """Seed worker processes for DataLoader reproducibility."""
         worker_seed = torch.initial_seed() % 2**10
         np.random.seed(worker_seed)
@@ -308,15 +321,7 @@ class BarlowTwinsTrainer(BaseTrainer):
             Convert selected positive pairs into a TensorDataset of:
                 (feature1, feature2, base_id)
             """
-            pair_records = []
-
-            X = self.data_df.to_numpy(dtype=np.float64)
-
-            print("Before tensor construction:")
-            print("X shape:", X.shape)
-            print("NaN count:", np.isnan(X).sum())
-            print("Inf count:", np.isinf(X).sum())
-            print("Finite:", np.isfinite(X).all())
+            X = self.data_df.to_numpy(dtype=np.float32, copy=False)
 
             if not np.isfinite(X).all():
                 bad_rows, bad_cols = np.where(~np.isfinite(X))
@@ -336,35 +341,36 @@ class BarlowTwinsTrainer(BaseTrainer):
                     "data_df contains NaN or Inf before TensorDataset construction."
                 )
 
-            for idx1, idx2 in self.training_pairs:
-                feat1 = self.data_df.iloc[idx1].to_numpy(dtype=np.float64)
-                feat2 = self.data_df.iloc[idx2].to_numpy(dtype=np.float64)
-                base_id = self.index_to_base_id[idx1]
-                pair_records.append((feat1, feat2, base_id))
+            pair_indices = np.asarray(self.training_pairs, dtype=np.int64)
+            idx1 = pair_indices[:, 0]
+            idx2 = pair_indices[:, 1]
 
-            features1 = torch.tensor(
-                np.array([record[0] for record in pair_records]),
-                dtype=torch.float32,
+            features1 = torch.from_numpy(X[idx1].copy())
+            features2 = torch.from_numpy(X[idx2].copy())
+
+            base_ids_np = np.fromiter(
+                (self.index_to_base_id[i] for i in idx1),
+                dtype=np.int64,
+                count=len(idx1),
             )
-            features2 = torch.tensor(
-                np.array([record[1] for record in pair_records]),
-                dtype=torch.float32,
-            )
-            base_ids = torch.tensor(
-                np.array([record[2] for record in pair_records]),
-                dtype=torch.long,
-            )
+            base_ids = torch.from_numpy(base_ids_np)
 
             return TensorDataset(features1, features2, base_ids)
 
     def prepare_trainer(
-        self, model, data_df, batch_size: int = 1024, logger=None, **kwargs
+        self,
+        model,
+        data_df,
+        batch_size: int = 1024,
+        logger=None,
+        epochs: int = 300,
+        num_workers: int = 0,
+        **kwargs,
     ):
         dataset_builder = self.BuildDataset(data_df=data_df)
         train_dataset = dataset_builder.construct_tensordatasets_from_pairs()
 
         effective_batch_size = batch_size
-        epochs = kwargs.get("epochs", 300)
         # a way of adaptively changing the batch sizes.
         while len(train_dataset) < effective_batch_size and effective_batch_size > 1:
             effective_batch_size = effective_batch_size // 2
@@ -381,7 +387,17 @@ class BarlowTwinsTrainer(BaseTrainer):
             "shuffle": True,
             "drop_last": not has_enough_data,
             "worker_init_fn": self.seed_worker,
+            "num_workers": max(0, num_workers),
+            "pin_memory": torch.cuda.is_available(),
         }
+
+        if dataloader_kwargs["num_workers"] > 0:
+            dataloader_kwargs.update(
+                {
+                    "persistent_workers": True,
+                    "prefetch_factor": 2,
+                }
+            )
 
         dataloader = DataLoader(train_dataset, **dataloader_kwargs)
         optimizer = optim.AdamW(
@@ -462,13 +478,10 @@ class BarlowTwinsTrainer(BaseTrainer):
 
         for batch_i, batch_data in enumerate(dataloader):
             features1, features2, base_ids = batch_data
-            features1, features2, base_ids = (
-                features1.to(device),
-                features2.to(device),
-                base_ids.to(device),
-            )
+            features1 = features1.to(device, non_blocking=True)
+            features2 = features2.to(device, non_blocking=True)
 
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
 
             output1, output2 = model(features1, features2)
 
@@ -546,11 +559,6 @@ class BarlowTwinsTrainer(BaseTrainer):
             fragments.extend(left_fragments)
             fragments.extend(right_fragments)
 
-            print(
-                f"Generated {len(fragments)} fragments for large contig {header} "
-                f"(length {seq_len}): {len(left_fragments)} from first half, "
-                f"{len(right_fragments)} from second half"
-            )
         else:
             generated = self._generate_half_augmentations(
                 sequence=sequence,
@@ -563,9 +571,9 @@ class BarlowTwinsTrainer(BaseTrainer):
             )
             fragments.extend(generated)
 
-            print(
-                f"Generated {len(fragments)} fragments for {header} (length {seq_len})"
-            )
+            # print(
+            #     f"Generated {len(fragments)} fragments for {header} (length {seq_len})"
+            # )
 
         return fragments
 
@@ -702,7 +710,6 @@ class BarlowTwinsTrainer(BaseTrainer):
         fasta_file=None,
         num_views=6,
         length_threshold=1000,
-        method: str = "barlow_twins",
     ):
         # initialize the augmentation.
         seqs = pyfastx.Fastx(fasta_file)
@@ -713,12 +720,6 @@ class BarlowTwinsTrainer(BaseTrainer):
         # apply augmentation.
         fragments_dict = OrderedDict()
         fragment_count = 0
-
-        assert method in [
-            "barlow_twins",
-            "simclr",
-        ], "Method must be either 'barlow_twins' or 'simclr'. \
-            Please set the method parameter accordingly."
 
         # the loop over sequences to generate augmentations.
         for header, seq in seqs:
@@ -781,11 +782,19 @@ class BarlowTwinsTrainer(BaseTrainer):
 
         FragMent_Dict, All_Fragments = self.augmentation(
             fasta_file=str(contigs),
-            output_dir=str(output_dir),
             num_views=view_num,
             length_threshold=contig_length,
-            method="barlow_twins",
         )
+
+        for view in range(view_num):
+            output_fasta = os.path.join(output_dir, f"augmented_fragments_view{view}.fasta")
+            view_fragments = [
+                    (header, seq) for header, seq in All_Fragments if header.endswith(f".{view}")
+            ]
+            with open(output_fasta, "w") as f:
+                for fragment_header, fragment_seq in view_fragments:
+                    f.write(f">{fragment_header}\n")
+                    f.write(f"{fragment_seq}\n")
 
         return FragMent_Dict, All_Fragments
 
@@ -804,12 +813,22 @@ class BarlowTwinsTrainer(BaseTrainer):
             view_num=view_num,
             contig_length=contig_length,
             output_dir=output_dir,
-            simclr=simclr,
-            barlow_twins=barlow_twins,
         )
 
         namelist = list(
             FragMent_Dict.keys()
         )  # the ordered contig names which will be used for indexing the features.
+
+        for view in range(view_num):
+            output_fasta = os.path.join(output_dir, f"augmented_fragments_view{view}.fasta")
+            view_fragments = [
+                    (header, seq) for header, seq in All_Fragments if header.endswith(f".{view}")
+            ]
+            with open(output_fasta, "w") as f:
+                for fragment_header, fragment_seq in view_fragments:
+                    f.write(f">{fragment_header}\n")
+                    f.write(f"{fragment_seq}\n")
+
+        # copy raw fasta file to augmented_fragments_view0.fasta.
 
         return FragMent_Dict, All_Fragments, namelist
