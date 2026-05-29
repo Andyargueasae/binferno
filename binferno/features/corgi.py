@@ -165,4 +165,6 @@ class CorgiFeatureBuilder(BaseFeatureBuilder):
 
             del view_df, view_emb, view_index
 
+        if self.corgi_normalize:
+            corgi_df = corgi_df.apply(lambda x: x / np.linalg.norm(x), axis=1) # L2 normalization by row.
         return corgi_df

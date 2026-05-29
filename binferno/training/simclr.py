@@ -373,53 +373,42 @@ class SimCLRTrainer(BaseTrainer):
         return train_loader, optimizer, scheduler, dataset
 
     class info_nce_loss(nn.Module):
-        def __init__(self, temperature=0.15):
+        def __init__(self, temperature=0.15, batch_size=1024, n_views=6):
             super().__init__()
             self.temperature = temperature
+            self.batch_size = batch_size
+            self.n_views = n_views
             self._cache = {}
 
-        def _get_cached_tensors(self, batch_size, n_views, device):
-            key = (batch_size, n_views, str(device))
-            if key in self._cache:
-                return self._cache[key]
+        def forward(self, features, device):
+            """
+            Behavior-preserving alternative to info_nce_loss with lower allocation overhead.
 
-            N = batch_size * n_views
-            sample_ids = torch.arange(batch_size, device=device).repeat(n_views)
-            same_sample = sample_ids.unsqueeze(0) == sample_ids.unsqueeze(1)
-            self_mask = torch.eye(N, dtype=torch.bool, device=device)
-            positives_mask = same_sample & ~self_mask
-            negatives_mask = ~same_sample
-            labels = torch.zeros(N * (n_views - 1), dtype=torch.long, device=device)
+            :param features: Input features.
+            :return: Logits and labels for the loss.
+            """
+            total = self.batch_size * self.n_views
+            cache_key = (self.batch_size, self.n_views, str(device))
 
-            cached = (positives_mask, negatives_mask, labels)
-            self._cache[key] = cached
-            return cached
+            if cache_key not in self._cache:
+                sample_ids = torch.arange(self.batch_size, device=device).repeat(self.n_views)
+                diag_mask = torch.eye(total, dtype=torch.bool, device=device)
+                positive_mask = sample_ids.unsqueeze(0).eq(sample_ids.unsqueeze(1)) & (~diag_mask)
+                negative_mask = (~positive_mask) & (~diag_mask)
+                self._cache[cache_key] = (positive_mask, negative_mask)
 
-        def forward(self, features, batch_size, n_views, device):
+            positive_mask, negative_mask = self._cache[cache_key]
+
             features = F.normalize(features, dim=1)
-            similarity_matrix = torch.matmul(features, features.T) / self.temperature
+            similarity_matrix = torch.matmul(features, features.T)
 
-            positives_mask, negatives_mask, labels = self._get_cached_tensors(
-                batch_size=batch_size,
-                n_views=n_views,
-                device=device,
-            )
+            positives = similarity_matrix[positive_mask].view(-1, 1)
+            negatives = similarity_matrix[negative_mask].view(total, -1)
+            negatives = negatives.repeat_interleave(self.n_views - 1, dim=0)
 
-            N = batch_size * n_views
-
-            positives = similarity_matrix[positives_mask].view(N, n_views - 1)
-            negatives = similarity_matrix[negatives_mask].view(N, N - n_views)
-
-            logits = torch.cat(
-                [
-                    positives.reshape(-1, 1),
-                    negatives[:, None].expand(-1, n_views - 1, -1).reshape(
-                        -1, N - n_views
-                    ),
-                ],
-                dim=1,
-            )
-
+            logits = torch.cat([positives, negatives], dim=1)
+            labels = torch.zeros(logits.shape[0], dtype=torch.long, device=device)
+            logits = logits / self.temperature
             return logits, labels
 
     def accuracy(self, output, target, topk=(1,)):

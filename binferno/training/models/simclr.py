@@ -29,20 +29,7 @@ class NeuralNetwork(nn.Module):
         self.corgi_dim = corgi_dim
         
         if corgi_dim > 0:
-            self.tnf_enc_dim += output_dim  # update tnf_enc_dim to include corgi features.
-            self.corgi_encoder = nn.Sequential(
-                nn.Linear(corgi_dim, 512),
-                nn.BatchNorm1d(512),
-                nn.LeakyReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(512, 256),
-                nn.BatchNorm1d(256),
-                nn.LeakyReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(256, output_dim),
-                nn.BatchNorm1d(output_dim),
-                nn.LeakyReLU(),
-            )
+            self.tnf_enc_dim += corgi_dim  # update tnf_enc_dim to include corgi features.
             # tnf_encoder can then take concatenated tnf features and corgi features.
             self.tnf_encoder = nn.Sequential(
                 nn.Linear(self.tnf_enc_dim, 512),
@@ -108,33 +95,20 @@ class NeuralNetwork(nn.Module):
 
     def _encode(self, x):
         # encode tnf and coverage features separately, then fuse them together.
-        tnf_features = x[:, : self.tnf_dim]
-        if self.corgi_dim > 0:
-            kmer_features = x[:, : self.kmer_dim]
-            corgi_features = x[:, self.kmer_dim:self.tnf_dim]
-            corgi_encode = F.normalize(self.corgi_encoder(corgi_features), dim=-1)
-            tnf_features = torch.cat([kmer_features, corgi_encode], dim=-1)
-
+        tnf_features = x[:, : self.tnf_enc_dim]
         tnf_encode = F.normalize(self.tnf_encoder(tnf_features), dim=-1)
-        cov_features = x[:, self.tnf_dim :]
+        cov_features = x[:, self.tnf_enc_dim :]
         cov_encode = F.normalize(self.coverage_encoder(cov_features), dim=-1)
-
-        fused_encode = self.fusion_network(tnf_encode, cov_encode)  # 128
-
+        fused_encode = self.fusion_network(tnf_encode, cov_encode)  # 128-dim fused representation.
         return fused_encode
 
     def get_embedding(self, x):
         return self._encode(x)
 
     def get_separate_modality_embs(self, x):
-        kmer_features = x[:, : self.kmer_dim]
-        if self.corgi_dim > 0:
-            kmer_features = x[:, : self.kmer_dim]
-            corgi_features = x[:, self.kmer_dim:self.tnf_dim]
-            corgi_encode = F.normalize(self.corgi_encoder(corgi_features), dim=-1)
-            kmer_features = torch.cat([kmer_features, corgi_encode], dim=-1)
+        kmer_features = x[:, : self.tnf_enc_dim]
         kmer_encoded = F.normalize(self.tnf_encoder(kmer_features), dim=-1)
-        coverage_features = x[:, self.tnf_dim :]
+        coverage_features = x[:, self.tnf_enc_dim :]
         coverage_encoded = F.normalize(self.coverage_encoder(coverage_features), dim=-1)
         return kmer_encoded, coverage_encoded
 
