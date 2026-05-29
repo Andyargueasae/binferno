@@ -92,7 +92,7 @@ class NeuralNetwork(nn.Module):
         self.proj_head = nn.Sequential(
             nn.Linear(self.representation_dim, self.proj_head_dim),
             nn.BatchNorm1d(self.proj_head_dim),
-            nn.ReLU(),
+            nn.LeakyReLU(),
             nn.Linear(
                 self.proj_head_dim, self.proj_head_dim
             ),  # here we projects to a higher dimension to make the Barlow Twins loss work better, since the original paper shows that using a higher dimension for the projection head can improve the performance. We can also add a non-linear activation function here to make the projection head more powerful.
