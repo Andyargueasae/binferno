@@ -206,7 +206,6 @@ class SimCLRTrainer(BaseTrainer):
                 device=device,
                 method="simclr",
                 model=model,
-                n_views=self.view_num,
                 logger=logger,
                 n_cov=cov_dim,
                 output_dir=output_train_dir,
@@ -373,43 +372,81 @@ class SimCLRTrainer(BaseTrainer):
         return train_loader, optimizer, scheduler, dataset
 
     class info_nce_loss(nn.Module):
-        def __init__(self, temperature=0.15, batch_size=1024, n_views=6):
+        def __init__(self, temperature=0.15):
             super().__init__()
             self.temperature = temperature
-            self.batch_size = batch_size
-            self.n_views = n_views
             self._cache = {}
 
-        def forward(self, features, device):
+        def forward(self, features, device, batch_size=1024, n_views=6):
             """
-            Behavior-preserving alternative to info_nce_loss with lower allocation overhead.
-
-            :param features: Input features.
-            :return: Logits and labels for the loss.
+            Ultra-fast multi-view InfoNCE loss matching the 'comebin' style.
+            Computes (n_views - 1) independent losses per anchor view against all negatives,
+            leveraging fused mathematical operators and memory-bound optimizations.
             """
-            total = self.batch_size * self.n_views
-            cache_key = (self.batch_size, self.n_views, str(device))
+            total = batch_size * n_views
+            cache_key = (batch_size, n_views, str(device))
 
+            # --- Efficient Persistent Caching ---
             if cache_key not in self._cache:
-                sample_ids = torch.arange(self.batch_size, device=device).repeat(self.n_views)
+                sample_ids = torch.arange(batch_size, device=device).repeat(n_views)
+                
+                # Construct masks for structured extraction
+                pos_mask = sample_ids.unsqueeze(0).eq(sample_ids.unsqueeze(1))
                 diag_mask = torch.eye(total, dtype=torch.bool, device=device)
-                positive_mask = sample_ids.unsqueeze(0).eq(sample_ids.unsqueeze(1)) & (~diag_mask)
-                negative_mask = (~positive_mask) & (~diag_mask)
-                self._cache[cache_key] = (positive_mask, negative_mask)
+                pos_mask_no_diag = pos_mask & ~diag_mask
+                
+                # Fast index matrix for gathering positive scores: [total, n_views - 1]
+                pos_indices = pos_mask_no_diag.nonzero()[:, 1].view(total, n_views - 1)
+                
+                # Complete negative mask to isolate true negative elements
+                neg_mask = pos_mask
+                
+                self._cache[cache_key] = (pos_indices, neg_mask, sample_ids)
 
-            positive_mask, negative_mask = self._cache[cache_key]
+            pos_indices, neg_mask, sample_ids = self._cache[cache_key]
 
+            # 1. High-speed Matrix Multiplication
             features = F.normalize(features, dim=1)
-            similarity_matrix = torch.matmul(features, features.T)
+            sim = torch.matmul(features, features.T) / self.temperature
 
-            positives = similarity_matrix[positive_mask].view(-1, 1)
-            negatives = similarity_matrix[negative_mask].view(total, -1)
-            negatives = negatives.repeat_interleave(self.n_views - 1, dim=0)
+            # 2. Extract Positives and Flatten: Shape [total * (n_views - 1), 1]
+            # This gathers exactly the 5 positive pairs per row
+            positives = torch.gather(sim, dim=1, index=pos_indices).view(-1, 1)
 
-            logits = torch.cat([positives, negatives], dim=1)
-            labels = torch.zeros(logits.shape[0], dtype=torch.long, device=device)
-            logits = logits / self.temperature
-            return logits, labels
+            # 3. Mask out true positives and self-diagonal targets to isolate negatives
+            negatives_only = sim.masked_fill(neg_mask, float('-inf'))
+            
+            # Virtual repetition to pair each row's negatives against each individual positive view
+            # Shape: [total * (n_views - 1), total]
+            negatives_repeated = torch.repeat_interleave(negatives_only, n_views - 1, dim=0)
+
+            # 4. Fused Mathematical Log-Sum-Exp Reduction (Avoids huge torch.cat calls)
+            max_val = torch.clamp(positives, min=0.0) 
+            pos_exp = torch.exp(positives - max_val)
+            neg_sum_exp = torch.sum(torch.exp(negatives_repeated - max_val), dim=1, keepdim=True)
+            
+            # Final objective calculation matching comebin's multi-view behavior
+            loss = -(positives - max_val - torch.log(pos_exp + neg_sum_exp)).mean()
+
+            # 5. Optimized Metric Computation (Top-1 and Top-5 Accuracy)
+            with torch.no_grad():
+                # Extract pure negative scores across the batch
+                # Shape: [total, total] -> max negative per row: [total, 1]
+                max_negatives = negatives_only.max(dim=1, keepdim=True).values
+                max_negatives_repeated = torch.repeat_interleave(max_negatives, n_views - 1, dim=0)
+                
+                # Top-1: Check if the individual positive view score beats the best negative score
+                top1_acc = (positives > max_negatives_repeated).float().mean().item() * 100.0
+
+                # Top-5: Sort or partition the negative space to find the 5th highest negative baseline
+                # topk(5) returns sorted negative tensor of shape [total, 5]. The 5th item (index 4) is our threshold.
+                top5_neg_threshold = torch.topk(negatives_only, k=5, dim=1).values[:, 4:5]
+                top5_neg_repeated = torch.repeat_interleave(top5_neg_threshold, n_views - 1, dim=0)
+                
+                # Top-5: True if the positive score beats the 5th highest negative score
+                top5_acc = (positives > top5_neg_repeated).float().mean().item() * 100.0
+
+            return loss, top1_acc, top5_acc
 
     def accuracy(self, output, target, topk=(1,)):
         """Computes the accuracy over the k top predictions for the specified values of k"""
@@ -444,7 +481,6 @@ class SimCLRTrainer(BaseTrainer):
         epochs: int = 300,
         model=None,
         n_cov: int = 0,
-        n_views: int = 6,
         output_dir: Path = None,
         **kwargs,
     ):
@@ -459,8 +495,11 @@ class SimCLRTrainer(BaseTrainer):
                 "Logger is not provided for training. Please provide a logger in the kwargs with key 'logger'."
             )
 
+        # Create once so the index cache persists across all epochs
+        info_nceloss_fn = self.info_nce_loss(temperature=temperature).to(device)
+
         epoch_iter = tqdm(range(epochs), desc="Training Epochs")
-        early_stopping = self.EarlyStoppingManager(patience=15)
+        early_stopping = EarlyStoppingManagerSimCLR(patience=10)
         for epoch in epoch_iter:
             avg_loss, stats = self.train_an_epoch(
                 model=model,
@@ -470,7 +509,7 @@ class SimCLRTrainer(BaseTrainer):
                 device=device,
                 temperature=temperature,
                 n_cov=n_cov,
-                n_views=n_views,
+                info_nceloss_fn=info_nceloss_fn,
             )
 
             scheduler.step()
@@ -484,18 +523,18 @@ class SimCLRTrainer(BaseTrainer):
             if stats is not None:
                 self.print_stats(stats, epoch, method=method, logger=logger)
 
-            early_stopping.check_improvement(avg_loss, model.state_dict())
+            early_stopping.check_improvement(avg_loss, stats["top1_acc"], model.state_dict())
             if early_stopping.should_stop():
                 logger.info(
                     f"Early stopping after {epoch+1} epochs (patience: {early_stopping.patience})"
                 )
                 break
 
-            best_state, best_loss = early_stopping.get_best_state()
+            best_state, best_loss,best_acc = early_stopping.get_best_state()
 
         if best_state is not None:
             model.load_state_dict(best_state)
-            logger.info(f"Loaded best model with loss: {best_loss:.4f}")
+            logger.info(f"Loaded best model with loss: {best_loss:.4f} and accuracy: {best_acc:.4f}")
 
             torch.save(model.state_dict(), MODEL_PATH)
             logger.info(f"Model saved to {MODEL_PATH}")
@@ -508,14 +547,13 @@ class SimCLRTrainer(BaseTrainer):
         dataloader,
         optimizer,
         device,
-        batch_size=1024,
         temperature=0.15,
-        n_views=6,
         n_cov=0,
+        info_nceloss_fn=None,
         **kwargs,
     ):
-        criterion = nn.CrossEntropyLoss().to(device)
-        info_nceloss_fn = self.info_nce_loss(temperature=temperature).to(device)
+        if info_nceloss_fn is None:
+            info_nceloss_fn = self.info_nce_loss(temperature=temperature).to(device)
         model.train()
         stats = None
         total_loss = 0.0
@@ -526,18 +564,17 @@ class SimCLRTrainer(BaseTrainer):
         for i, features in enumerate(dataloader):
             contig_features = torch.cat(features, dim=0).to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
-
+            actual_batch_size = contig_features.shape[0] // self.view_num
             enc_feature = model.forward_one(contig_features)
-            logits, labels = info_nceloss_fn(
-                enc_feature, batch_size=batch_size, device=device, n_views=n_views
+            loss, batch_acc, _ = info_nceloss_fn(
+                enc_feature, batch_size=actual_batch_size, device=device, n_views=self.view_num
             )
-            loss = criterion(logits, labels)
 
             loss.backward()
             optimizer.step()
 
             total_loss += loss.item()
-            total_acc += self.accuracy(logits, labels, topk=(1,))[0].item()
+            total_acc += batch_acc
             last_batch = i == len(dataloader) - 1
 
             if last_batch:
@@ -565,7 +602,6 @@ class SimCLRTrainer(BaseTrainer):
         self.unify_seeds(
             self.seed
         )  # ensure reproducibility by unifying seeds across random, numpy, and torch.
-        criterion = torch.nn.CrossEntropyLoss().to(device)
         info_nceloss_fn = self.info_nce_loss(temperature=temperature).to(device)
         if n_cov <= 0:
             raise ValueError(
@@ -597,15 +633,14 @@ class SimCLRTrainer(BaseTrainer):
                         contig_features[:, :-n_cov], contig_features[:, -n_cov:]
                     )
                     actual_batch_size = contig_features.shape[0] // n_views
-                    logits, labels = info_nceloss_fn(
+                    loss, batch_acc = info_nceloss_fn(
                         features,
                         batch_size=actual_batch_size,
                         device=device,
                         n_views=n_views,
                     )
-                    loss = criterion(logits, labels)
                     total_loss += loss.item()
-                    total_acc1 += self.accuracy(logits, labels, topk=(1,))[0].item()
+                    total_acc1 += batch_acc
 
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
@@ -818,3 +853,32 @@ class SimCLRTrainer(BaseTrainer):
         #     os.symlink(os.path.abspath(contigs), raw_fasta) # create a symbolic link to the original contigs fasta file for view 0, which is the unaugmented view.
 
         return FragMent_Dict, All_Fragments
+    
+class EarlyStoppingManagerSimCLR:
+    def __init__(self, patience=10):
+            self.patience = patience
+            self._lowest_loss = float("inf")
+            self._top_acc = 0.0
+            self._saved_state = None
+            self._stagnant_epochs = 0
+
+    def check_improvement(self, loss, top_acc, model_state):
+            improved = loss < self._lowest_loss or top_acc > self._top_acc
+
+            if improved:
+                if loss < self._lowest_loss:
+                    self._lowest_loss = loss
+                if top_acc > self._top_acc:
+                    self._top_acc = top_acc
+                self._saved_state = model_state
+                self._stagnant_epochs = 0
+                return
+
+            self._stagnant_epochs += 1
+
+    def should_stop(self):
+            return self._stagnant_epochs >= self.patience
+
+    def get_best_state(self):
+            """Return the best checkpoint state and its associated loss and top accuracy."""
+            return self._saved_state, self._lowest_loss, self._top_acc

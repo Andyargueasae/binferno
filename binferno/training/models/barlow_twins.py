@@ -96,14 +96,15 @@ class NeuralNetwork(nn.Module):
             nn.Linear(
                 self.proj_head_dim, self.proj_head_dim
             ),  # here we projects to a higher dimension to make the Barlow Twins loss work better, since the original paper shows that using a higher dimension for the projection head can improve the performance. We can also add a non-linear activation function here to make the projection head more powerful.
+            nn.BatchNorm1d(self.proj_head_dim),
         )
 
     def _encode(self, x):
         # encode tnf and coverage features separately, then fuse them together.
         tnf_features = x[:, : self.tnf_enc_dim]
-        tnf_encode = F.normalize(self.tnf_encoder(tnf_features), dim=-1)
+        tnf_encode = self.tnf_encoder(tnf_features)  # 128
         cov_features = x[:, self.tnf_enc_dim :]
-        cov_encode = F.normalize(self.coverage_encoder(cov_features), dim=-1)
+        cov_encode = self.coverage_encoder(cov_features)  # 128, not normalized.
         fused_encode = self.fusion_network(tnf_encode, cov_encode)  # 128
         return fused_encode
 
@@ -112,9 +113,9 @@ class NeuralNetwork(nn.Module):
 
     def get_separate_modality_embs(self, x):
         kmer_features = x[:, : self.tnf_enc_dim]
-        kmer_encoded = F.normalize(self.tnf_encoder(kmer_features), dim=-1)
+        kmer_encoded = self.tnf_encoder(kmer_features)
         coverage_features = x[:, self.tnf_enc_dim :]
-        coverage_encoded = F.normalize(self.coverage_encoder(coverage_features), dim=-1)
+        coverage_encoded = self.coverage_encoder(coverage_features)
         return kmer_encoded, coverage_encoded
 
     def forward_one(self, x):
@@ -167,15 +168,11 @@ class attentionFusion(nn.Module):
 
         self.kmer_proj = nn.Linear(self.kmer_enc_dim, self.emb_dim)
         self.coverage_proj = nn.Linear(self.coverage_dim, self.emb_dim)
-
+        self.fusion_dropout = nn.Dropout(self.DROPOUT)
         self.batch_norm1 = nn.BatchNorm1d(self.emb_dim)
         self.batch_norm2 = nn.BatchNorm1d(self.emb_dim)
 
         self.residual_weight = nn.Parameter(torch.tensor(self.RESIDUAL_WEIGHT_INIT))
-        self.adaptive_dropout = AdaptiveDropout(
-            base_rate=self.DROPOUT,
-            max_rate=self.DROPOUT * self.ADAPTIVE_DROPOUT_MAX_MULTIPLIER,
-        )
 
         # implement attention-based fusion
         self.MHA_kmer2cov = nn.MultiheadAttention(
@@ -289,16 +286,16 @@ class attentionFusion(nn.Module):
             coverage_gate_weight * cov_emb + (1 - coverage_gate_weight) * cov_attended
         )
 
-        residual_weight_clamped = torch.clamp(self.residual_weight, min=0.1, max=0.9)
+        residual_weight_clamped = torch.clamp(self.residual_weight, min=0.3, max=0.7)
 
-        gated_kmer = self.batch_norm1(
+        gated_kmer = self.fusion_dropout(self.batch_norm1(
             (1 - residual_weight_clamped) * gated_kmer
             + residual_weight_clamped * kmer_emb
-        )
-        gated_coverage = self.batch_norm2(
+        ))
+        gated_coverage = self.fusion_dropout(self.batch_norm2(
             (1 - residual_weight_clamped) * gated_coverage
             + residual_weight_clamped * cov_emb
-        )
+        ))
 
         # apply when corgi dim is determined.
 
@@ -320,6 +317,7 @@ class attentionFusion(nn.Module):
             ],
             dim=1,
         )
+        
         output = self.fused_proj(final_fused_features)
         return output
 

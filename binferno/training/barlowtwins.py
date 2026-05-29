@@ -185,34 +185,60 @@ class BarlowTwinsTrainer(BaseTrainer):
             self.lambda_bt = lambda_bt  # lambda barlow twins tunes the importance of the redundancy reduction term relative to the invariance term. A higher lambda_bt encourages the model to produce more decorrelated features, while a lower lambda_bt allows for more redundancy in the features.
             self.alpha = alpha  # alpha tunes the importance of the invariance loss relative to the redundancy loss. A higher alpha emphasizes the importance of making the diagonal elements of the correlation matrix close to 1, while a lower alpha allows for more flexibility in the diagonal elements.
             self.eps = eps
+            # self.register_buffer(
+            #     'off_diag_mask',
+            #     ~torch.eye(proj_dim, dtype=torch.bool)
+            # )
+            self._cache = {}
 
         def forward(self, feature1, feature2, return_stats=False):
             N, D = feature1.size()
+            device = feature1.device
+            cache_key = (D, str(device))
+            if cache_key not in self._cache:
+                # We cache an identity matrix to avoid allocating it on every step
+                self._cache[cache_key] = torch.eye(D, device=device)
+            eye = self._cache[cache_key]
 
-            z1 = (feature1 - feature1.mean(dim=0)) / (feature1.std(dim=0) + self.eps)
-            z2 = (feature2 - feature2.mean(dim=0)) / (feature2.std(dim=0) + self.eps)
+            z1 = (feature1 - feature1.mean(dim=0)) / (feature1.std(dim=0, unbiased=False) + self.eps)
+            z2 = (feature2 - feature2.mean(dim=0)) / (feature2.std(dim=0, unbiased=False) + self.eps)
 
             C = torch.mm(z1.T, z2) / N
 
+            loss_matrix = C.pow(2)
             diag = torch.diagonal(C)
             invariance_loss = (
                 (diag - 1.0).pow(2).sum()
             )  # this is the invariance loss, which encourages the diagonal elements of the correlation matrix to be close to 1, meaning that the corresponding features in the two views are highly correlated.
 
-            off_diag_mask = ~torch.eye(D, dtype=torch.bool, device=feature1.device)
-            redundancy_loss = (
-                C[off_diag_mask].pow(2).sum()
-            )  # off diagonal elements of the correlation matrix to be close to 0, meaning that different features are decorrelated and carry unique information.
+            # off_diag_mask = ~torch.eye(D, dtype=torch.bool, device=feature1.device)
+            # redundancy_loss = (
+            #     C[off_diag_mask].pow(2).sum()
+            # )  # off diagonal elements of the correlation matrix to be close to 0, meaning that different features are decorrelated and carry unique information.
 
+            redundancy_loss = loss_matrix.sum() - torch.diagonal(loss_matrix).sum()
             loss = self.alpha * invariance_loss + self.lambda_bt * redundancy_loss
+
             if return_stats:
                 with torch.no_grad():
-                    off_diag = C[off_diag_mask]
+                    # Isolate off-diagonals cleanly using the cached identity matrix
+                    off_diag_abs = C.abs().masked_fill(eye.to(torch.bool), 0.0)
+                    
+                    # Bundle tensors together into a single structure before sending to CPU
+                    # This minimizes the overhead of calling .item() sequentially
+                    stats_tensor = torch.stack([
+                        diag.mean(),
+                        diag.std(),
+                        off_diag_abs.sum() / (D * D - D), # True mean of off-diagonals
+                        off_diag_abs.max()
+                    ])
+                    stats_cpu = stats_tensor.cpu().tolist()
+
                     stats = {
-                        "mean_diagonal": diag.mean().item(),
-                        "std_diagonal": diag.std().item(),
-                        "mean_abs_off_diagonal": off_diag.abs().mean().item(),
-                        "max_abs_off_diagonal": off_diag.abs().max().item(),
+                        "mean_diagonal": stats_cpu[0],
+                        "std_diagonal": stats_cpu[1],
+                        "mean_abs_off_diagonal": stats_cpu[2],
+                        "max_abs_off_diagonal": stats_cpu[3],
                         "invariance_loss": invariance_loss.item(),
                         "redundancy_loss": redundancy_loss.item(),
                     }
@@ -436,7 +462,7 @@ class BarlowTwinsTrainer(BaseTrainer):
             )
 
         epoch_iter = tqdm(range(epochs), desc="Training Epochs")
-        early_stopping = self.EarlyStoppingManager(patience=15)
+        early_stopping = self.EarlyStoppingManager(patience=10)
         for epoch in epoch_iter:
 
             avg_loss, stats = self.train_an_epoch(

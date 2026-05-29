@@ -1,6 +1,8 @@
 import pandas as pd
 from pydantic import Field
 from pathlib import Path
+
+import torch
 from .barlowtwins import BarlowTwinsTrainer
 from .simclr import SimCLRTrainer
 from .base import BaseTrainer
@@ -21,6 +23,10 @@ class BinfernoTrainer(BaseTrainer):
     multisample: bool = Field(
         default=False,
         description="Whether to use multisample augmentation for SimCLR training.",
+    )
+    concat: bool = Field(
+        default=False,
+        description="Whether to concatenate the embeddings from SimCLR and Barlow Twins. If False, the embeddings are added and normalized.",
     )
 
     def __call__(
@@ -79,5 +85,13 @@ class BinfernoTrainer(BaseTrainer):
             # normalized output_emb before concatenations, use F.normalize from torch.
 
             embeddings = pd.concat([embeddings, output_emb], axis=1)
-
+        if not self.concat:
+            # split the embeddings first, then add and normalize them.
+            num_methods = len(train_modules)
+            split_embs = torch.split(torch.tensor(embeddings.values), embeddings.shape[1] // num_methods, dim=1)
+            summed_emb = torch.zeros_like(split_embs[0])
+            for emb in split_embs:
+                summed_emb += emb
+            normalized_emb = F.normalize(summed_emb, p=2, dim=1)
+            embeddings = pd.DataFrame(normalized_emb.numpy(), index=embeddings.index)
         return embeddings

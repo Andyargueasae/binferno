@@ -76,7 +76,7 @@ class CorgiFeatureBuilder(BaseFeatureBuilder):
         description="Path to the pretrained Corgi model checkpoint. If None, will use the default pretrained model.",
     )
     corgi_normalize: bool = Field(
-        default=False,
+        default=True,
         description="Whether to normalize the Corgi embeddings. If True, the embeddings will be L2 normalized. If False, the raw embeddings will be returned.",
     )
 

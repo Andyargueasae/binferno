@@ -126,6 +126,48 @@ class SimCLR(object):
         logits = logits / self.temperature
         return logits, labels
 
+    # new version but with different behavior when n_views > 2. 
+    class info_nce_loss(nn.Module):
+        def __init__(self, temperature=0.15):
+            super().__init__()
+            self.temperature = temperature
+            self._cache = {}
+
+        def forward(self, features, device, batch_size=1024, n_views=6):
+            """
+            Efficient InfoNCE loss using log_softmax on the full similarity matrix.
+            Avoids boolean mask gather and repeat_interleave by operating on the
+            full (diagonal-masked) matrix and indexing only at cached positive pairs.
+
+            :param features: Input features.
+            :return: loss scalar tensor, top-1 accuracy float.
+            """
+            total = batch_size * n_views
+            cache_key = (batch_size, n_views, str(device))
+
+            if cache_key not in self._cache:
+                sample_ids = torch.arange(batch_size, device=device).repeat(n_views)
+                diag_mask = torch.eye(total, dtype=torch.bool, device=device)
+                pos_mask = sample_ids.unsqueeze(0).eq(sample_ids.unsqueeze(1)) & ~diag_mask
+                pos_rows, pos_cols = pos_mask.nonzero(as_tuple=True)
+                self._cache[cache_key] = (pos_rows, pos_cols, diag_mask, sample_ids)
+
+            pos_rows, pos_cols, diag_mask, sample_ids = self._cache[cache_key]
+
+            features = F.normalize(features, dim=1)
+            sim = torch.matmul(features, features.T) / self.temperature
+            sim = sim.masked_fill(diag_mask, float('-inf'))
+
+            # Single fused log_softmax; gather only at positive locations
+            log_probs = F.log_softmax(sim, dim=1)
+            loss = -log_probs[pos_rows, pos_cols].mean()
+
+            with torch.no_grad():
+                top1_preds = sim.argmax(dim=1)
+                top1_acc = (sample_ids[top1_preds] == sample_ids).float().mean().item() * 100.0
+
+            return loss, top1_acc
+    
     def covmodel_info_nce_loss(self, features, device, args_dict):
         """
         Calculate the InfoNCE loss for the coverage model.
