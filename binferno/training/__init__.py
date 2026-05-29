@@ -52,13 +52,13 @@ class BinfernoTrainer(BaseTrainer):
             raise ValueError("At least one training method must be chosen. \
                             Please set training_method to (True, False) for SimCLR, \
                             (False, True) for Barlow Twins, or (True, True) for both.")
-        elif simclr:
+        if simclr:
             output_dirs.append(output_dir / "simclr")
             train_modules.append(self.simclr)
-        else:
+        if barlow_twins:
             output_dirs.append(output_dir / "barlow_twins")
             train_modules.append(self.barlowtwins)
-
+        
         for out_dir, train_module in zip(output_dirs, train_modules):
             out_dir.mkdir(
                 parents=True, exist_ok=True

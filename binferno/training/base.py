@@ -140,7 +140,6 @@ class BaseTrainer(BaseModel):
                 ).to(device)
 
                 batch_embeddings = model.get_embedding(batch_features)
-                kmer_emb, cov_emb = model.get_separate_modality_embs(batch_features)
                 batch_embeddings = torch.nn.functional.normalize(
                     batch_embeddings, p=2, dim=1
                 )
@@ -150,6 +149,7 @@ class BaseTrainer(BaseModel):
 
                     # Save encoder embeddings if requested
                     if save_individual_embs:
+                        kmer_emb, cov_emb = model.get_separate_modality_embs(batch_features)
                         kmer_embs[clean_header] = kmer_emb[j].cpu().numpy()
                         cov_embs[clean_header] = cov_emb[j].cpu().numpy()
 

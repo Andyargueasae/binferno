@@ -50,6 +50,7 @@ class SimCLR(object):
         self.temperature = (
             self.args.get("temperature", temperature) if self.args else temperature
         )
+        self._infonce_mask_cache = {}
 
     def info_nce_loss(self, features, device, args_dict):
         """
@@ -88,6 +89,40 @@ class SimCLR(object):
 
         logits = torch.cat([positives, negatives], dim=1)
         labels = torch.zeros(logits.shape[0], dtype=torch.long).to(device)
+        logits = logits / self.temperature
+        return logits, labels
+
+    def info_nce_loss_fast(self, features, device, args_dict):
+        """
+        Behavior-preserving alternative to info_nce_loss with lower allocation overhead.
+
+        :param features: Input features.
+        :return: Logits and labels for the loss.
+        """
+        batch_size = args_dict.get("batch_size", 1024)
+        n_views = args_dict.get("n_views", 6)
+
+        total = batch_size * n_views
+        cache_key = (batch_size, n_views, str(device))
+
+        if cache_key not in self._infonce_mask_cache:
+            sample_ids = torch.arange(batch_size, device=device).repeat(n_views)
+            diag_mask = torch.eye(total, dtype=torch.bool, device=device)
+            positive_mask = sample_ids.unsqueeze(0).eq(sample_ids.unsqueeze(1)) & (~diag_mask)
+            negative_mask = (~positive_mask) & (~diag_mask)
+            self._infonce_mask_cache[cache_key] = (positive_mask, negative_mask)
+
+        positive_mask, negative_mask = self._infonce_mask_cache[cache_key]
+
+        features = F.normalize(features, dim=1)
+        similarity_matrix = torch.matmul(features, features.T)
+
+        positives = similarity_matrix[positive_mask].view(-1, 1)
+        negatives = similarity_matrix[negative_mask].view(total, -1)
+        negatives = negatives.repeat_interleave(n_views - 1, dim=0)
+
+        logits = torch.cat([positives, negatives], dim=1)
+        labels = torch.zeros(logits.shape[0], dtype=torch.long, device=device)
         logits = logits / self.temperature
         return logits, labels
 

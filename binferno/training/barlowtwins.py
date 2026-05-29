@@ -112,9 +112,9 @@ class BarlowTwinsTrainer(BaseTrainer):
         logger.info(f"Using device: {device}")
 
         cov_dim = sum([1 for col in feature_df.columns if "cov" in col])
-
         composition_dim = feature_df.shape[1] - cov_dim
         kmer_dim = 136
+        corgi_dim = composition_dim - kmer_dim
         proj_head_dim = 512
         model = NeuralNetwork(
             tnf_dim=composition_dim,
@@ -122,6 +122,7 @@ class BarlowTwinsTrainer(BaseTrainer):
             kmer_dim=kmer_dim,
             proj_head_dim=proj_head_dim,
             n_layers=self.n_layers,
+            corgi_dim=corgi_dim,
             output_dim=self.output_dim,
         ).to(device)
 

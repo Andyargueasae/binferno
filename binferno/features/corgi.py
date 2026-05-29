@@ -76,7 +76,7 @@ class CorgiFeatureBuilder(BaseFeatureBuilder):
         description="Path to the pretrained Corgi model checkpoint. If None, will use the default pretrained model.",
     )
     corgi_normalize: bool = Field(
-        default=True,
+        default=False,
         description="Whether to normalize the Corgi embeddings. If True, the embeddings will be L2 normalized. If False, the raw embeddings will be returned.",
     )
 
@@ -84,7 +84,7 @@ class CorgiFeatureBuilder(BaseFeatureBuilder):
         self,
         seq_dir: str,
         contigs: str,
-        min_length: int = 0,
+        min_length: int = 1000,
     ) -> pd.DataFrame:
         """
         Run corgi on the input fasta file, and return a pandas dataframe with the following columns:
@@ -109,14 +109,15 @@ class CorgiFeatureBuilder(BaseFeatureBuilder):
         # replace method-guided determination by checking: if aug0 isn't same raw contigs, then it is barlow_twins.
         aug_zero_fasta = os.path.join(seq_dir, f"augmented_fragments_view0.fasta")
         # check if aug_zero_fasta is the direct copy of raw contigs: n_sequences and N50 should be the same.
-        N50_aug_zero = calc_n50(aug_zero_fasta)
-        N50_raw = calc_n50(contigs)
+        N50_aug_zero = calc_n50(aug_zero_fasta, min_length=min_length)
+        N50_raw = calc_n50(contigs, min_length=min_length)
 
+        contig_basename = os.path.basename(contigs)
         if (
             N50_aug_zero != N50_raw
         ):  # view 0 isn't direct copy of raw contigs, run corgi on raw contigs first and add to the corgi_df.
-            raw_emb = Path(f"{contigs.replace('.fasta', '')}_embeddings.npy")
-            raw_index = Path(f"{contigs.replace('.fasta', '')}_embeddings.index")
+            raw_emb = Path(f"{seq_dir}/{contig_basename.split('.')[0]}_embeddings.npy")
+            raw_index = Path(f"{seq_dir}/{contig_basename.split('.')[0]}_embeddings.index")
             if not os.path.exists(raw_emb) or not os.path.exists(raw_index):
                 run_corgi(
                     input_fasta=contigs,
@@ -151,7 +152,7 @@ class CorgiFeatureBuilder(BaseFeatureBuilder):
             ):
                 run_corgi(
                     input_fasta=fasta,
-                    min_length=min_length,
+                    min_length=0, # here, min length must be 0, as views are all required.
                     model_path=self.model_path,
                     embedding=embedding_path,
                 )
@@ -164,9 +165,4 @@ class CorgiFeatureBuilder(BaseFeatureBuilder):
 
             del view_df, view_emb, view_index
 
-        # sort the index of corgi_df
-        if self.corgi_normalize:
-            corgi_df = corgi_df.div(
-                np.linalg.norm(corgi_df.values, axis=1, keepdims=True) + 1e-9
-            )
         return corgi_df

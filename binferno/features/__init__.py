@@ -36,13 +36,20 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
         threads=4,
         logger=None,
         output_dir=None,
+        contig_length=1000, # used to calibrate corgi when run raw data.
     ) -> pd.DataFrame:
 
         if not self.use_kmer and not self.use_corgi and not self.use_coverage:
             raise ValueError(
                 "At least one feature type must be selected for training. Please set at least one of use_kmer, use_corgi or use_coverage to True."
             )
-
+        feature_path = output_dir / "features.tsv"
+        
+        if feature_path.exists():
+            logger.info("Loading existing features...")
+            resulting_features = pd.read_csv(feature_path, sep="\t", index_col=0, header=0)
+            return resulting_features
+        
         resulting_features = pd.DataFrame()
         if self.use_kmer:
             kmer_data = output_dir / "kmer_features.tsv"
@@ -52,9 +59,9 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
             else:
                 logger.info("Generating k-mer features...")
                 kmer_df = self.kmer(All_Fragments)
-                kmer_df.to_csv(
-                    kmer_data, index=True, header=True, sep="\t"
-                )
+                # kmer_df.to_csv(
+                #     kmer_data, index=True, header=True, sep="\t"
+                # )
             resulting_features = pd.concat(
                     [resulting_features, kmer_df], axis=1
                 )  # the first to add is k-mer features.
@@ -65,10 +72,10 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
                 logger.info("Loading existing Corgi features...")
                 corgi_df = pd.read_csv(corgi_data, sep="\t", index_col=0, header=0)
             else:
-                corgi_df = self.corgi(output_dir, contigs=contigs)
-                corgi_df.to_csv(
-                    corgi_data, index=True, header=True, sep="\t"
-                )
+                corgi_df = self.corgi(output_dir, contigs=contigs, min_length=contig_length)
+                # corgi_df.to_csv(
+                #     corgi_data, index=True, header=True, sep="\t"
+                # )
             resulting_features = pd.concat(
                 [resulting_features, corgi_df], axis=1
             )  # if applicable, the second is corgi features.
@@ -84,9 +91,9 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
                     raise ValueError(
                         f"Coverage features have different number of rows ({coverage_df.shape[0]}) compared to other features ({resulting_features.shape[0]}). Please check the coverage feature generation."
                     )
-                coverage_df.to_csv(
-                    coverage_data, index=True, header=True, sep="\t"
-                )  # if applicable, the last is coverage features.
+                # coverage_df.to_csv(
+                #     coverage_data, index=True, header=True, sep="\t"
+                # )  # if applicable, the last is coverage features.
             resulting_features = pd.concat([resulting_features, coverage_df], axis=1)      
 
         del (

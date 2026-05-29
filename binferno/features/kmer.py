@@ -166,6 +166,7 @@ class KmerFeatureBuilder(BaseFeatureBuilder):
         kmer_df = _calculate_kmer_composition(
             fragments, kmer_len=KMER_LEN, pseudocount=self.pseudocount
         )
+        namelist = kmer_df.index.tolist()
         return kmer_df
 
 

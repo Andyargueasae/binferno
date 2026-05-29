@@ -128,6 +128,7 @@ class SimCLRTrainer(BaseTrainer):
 
         composition_dim = feature_df.shape[1] - cov_dim
         kmer_dim = KMER_DIM
+        corgi_dim = composition_dim - kmer_dim
         proj_head_dim = 128
 
         # prepare model.
@@ -157,6 +158,7 @@ class SimCLRTrainer(BaseTrainer):
                 kmer_dim=kmer_dim,
                 n_layers=self.n_layers,
                 gated=self.gated,
+                corgi_dim=corgi_dim,
                 proj_head_dim=proj_head_dim,
                 proj=self.proj,
             ).to(device)
