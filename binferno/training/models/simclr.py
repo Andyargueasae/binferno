@@ -27,9 +27,11 @@ class NeuralNetwork(nn.Module):
         self.tnf_dim = tnf_dim
         self.tnf_enc_dim = kmer_dim
         self.corgi_dim = corgi_dim
-        
+
         if corgi_dim > 0:
-            self.tnf_enc_dim += corgi_dim  # update tnf_enc_dim to include corgi features.
+            self.tnf_enc_dim += (
+                corgi_dim  # update tnf_enc_dim to include corgi features.
+            )
             # tnf_encoder can then take concatenated tnf features and corgi features.
             self.tnf_encoder = nn.Sequential(
                 nn.Linear(self.tnf_enc_dim, 512),
@@ -99,7 +101,9 @@ class NeuralNetwork(nn.Module):
         tnf_encode = F.normalize(self.tnf_encoder(tnf_features), dim=-1)
         cov_features = x[:, self.tnf_enc_dim :]
         cov_encode = F.normalize(self.coverage_encoder(cov_features), dim=-1)
-        fused_encode = self.fusion_network(tnf_encode, cov_encode)  # 128-dim fused representation.
+        fused_encode = self.fusion_network(
+            tnf_encode, cov_encode
+        )  # 128-dim fused representation.
         return fused_encode
 
     def get_embedding(self, x):
@@ -144,7 +148,6 @@ class AttentionFusion(nn.Module):
             nn.BatchNorm1d(emb_dim * 2),
             nn.LeakyReLU(),
             nn.Dropout(dropout),
-
             nn.Linear(emb_dim * 2, emb_dim),
             nn.BatchNorm1d(emb_dim),
             nn.LeakyReLU(),
@@ -161,6 +164,7 @@ class AttentionFusion(nn.Module):
         fused = self.fused_proj(fused)
 
         return fused
+
 
 def fusion_network(
     emb_dim=128,
@@ -179,26 +183,25 @@ class gated_fusion(nn.Module):
     def __init__(self, emb_dim):
         super(gated_fusion, self).__init__()
         self.emb_dim = emb_dim
+        
         self.gate = nn.Sequential(
             nn.LayerNorm(self.emb_dim * 2),
-            # LayerNorm can help stabilize the training of the gating mechanism,
-            # especially when the input features have different distributions.
-            # It can also help mitigate the issue of one modality dominating the
-            # other by normalizing the concatenated features before applying the
-            # linear transformation and sigmoid activation.
             nn.Linear(self.emb_dim * 2, self.emb_dim),
             nn.Sigmoid(),
         )
-        # symmetric gating for both modalities, can be easily extended to
-        # asymmetric gating if needed. The gate will learn to weigh the
-        # importance of each modality for the final fused representation,
-        # allowing the model to adaptively focus on the more informative
-        # modality for each sample.
+        self.kmer_gate = nn.Sequential(
+            nn.LayerNorm(emb_dim * 2), nn.Linear(emb_dim * 2, emb_dim), nn.Sigmoid()
+        )
+        self.coverage_gate = nn.Sequential(
+            nn.LayerNorm(emb_dim * 2), nn.Linear(emb_dim * 2, emb_dim), nn.Sigmoid()
+        )
         self.out_norm = nn.LayerNorm(self.emb_dim)
 
     def forward(self, kmer_emb, coverage_emb):
-        gate_weight = self.gate(torch.cat([kmer_emb, coverage_emb], dim=1))
-        fused = gate_weight * kmer_emb + (1 - gate_weight) * coverage_emb
+        # gate_weight = self.gate(torch.cat([kmer_emb, coverage_emb], dim=1))
+        kmer_gate = self.kmer_gate(torch.cat([kmer_emb, coverage_emb], dim=1))
+        coverage_gate = self.coverage_gate(torch.cat([kmer_emb, coverage_emb], dim=1))
+        fused = kmer_gate * kmer_emb + coverage_gate * coverage_emb
         return self.out_norm(fused)
 
 
