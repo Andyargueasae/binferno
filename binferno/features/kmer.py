@@ -157,12 +157,11 @@ def generate_kmer_projection(contigs: dict) -> Tuple[np.ndarray, List[str]]:
 class KmerFeatureBuilder(BaseFeatureBuilder):
     pseudocount: int = Field(
         1,
-        description="Pseudocount to add to k-mer counts before normalization. Default is 1, recommended for SimCLR to avoid zero features.",
+        description="Pseudocount to add to k-mer counts before normalization. Default is 1.",
     )
 
     def __call__(self, fragments: list) -> pd.DataFrame:
         # generate hashable 4-mer feature mapping, prepare for counting tnfs.
-        # pseudocount = 1 if method == "SimCLR" else 1e-5
         kmer_df = _calculate_kmer_composition(
             fragments, kmer_len=KMER_LEN, pseudocount=self.pseudocount
         )

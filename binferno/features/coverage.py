@@ -441,10 +441,10 @@ def _normalise_coverage_dicts(
     coverage_std: dict,
     all_fragment_headers: list,
     total_mapped: int,
-    norm_method: str,
+    rpkm_normalize: bool = True,
+    max_normalize: bool = False,
 ) -> tuple[dict, dict]:
     """
-    Non-SimCLR normalization path.
     Supports:
     - none: raw mean/std
     - rpm/rpkm: divide mean/std by total_mapped / 1e6
@@ -454,10 +454,10 @@ def _normalise_coverage_dicts(
         zero = {fh: 0.0 for fh in all_fragment_headers}
         return zero, zero
 
-    if norm_method in {"none", None}:
+    if not rpkm_normalize and not max_normalize:
         return coverage, coverage_std
 
-    if norm_method in {"rpm", "rpkm"}:
+    if rpkm_normalize:
         factor = total_mapped / 1_000_000
         if factor <= 0:
             zero = {fh: 0.0 for fh in all_fragment_headers}
@@ -468,7 +468,7 @@ def _normalise_coverage_dicts(
             {k: v / factor for k, v in coverage_std.items()},
         )
 
-    if norm_method == "max":
+    if max_normalize:
         pseudocount = 1e-5
 
         cov = {k: v + pseudocount for k, v in coverage.items()}
@@ -487,7 +487,7 @@ def _normalise_coverage_dicts(
             {k: v / std_max for k, v in std.items()},
         )
 
-    raise ValueError(f"Unsupported normalization method: {norm_method}")
+    raise ValueError(f"Unsupported normalization method: rpkm_normalize={rpkm_normalize}, max_normalize={max_normalize}")
 
 
 def calculate_bam_cov(
@@ -495,21 +495,19 @@ def calculate_bam_cov(
     bam_batch: int = 100000,
     fragments_dict: dict = None,
     threads: int = 16,
-    norm_method: str = "rpkm",
-    simclr: bool = False,
-    simclr_raw: bool = False,
+    rpkm_normalize: bool = True,
+    max_normalize: bool = False,
+    std_first: bool = False,
 ) -> pd.DataFrame:
     """
     Calculate coverage mean and std for all BAMs.
 
     For SimCLR:
-        simclr_raw=True
-        simclr=True
         returns raw [all std columns, all mean columns]
         normalization should happen after all views are stacked.
 
     For non-SimCLR:
-        simclr_raw=False
+        std_first=False
         norm_method in {"rpm", "rpkm", "max", "none"}
         returns normalized coverage table immediately.
     """
@@ -565,14 +563,23 @@ def calculate_bam_cov(
             bam_batch,
             disable_progress=disable_inner_progress,
         )
-
-        if not simclr_raw:
+        
+        coverage, coverage_std = _normalise_coverage_dicts(
+            coverage=coverage,
+            coverage_std=coverage_std,
+            all_fragment_headers=all_fragment_headers,
+            total_mapped=total_mapped,
+            rpkm_normalize=rpkm_normalize,
+            max_normalize=max_normalize,
+        )
+        if not std_first:
             coverage, coverage_std = _normalise_coverage_dicts(
                 coverage=coverage,
                 coverage_std=coverage_std,
                 all_fragment_headers=all_fragment_headers,
                 total_mapped=total_mapped,
-                norm_method=norm_method,
+                rpkm_normalize=False,
+                max_normalize=False,
             )
 
         sample_name = sample_names_map[bam_file]
@@ -592,7 +599,7 @@ def calculate_bam_cov(
         mean_series_list.append(mean_series)
         std_series_list.append(std_series)
 
-    if simclr:
+    if std_first:
         all_coverage_series = std_series_list + mean_series_list
     else:
         all_coverage_series = mean_series_list + std_series_list
@@ -609,6 +616,7 @@ def calculate_bam_cov(
     return coverage_features
 
 
+# This function is not used, discuss later with Rob.
 def max_normalize_stacked_coverage(
     stacked_coverage_df: pd.DataFrame,
     pseudocount: float = 1e-5,
@@ -635,18 +643,16 @@ def max_normalize_stacked_coverage(
 
 
 class CoverageFeatureBuilder(BaseFeatureBuilder):
-    normalize_method: str = Field(
-        default="rpkm",
+    rpkm_normalize: bool = Field(
+        default=True,
         description=(
-            "Normalization method for non-SimCLR paths. "
-            "Options: 'rpm', 'rpkm', 'max', or 'none'."
+            "Whether to apply RPKM normalization for non-SimCLR paths."
         ),
     )
-    simclr: bool = Field(
+    max_normalize: bool = Field(
         default=False,
         description=(
-            "Whether to generate coverage features in SimCLR mode. "
-            "If True, returns raw coverage features ordered with all std columns first, then all mean columns. Normalization should be done after stacking all views using max_normalize_stacked_coverage."
+            "Whether to apply max normalization."
         ),
     )
 
@@ -656,37 +662,25 @@ class CoverageFeatureBuilder(BaseFeatureBuilder):
         bam_path: str,
         threads: int,
         logger: Any,
+        cov_std_first: bool = False,
     ) -> pd.DataFrame:
         bam_batch = 100_000
 
         logger.info(f"Extracting coverage for single fragment dict.")
-
-        if self.simclr:
-            # COMEBin-like path:
-            # return raw coverage first, ordered [std..., mean...].
-            # normalize later after stacking all views.
-            return calculate_bam_cov(
-                bam_path,
-                bam_batch=bam_batch,
-                fragments_dict=fragment_dict,
-                threads=threads,
-                norm_method="max",
-                simclr=self.simclr,
-                simclr_raw=True,
-            )
-
-        # Non-SimCLR path:
         # retain rpm/rpkm/max/none immediate normalization.
-        return calculate_bam_cov(
+        cov_df = calculate_bam_cov(
             bam_path,
             bam_batch=bam_batch,
             fragments_dict=fragment_dict,
             threads=threads,
-            norm_method=self.normalize_method,
-            simclr=self.simclr,
-            simclr_raw=False,
+            rpkm_normalize=self.rpkm_normalize,
+            max_normalize=self.max_normalize,
+            std_first=cov_std_first,
         )
+        if cov_std_first: # work as a label for simclr. 
+            cov_df = max_normalize_stacked_coverage(cov_df)
 
+        return cov_df
 
 # ======= Multisample coverage features. =======
 # class CoverageMultiFeatureBuilder(CoverageFeatureBuilder):

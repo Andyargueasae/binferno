@@ -79,8 +79,6 @@ class BarlowTwinsTrainer(BaseTrainer):
 
         fragment_dict, all_fragments, namelist = self.gen_views(
             contigs=contigs,
-            simclr=False,
-            barlow_twins=True,
             output_dir=output_aug_dir,
             view_num=self.view_num,
             contig_length=self.contig_length,
@@ -828,8 +826,6 @@ class BarlowTwinsTrainer(BaseTrainer):
     def gen_views(
         self,
         contigs=None,
-        simclr=False,
-        barlow_twins=False,
         output_dir=None,
         view_num=6,
         contig_length=1000,

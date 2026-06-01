@@ -37,6 +37,7 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
         logger=None,
         output_dir=None,
         contig_length=1000, # used to calibrate corgi when run raw data.
+        cov_std_first=False, # whether to normalize the coverage features before feeding into the model. we found that normalizing the coverage features before feeding into the model can lead to better performance, so we set std_first to True for simclr training.
     ) -> pd.DataFrame:
 
         if not self.use_kmer and not self.use_corgi and not self.use_coverage:
@@ -86,7 +87,7 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
                 logger.info("Loading existing coverage features...")
                 coverage_df = pd.read_csv(coverage_data, sep="\t", index_col=0, header=0)
             else:
-                coverage_df = self.coverage(FragMent_Dict, bam_path, threads, logger)
+                coverage_df = self.coverage(FragMent_Dict, bam_path, threads, logger, cov_std_first=cov_std_first)
                 if coverage_df.shape[0] != resulting_features.shape[0]:
                     raise ValueError(
                         f"Coverage features have different number of rows ({coverage_df.shape[0]}) compared to other features ({resulting_features.shape[0]}). Please check the coverage feature generation."

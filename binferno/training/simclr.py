@@ -90,8 +90,6 @@ class SimCLRTrainer(BaseTrainer):
         
         fragment_dict, all_fragments, namelist = self.gen_views(
             contigs=contigs,
-            simclr=True,
-            barlow_twins=False,
             output_dir=output_aug_dir,
             view_num=self.view_num,
             contig_length=self.contig_length,
@@ -106,6 +104,7 @@ class SimCLRTrainer(BaseTrainer):
             threads=threads,
             logger=logger,
             output_dir=output_aug_dir,
+            cov_std_first=True,  # for simclr, we found that normalizing the coverage features before feeding into the model can lead to better performance, so we set std_first to True.
         )
 
         # after getting the features, sort the features by method to ensure integrity before training.
@@ -712,8 +711,6 @@ class SimCLRTrainer(BaseTrainer):
     def gen_views(
         self,
         contigs=None,
-        simclr=False,
-        barlow_twins=False,
         output_dir=None,
         view_num=6,
         contig_length=1000,
