@@ -83,7 +83,7 @@ class CorgiFeatureBuilder(BaseFeatureBuilder):
     def __call__(
         self,
         seq_dir: str,
-        contigs: str,
+        contigs: Path,
         min_length: int = 1000,
     ) -> pd.DataFrame:
         """

@@ -48,8 +48,8 @@ class BarlowTwinsTrainer(BaseTrainer):
 
     def __call__(
         self,
-        contigs: str,
-        bam: str,
+        contigs: Path,
+        bam: Path,
         output_dir: Path,
         logger=None,
         threads: int = 4,

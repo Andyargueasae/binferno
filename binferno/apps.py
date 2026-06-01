@@ -35,7 +35,7 @@ class Binferno(object):
     @app.command()
     def gen_aug(
         output_path: str,
-        contigs: str,
+        contigs: Path,
         bam_dir: str,
         threads: int = 10,
         min_contig_length: int = 1000,

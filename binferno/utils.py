@@ -81,7 +81,7 @@ def save_result(result, filepath, namelist):
     f.close()
 
 
-def calc_n50(contigs: str, min_length: int = 1000) -> int:
+def calc_n50(contigs: Path, min_length: int = 1000) -> int:
     seq_record = pyfastx.Fastx(contigs)
     lengths = sorted([len(record) for _, record in seq_record if len(record) >= min_length], reverse=True)
     # only care about the lengths over 1000bp. 
