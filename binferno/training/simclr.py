@@ -55,6 +55,18 @@ class SimCLRTrainer(BaseTrainer):
         default=False,
         description="Whether to use gated fusion in the Fusion module instead of attention fusion.",
     )
+    temperature: float|None = Field(
+        default=None, 
+        description=
+            "Temperature parameter for the InfoNCE loss. "
+            "By default, it is set based on the N50 of the input contigs. "
+            "If the N50 is greater than 10,000, the temperature is set to 0.07; otherwise, it is set to 0.15."
+    )
+    multisample: bool = Field(
+        default=False,
+        description="Whether to use multisample augmentation. Currently not implemented.",
+    )
+
 
     def __call__(
         self,
@@ -63,16 +75,23 @@ class SimCLRTrainer(BaseTrainer):
         output_dir: Path,
         logger=None,
         threads: int = 4,
-        temperature: float = 0.15,
-        multisample: bool = False,
         features: BinfernoFeatureBuilder = None,
         **kwargs,
-    ):
+    ) -> pd.DataFrame:
         """
         Args:
          - contigs: path to the contigs fasta file.
          - bam: path to the bam file for coverage information.
         """
+        # Set the temperature based on the N50 of the input contigs if not provided.
+        if self.temperature:
+            temperature = self.temperature
+        else:
+            N_50 = calc_n50(contigs)
+            logger.info(f"N50 of the input contigs: {N_50}")
+            temperature = 0.15
+            if N_50 > 10000:
+                temperature = 0.07
 
         # the first step is to generate the augmented views and then turn views into vectors.
         output_aug_dir = output_dir / "augmentation"

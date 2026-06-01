@@ -20,10 +20,6 @@ class BinfernoTrainer(BaseTrainer):
         default=False,
         description="Whether to use Barlow Twins for training. If False, only SimCLR will be used for training.",
     )
-    multisample: bool = Field(
-        default=False,
-        description="Whether to use multisample augmentation for SimCLR training.",
-    )
     concat: bool = Field(
         default=False,
         description="Whether to concatenate the embeddings from SimCLR and Barlow Twins. If False, the embeddings are added and normalized.",
@@ -31,13 +27,13 @@ class BinfernoTrainer(BaseTrainer):
 
     def __call__(
         self,
-        contigs: Path,
-        bam: Path,
-        output_dir: Path = None,
-        temperature: float = 0.15,
+        contigs: str,
+        bam: str,
+        output_dir: Path,
         logger=None,
         threads: int = 4,
         features: BinfernoFeatureBuilder = None,
+        **kwargs,
     ) -> pd.DataFrame:
         """
         The step incorporates both augmentation-data generation and training.
@@ -45,7 +41,6 @@ class BinfernoTrainer(BaseTrainer):
             contigs: path to the input contigs in fasta format.
             bam: path to the input bam file directory.
             temperature: temperature parameter for contrastive learning.
-            multisample: whether to use multisample augmentation for SimCLR training.
         Returns:
             embeddings: a dataframe containing the embeddings for each contig.
         """
@@ -77,7 +72,6 @@ class BinfernoTrainer(BaseTrainer):
                 bam=bam,
                 output_dir=out_dir,
                 temperature=temperature,
-                multisample=self.multisample,
                 logger=logger,
                 threads=threads,
                 features=features,

@@ -7,10 +7,21 @@ import pandas as pd
 from pathlib import Path
 import torch
 
+from ..features import BinfernoFeatureBuilder
+
 
 class BaseTrainer(BaseModel):
 
-    def __call__(self, contigs: Path, bam: Path, output_dir: Path = None):
+    def __call__(
+        self,
+        contigs: str,
+        bam: str,
+        output_dir: Path,
+        logger=None,
+        threads: int = 4,
+        features: BinfernoFeatureBuilder = None,
+        **kwargs,
+    ) -> pd.DataFrame:
         raise NotImplementedError(
             "The __call__ method must be implemented by the subclass."
         )

@@ -53,10 +53,9 @@ class BarlowTwinsTrainer(BaseTrainer):
         output_dir: Path,
         logger=None,
         threads: int = 4,
-        multisample: bool = False,
         features: BinfernoFeatureBuilder = None,
         **kwargs,
-    ):
+    ) -> pd.DataFrame:
         """
         Args:
          - contigs: path to the contigs fasta file.
