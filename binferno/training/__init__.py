@@ -1,7 +1,7 @@
 import pandas as pd
 from pydantic import Field
 from pathlib import Path
-
+import loguru
 import torch
 from .barlowtwins import BarlowTwinsTrainer
 from .simclr import SimCLRTrainer
@@ -21,7 +21,7 @@ class BinfernoTrainer(BaseTrainer):
         description="Whether to use Barlow Twins for training. If False, only SimCLR will be used for training.",
     )
     concat: bool = Field(
-        default=False,
+        default=True,
         description="Whether to concatenate the embeddings from SimCLR and Barlow Twins. If False, the embeddings are added and normalized.",
     )
 
@@ -30,7 +30,7 @@ class BinfernoTrainer(BaseTrainer):
         contigs: Path,
         bam: Path,
         output_dir: Path,
-        logger=None,
+        logger: loguru.logger = None, # type: ignore
         threads: int = 4,
         features: BinfernoFeatureBuilder = None,
         **kwargs,
@@ -71,7 +71,6 @@ class BinfernoTrainer(BaseTrainer):
                 contigs=contigs,
                 bam=bam,
                 output_dir=out_dir,
-                temperature=temperature,
                 logger=logger,
                 threads=threads,
                 features=features,

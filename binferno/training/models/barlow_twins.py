@@ -25,51 +25,59 @@ class NeuralNetwork(nn.Module):
         self.tnf_enc_dim = kmer_dim
         self.corgi_dim = corgi_dim
 
-        if corgi_dim > 0:
+        if corgi_dim > 0: # concat kmer with corgi and run single encoder. 
             self.tnf_enc_dim += corgi_dim
-            self.tnf_encoder = nn.Sequential(
-                nn.Linear(self.tnf_enc_dim, 512),
-                nn.BatchNorm1d(512),
-                nn.LeakyReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(512, 256),
-                nn.BatchNorm1d(256),
-                nn.LeakyReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(256, output_dim),
-                nn.BatchNorm1d(output_dim),
-                nn.LeakyReLU(),
+        
+        # fix the number of layers to 3.
+        tnf_hidden1 = 512
+        tnf_hidden2 = 256
+        tnf_hidden3 = output_dim
+        self.tnf_encoder = nn.Sequential(
+            nn.Linear(self.tnf_enc_dim, tnf_hidden1),
+            nn.BatchNorm1d(tnf_hidden1),
+            nn.LeakyReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(tnf_hidden1, tnf_hidden2),
+            nn.BatchNorm1d(tnf_hidden2),
+            nn.LeakyReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(tnf_hidden2, tnf_hidden3),
+            nn.BatchNorm1d(tnf_hidden3),
+            nn.LeakyReLU(),
             )
-        else:  # tnf->256->128
-            self.tnf_encoder = nn.Sequential(
-                nn.Linear(self.tnf_enc_dim, 256),
-                nn.BatchNorm1d(256),
-                nn.LeakyReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(256, output_dim),
-                nn.BatchNorm1d(output_dim),
-                nn.LeakyReLU(),  # the forgoten leakyrelu after batchnorm can cause the representation to have a lot of zeros, which can lead to worse performance. Adding it back can improve the performance.
-            )
+        # else:  # tnf->256->128
+        #     self.tnf_encoder = nn.Sequential(
+        #         nn.Linear(self.tnf_enc_dim, 256),
+        #         nn.BatchNorm1d(256),
+        #         nn.LeakyReLU(),
+        #         nn.Dropout(dropout),
+        #         nn.Linear(256, output_dim),
+        #         nn.BatchNorm1d(output_dim),
+        #         nn.LeakyReLU(),  # the forgoten leakyrelu after batchnorm can cause the representation to have a lot of zeros, which can lead to worse performance. Adding it back can improve the performance.
+        #     )
+
+        # corgi treated as an individual modality and encode separately.
 
         # apply adaptive coverage dim choices.
-        n_samples = max(
-            1, coverage_dim // 2
-        )  # one coverage mean and one coverage std, divide by 2.
+        # n_samples = max(
+        #     1, coverage_dim // 2
+        # )  # one coverage mean and one coverage std, divide by 2.
 
-        if n_samples <= 2:
-            cov_hidden1 = 32
-            cov_hidden2 = 16
+        # if n_samples <= 2:
+        #     cov_hidden1 = 32
+        #     cov_hidden2 = 16
 
-        elif n_samples <= 5:
-            cov_hidden1 = 64
-            cov_hidden2 = 32
+        # elif n_samples <= 5:
+        #     cov_hidden1 = 64
+        #     cov_hidden2 = 32
 
-        elif n_samples <= 10:
-            cov_hidden1 = 128
-            cov_hidden2 = 64
-        else:
-            cov_hidden1 = 256
-            cov_hidden2 = 128
+        # elif n_samples <= 10:
+        #     cov_hidden1 = 128
+        #     cov_hidden2 = 64
+        # else:
+        cov_hidden1 = 64
+        cov_hidden2 = 128
+        cov_hidden3 = output_dim
 
         self.coverage_encoder = nn.Sequential(
             nn.Linear(coverage_dim, cov_hidden1),
@@ -79,9 +87,13 @@ class NeuralNetwork(nn.Module):
             nn.Linear(cov_hidden1, cov_hidden2),
             nn.BatchNorm1d(cov_hidden2),
             nn.LeakyReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(cov_hidden2, cov_hidden3),
+            nn.BatchNorm1d(cov_hidden3),
+            nn.LeakyReLU(),
         )
 
-        self.final_cov_dim = cov_hidden2
+        self.final_cov_dim = cov_hidden3
 
         self.fusion_network = fusion_network(
             emb_dim=output_dim,
@@ -102,9 +114,9 @@ class NeuralNetwork(nn.Module):
     def _encode(self, x):
         # encode tnf and coverage features separately, then fuse them together.
         tnf_features = x[:, : self.tnf_enc_dim]
-        tnf_encode = self.tnf_encoder(tnf_features)  # 128
+        tnf_encode = F.normalize(self.tnf_encoder(tnf_features), dim=-1)  # 128, not normalized.
         cov_features = x[:, self.tnf_enc_dim :]
-        cov_encode = self.coverage_encoder(cov_features)  # 128, not normalized.
+        cov_encode = F.normalize(self.coverage_encoder(cov_features), dim=-1)  # 128, not normalized.
         fused_encode = self.fusion_network(tnf_encode, cov_encode)  # 128
         return fused_encode
 
@@ -174,19 +186,13 @@ class attentionFusion(nn.Module):
 
         self.residual_weight = nn.Parameter(torch.tensor(self.RESIDUAL_WEIGHT_INIT))
 
-        # implement attention-based fusion
-        self.MHA_kmer2cov = nn.MultiheadAttention(
-            embed_dim=self.emb_dim,
-            num_heads=self.NUM_HEADS,
-            dropout=self.DROPOUT,
-            batch_first=True,  # always keep an eye on batch_first: as dimensions matters.
-        )
-        self.MHA_cov2kmer = nn.MultiheadAttention(
+        self.self_attn = nn.MultiheadAttention(
             embed_dim=self.emb_dim,
             num_heads=self.NUM_HEADS,
             dropout=self.DROPOUT,
             batch_first=True,
         )
+        # corgi was once treated as a separate modality and entered attention, but gave poor results. 
 
         self.kmer_gate = nn.Sequential(
             nn.Linear(self.emb_dim * self.GATE_INPUT_MULTIPLIER, self.emb_dim),
@@ -254,6 +260,7 @@ class attentionFusion(nn.Module):
             nn.ReLU(),
             nn.Linear(emb_dim * self.INTERACTION_INTERMEDIATE_MULTIPLIER, emb_dim),
         )
+        self.token_type_emb = nn.Embedding(2, emb_dim)  # 0=kmer, 1=coverage
 
     def forward(self, tnf_feature, coverage_feature):
         kmer_emb = self.kmer_proj(tnf_feature).unsqueeze(1)  # ( batch_size, 1, emb_dim)
@@ -261,16 +268,15 @@ class attentionFusion(nn.Module):
             1
         )  # ( batch_size, 1, emb_dim)
 
-        kmer_attended, _ = self.MHA_kmer2cov(
-            kmer_emb, cov_emb, cov_emb
-        )  # ( batch_size, 1, emb_dim)
-        cov_attended, _ = self.MHA_cov2kmer(
-            cov_emb, kmer_emb, kmer_emb
-        )  # ( batch_size, 1, emb_dim)
+        type_ids = torch.tensor([0, 1], device=kmer_emb.device)
+        token_type = self.token_type_emb(type_ids).unsqueeze(0)  # (1, 2, emb_dim)
+        tokens = torch.cat([kmer_emb, cov_emb], dim=1) + token_type
+        attended, _ = self.self_attn(tokens, tokens, tokens)
 
-        attended_feature = kmer_attended.squeeze(1) + cov_attended.squeeze(
-            1
-        )  # ( batch_size, emb_dim)
+        kmer_attended = attended[:, 0, :]  # ( batch_size, emb_dim)
+        cov_attended = attended[:, 1, :]  # ( batch_size, emb_dim)
+
+        attended_feature = kmer_attended + cov_attended  # ( batch_size, emb_dim)
 
         kmer_emb = kmer_emb.squeeze(1)
         cov_emb = cov_emb.squeeze(1)
@@ -286,7 +292,7 @@ class attentionFusion(nn.Module):
             coverage_gate_weight * cov_emb + (1 - coverage_gate_weight) * cov_attended
         )
 
-        residual_weight_clamped = torch.clamp(self.residual_weight, min=0.3, max=0.7)
+        residual_weight_clamped = torch.clamp(self.residual_weight, min=0.1, max=0.9)
 
         gated_kmer = self.fusion_dropout(self.batch_norm1(
             (1 - residual_weight_clamped) * gated_kmer
@@ -296,8 +302,6 @@ class attentionFusion(nn.Module):
             (1 - residual_weight_clamped) * gated_coverage
             + residual_weight_clamped * cov_emb
         ))
-
-        # apply when corgi dim is determined.
 
         scale_features = []
         for scale_layer in self.multiscale_fusion:
@@ -321,8 +325,6 @@ class attentionFusion(nn.Module):
         output = self.fused_proj(final_fused_features)
         return output
 
-
-
 def fusion_network(
     emb_dim=128,
     kmer_enc_dim=128,
@@ -333,29 +335,3 @@ def fusion_network(
         emb_dim=emb_dim,
         coverage_dim=coverage_dim,
     )
-
-
-class AdaptiveDropout(nn.Module):
-    def __init__(self, base_rate=0.1, max_rate=0.3, adaptation_factor=0.1):
-        super().__init__()
-
-        self.base_rate = base_rate
-        self.max_rate = max_rate
-        self.adaptation_factor = adaptation_factor
-
-    def forward(self, x):
-        if not self.training:
-            return x
-
-        input_var = torch.var(x, dim=-1, keepdim=True)
-
-        normalized_var = torch.sigmoid(input_var * self.adaptation_factor)
-
-        adaptive_rate = (
-            self.base_rate + (self.max_rate - self.base_rate) * normalized_var
-        )
-
-        # change to rand_like.
-        mask = torch.rand_like(x) > adaptive_rate
-
-        return x * mask.float() / (1 - adaptive_rate + 1e-8)

@@ -6,7 +6,7 @@ import torch.nn.functional as F
 import numpy as np
 from tqdm import tqdm
 from torch.backends import cudnn
-from .models.simclr import SimCLRNet, EmbeddingNet, NeuralNetwork
+from .models.simclr import SimCLRNet, EmbeddingNet, NeuralNetwork, EmbNet2
 from .base import BaseTrainer
 from ..features import BinfernoFeatureBuilder
 from pydantic import Field
@@ -16,6 +16,7 @@ import os
 import pandas as pd
 from typing import Dict, List
 from collections import OrderedDict
+from ..utils import calc_n50
 
 KMER_DIM = 136
 
@@ -55,6 +56,10 @@ class SimCLRTrainer(BaseTrainer):
         default=False,
         description="Whether to use gated fusion in the Fusion module instead of attention fusion.",
     )
+    attention: bool = Field(
+        default=False,
+        description="Whether to use attention fusion in the Fusion module instead of gated fusion.",
+    )
     temperature: float|None = Field(
         default=None, 
         description=
@@ -65,6 +70,10 @@ class SimCLRTrainer(BaseTrainer):
     multisample: bool = Field(
         default=False,
         description="Whether to use multisample augmentation. Currently not implemented.",
+    )
+    embnet: bool = Field(
+        default=False,
+        description="Whether to use the EmbNet2 architecture for training instead of SimCLRNet or NeuralNetwork.",
     )
 
 
@@ -115,7 +124,7 @@ class SimCLRTrainer(BaseTrainer):
         )
 
         # after getting the augmented views, pass to binfernofeatures to get the features pooled.
-        feature_df = features(
+        feature_result = features(
             FragMent_Dict=fragment_dict,
             All_Fragments=all_fragments,
             contigs=contigs,
@@ -123,9 +132,18 @@ class SimCLRTrainer(BaseTrainer):
             threads=threads,
             logger=logger,
             output_dir=output_aug_dir,
-            cov_std_first=True,  # for simclr, we found that normalizing the coverage features before feeding into the model can lead to better performance, so we set std_first to True.
+            max_norm_stacked=True,  # for simclr, we found that normalizing the coverage features before feeding into the model can lead to better performance, so we set std_first to True.
         )
 
+        if isinstance(feature_result, tuple):
+            feature_df, kmer_dim = feature_result
+        else:
+            feature_df = feature_result
+            if hasattr(features, "_get_kmer_dim"):
+                kmer_dim = features._get_kmer_dim()
+            else:
+                kmer_dim = 0
+                
         # after getting the features, sort the features by method to ensure integrity before training.
         feature_df = self.sort_features_by_method(
             feature_df,
@@ -145,7 +163,7 @@ class SimCLRTrainer(BaseTrainer):
         cov_dim = sum([1 for col in feature_df.columns if "cov" in col])
 
         composition_dim = feature_df.shape[1] - cov_dim
-        kmer_dim = KMER_DIM
+        kmer_dim = kmer_dim if kmer_dim != KMER_DIM else KMER_DIM
         corgi_dim = composition_dim - kmer_dim
         proj_head_dim = 128
 
@@ -168,6 +186,13 @@ class SimCLRTrainer(BaseTrainer):
                 actn=nn.LeakyReLU(),
                 cov_model=cov_model,
             ).to(device)
+        elif self.embnet:
+            model = EmbNet2(
+                tnf_dim=composition_dim,
+                coverage_dim=cov_dim,
+                output_dim=self.output_dim,
+                kmer_dim=kmer_dim,
+            ).to(device)
         else:
             model = NeuralNetwork(
                 tnf_dim=composition_dim,
@@ -176,11 +201,12 @@ class SimCLRTrainer(BaseTrainer):
                 kmer_dim=kmer_dim,
                 n_layers=self.n_layers,
                 gated=self.gated,
+                attention=self.attention,
                 corgi_dim=corgi_dim,
-                proj_head_dim=proj_head_dim,
                 proj=self.proj,
             ).to(device)
 
+        logger.info(f"Model architecture:\n{model}")
         # prepare training.
         train_loader, optimizer, scheduler, dataset = self.prepare_trainer(
             data_df=feature_df,
@@ -204,6 +230,20 @@ class SimCLRTrainer(BaseTrainer):
             model.load_state_dict(torch.load(model_path))
         elif self.simclrnet:
             model = self.simclrnet_train(
+                dataloader=train_loader,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                device=device,
+                epochs=self.epochs,
+                model=model,
+                n_cov=cov_dim,
+                n_views=self.view_num,
+                temperature=temperature,
+                output_dir=output_train_dir,
+                logger=logger,
+            )
+        elif self.embnet:
+            model = self.train(
                 dataloader=train_loader,
                 optimizer=optimizer,
                 scheduler=scheduler,
@@ -517,7 +557,7 @@ class SimCLRTrainer(BaseTrainer):
         info_nceloss_fn = self.info_nce_loss(temperature=temperature).to(device)
 
         epoch_iter = tqdm(range(epochs), desc="Training Epochs")
-        early_stopping = EarlyStoppingManagerSimCLR(patience=10)
+        early_stopping = EarlyStoppingManagerSimCLR(patience=15)
         for epoch in epoch_iter:
             avg_loss, stats = self.train_an_epoch(
                 model=model,
@@ -686,6 +726,29 @@ class SimCLRTrainer(BaseTrainer):
         # save model.
         torch.save(model.state_dict(), os.path.join(output_dir, "simclr_model.pt"))
         return
+
+    def embnet_get_embs(self, model, data, namelist, output_path, device):
+        with torch.no_grad():
+            model.eval()
+            bs_ = 1024
+
+            print(len(data))
+
+            out = np.concatenate(
+                [
+                    model(
+                        data[0][i : i + bs_,:].to(device),
+                    )[0]
+                    .to("cpu")
+                    .numpy()
+                    for i in range(0, len(data[0]), bs_)
+                ],
+                axis=0,
+            )
+            embeddings_df = pd.DataFrame(out, index=namelist)
+
+            embeddings_df.to_csv(str(output_path), sep="\t", header=True, index=True)
+        return embeddings_df
 
     def simclr_get_embs(self, model, data, namelist, output_path, device, kmer_len):
         with torch.no_grad():
@@ -879,7 +942,10 @@ class EarlyStoppingManagerSimCLR:
             self._stagnant_epochs = 0
 
     def check_improvement(self, loss, top_acc, model_state):
-            improved = loss < self._lowest_loss or top_acc > self._top_acc
+            loss_improved = loss < self._lowest_loss - 1e-4
+            acc_improved = top_acc > self._top_acc + 0.05  # at least 0.05% gain
+            improved = loss_improved or acc_improved
+            # improved = loss < self._lowest_loss or top_acc > self._top_acc
 
             if improved:
                 if loss < self._lowest_loss:

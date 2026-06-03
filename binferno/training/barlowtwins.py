@@ -45,6 +45,7 @@ class BarlowTwinsTrainer(BaseTrainer):
     seed: int = Field(
         default=42, description="Random seed for training and augmentation."
     )
+    multisample: bool = Field(default=False, description="Whether to use multisample training.")
 
     def __call__(
         self,
@@ -83,7 +84,7 @@ class BarlowTwinsTrainer(BaseTrainer):
             contig_length=self.contig_length,
         )
 
-        feature_df = features(
+        feature_result = features(
             FragMent_Dict=fragment_dict,
             All_Fragments=all_fragments,
             contigs=contigs,
@@ -91,7 +92,17 @@ class BarlowTwinsTrainer(BaseTrainer):
             threads=threads,
             logger=logger,
             output_dir=output_aug_dir,
+            # multisample=multisample
         )
+
+        if isinstance(feature_result, tuple):
+            feature_df, kmer_dim = feature_result
+        else:
+            feature_df = feature_result
+            if hasattr(features, "_get_kmer_dim"):
+                kmer_dim = features._get_kmer_dim()
+            else:
+                kmer_dim = 0
 
         feature_df = self.sort_features_by_method(
             feature_df,
@@ -110,7 +121,7 @@ class BarlowTwinsTrainer(BaseTrainer):
 
         cov_dim = sum([1 for col in feature_df.columns if "cov" in col])
         composition_dim = feature_df.shape[1] - cov_dim
-        kmer_dim = 136
+
         corgi_dim = composition_dim - kmer_dim
         proj_head_dim = 512
         model = NeuralNetwork(
@@ -122,6 +133,8 @@ class BarlowTwinsTrainer(BaseTrainer):
             corgi_dim=corgi_dim,
             output_dim=self.output_dim,
         ).to(device)
+
+        logger.info(f"Model architecture:\n{model}")
 
         dataloader, optimizer, scheduler = self.prepare_trainer(
             model=model,

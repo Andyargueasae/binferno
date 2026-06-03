@@ -497,7 +497,7 @@ def calculate_bam_cov(
     threads: int = 16,
     rpkm_normalize: bool = True,
     max_normalize: bool = False,
-    std_first: bool = False,
+    max_norm_stacked: bool = False,
 ) -> pd.DataFrame:
     """
     Calculate coverage mean and std for all BAMs.
@@ -564,15 +564,7 @@ def calculate_bam_cov(
             disable_progress=disable_inner_progress,
         )
         
-        coverage, coverage_std = _normalise_coverage_dicts(
-            coverage=coverage,
-            coverage_std=coverage_std,
-            all_fragment_headers=all_fragment_headers,
-            total_mapped=total_mapped,
-            rpkm_normalize=rpkm_normalize,
-            max_normalize=max_normalize,
-        )
-        if not std_first:
+        if max_norm_stacked:
             coverage, coverage_std = _normalise_coverage_dicts(
                 coverage=coverage,
                 coverage_std=coverage_std,
@@ -580,6 +572,15 @@ def calculate_bam_cov(
                 total_mapped=total_mapped,
                 rpkm_normalize=False,
                 max_normalize=False,
+            )
+        else:
+            coverage, coverage_std = _normalise_coverage_dicts(
+                coverage=coverage,
+                coverage_std=coverage_std,
+                all_fragment_headers=all_fragment_headers,
+                total_mapped=total_mapped,
+                rpkm_normalize=rpkm_normalize,
+                max_normalize=max_normalize,
             )
 
         sample_name = sample_names_map[bam_file]
@@ -599,10 +600,7 @@ def calculate_bam_cov(
         mean_series_list.append(mean_series)
         std_series_list.append(std_series)
 
-    if std_first:
-        all_coverage_series = std_series_list + mean_series_list
-    else:
-        all_coverage_series = mean_series_list + std_series_list
+    all_coverage_series = mean_series_list + std_series_list
 
     coverage_features = pd.concat(all_coverage_series, axis=1)
     coverage_features = coverage_features.reindex(all_fragment_headers).fillna(0.0)
@@ -662,7 +660,7 @@ class CoverageFeatureBuilder(BaseFeatureBuilder):
         bam_path: str,
         threads: int,
         logger: Any,
-        cov_std_first: bool = False,
+        max_norm_stacked: bool = False,
     ) -> pd.DataFrame:
         bam_batch = 100_000
 
@@ -675,9 +673,9 @@ class CoverageFeatureBuilder(BaseFeatureBuilder):
             threads=threads,
             rpkm_normalize=self.rpkm_normalize,
             max_normalize=self.max_normalize,
-            std_first=cov_std_first,
+            max_norm_stacked=max_norm_stacked,
         )
-        if cov_std_first: # work as a label for simclr. 
+        if max_norm_stacked:
             cov_df = max_normalize_stacked_coverage(cov_df)
 
         return cov_df

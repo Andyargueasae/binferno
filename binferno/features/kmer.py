@@ -159,13 +159,16 @@ class KmerFeatureBuilder(BaseFeatureBuilder):
         1,
         description="Pseudocount to add to k-mer counts before normalization. Default is 1.",
     )
+    kmer_len: int = Field(
+        KMER_LEN,
+        description=f"Length of k-mers to compute. Default is {KMER_LEN}.",
+    )
 
     def __call__(self, fragments: list) -> pd.DataFrame:
         # generate hashable 4-mer feature mapping, prepare for counting tnfs.
         kmer_df = _calculate_kmer_composition(
-            fragments, kmer_len=KMER_LEN, pseudocount=self.pseudocount
+            fragments, kmer_len=self.kmer_len, pseudocount=self.pseudocount
         )
-        namelist = kmer_df.index.tolist()
         return kmer_df
 
 
