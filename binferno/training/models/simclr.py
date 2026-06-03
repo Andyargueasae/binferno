@@ -511,3 +511,6 @@ class EmbNet2(nn.Module):
         fused_input = torch.cat([tnf_features, cov_encode], dim=-1)
         fused_encode = self.fuse_encoder(fused_input)
         return fused_encode
+
+    def get_embedding(self, x):
+        return self.forward_one(x)
