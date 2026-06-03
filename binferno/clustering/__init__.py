@@ -9,39 +9,68 @@ import pandas as pd
 from .base import BaseClustering
 from .leiden import LeidenClustering
 import multiprocessing as mp
+from ..utils import gen_seed, calc_n50
+import loguru
 
 
 class BinfernoClustering(BaseClustering):
 
-    leiden: LeidenClustering = Field(
-        default_factory=LeidenClustering,
-        description="Leiden clustering module. Only used if use_leiden is True.",
-    )
+    leiden: LeidenClustering
     dimension_reduction: bool = Field(
         default=False,
-        description="Whether to perform dimension reduction before clustering.",
+        description=
+        "Whether to perform dimension reduction before clustering."
+        "Used only if training.concat is set to True and the dimension of embeddings > 128.",
+
+    )
+    plastid: bool = Field(
+        default=False,
+        description="Whether to use plastid-specific seed generation and minimum bin size.",
     )
 
     class Config:
         arbitrary_types_allowed = True
 
+
     def __call__(
         self,
         embeddings: pd.DataFrame,
         seed_file: str = "",
-        contig_file: str = "",
+        contigs: str = "",
         output_path: Path = None,
         contig_len: int = 1000,
         cluster_num: int = None,
         threads: int = 1,
+        logger: loguru.logger = None, # type: ignore
         **kwargs,
     ) -> None:
         np.random.seed(42)
-        logger = kwargs.get("logger", None)
+        if self.plastid:
+            n_genome = gen_seed(
+                logger,
+                contig_file=str(contigs),
+                output_dir=str(output_path),
+                threads=threads,
+                contig_length_threshold=1001,
+                marker_name="pltd_marker",
+                quarter="2quarter",
+            )
+            seed_file = os.path.join(output_path, f"{os.path.basename(str(contigs))}.pltd_marker.2quarter_lencutoff_1001.seed")
+        else:
+            n_genome = gen_seed(
+                logger,
+                contig_file=str(contigs),
+                output_dir=str(output_path),
+                threads=threads,
+                contig_length_threshold=1001,
+                marker_name="bacar_marker",
+                quarter="2quarter",
+            )
+            seed_file = os.path.join(output_path, f"{os.path.basename(str(contigs))}.bacar_marker.2quarter_lencutoff_1001.seed")
         if embeddings is None or embeddings.empty:
             raise ValueError("embeddings must be a non-empty DataFrame")
-        if seed_file is None or contig_file is None or output_path is None:
-            raise ValueError("seed_file, contig_file, and output_path are required")
+        if seed_file is None or contigs is None or output_path is None:
+            raise ValueError("seed_file, contigs, and output_path are required")
 
         logger.info("Start clustering.")
 
@@ -49,14 +78,14 @@ class BinfernoClustering(BaseClustering):
 
         emb_mat, namelist, length_weight = self._filter_embeddings_by_length(
             emb_df=embeddings,
-            contig_file=contig_file,
+            contig_file=contigs,
             contig_len=contig_len,
         )
 
         if len(namelist) == 0:
             raise ValueError("No contigs remain after length filtering")
 
-        logger.info(f"N50:\t{self.calculate_n50(length_weight.tolist())}")
+        logger.info(f"N50:\t{calc_n50(contigs)}")
         logger.info(f"Contigs retained after length filter: {len(namelist)}")
 
         norm_embeddings = normalize(emb_mat).astype(np.float32, copy=False)
@@ -79,7 +108,7 @@ class BinfernoClustering(BaseClustering):
         for k in bin_nums:
             self.seed_kmeans_full(
                 logger=logger,
-                contig_file=contig_file,
+                contig_file=contigs,
                 namelist=namelist,
                 out_path=str(output_path) + os.sep,
                 X_mat=norm_embeddings,
@@ -174,7 +203,7 @@ class BinfernoClustering(BaseClustering):
 
             for job in jobs:
                 job.get()
-        return
+        return n_genome
 
     def run_leiden_memmap(
         self,

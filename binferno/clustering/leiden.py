@@ -1,7 +1,7 @@
 import numpy as np
-from .base import BaseClustering
 from typing import Sequence, Optional, List, Union, Any
 from igraph import Graph
+from .base import BaseClustering
 import leidenalg
 import time
 import hnswlib

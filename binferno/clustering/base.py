@@ -2,6 +2,7 @@ from __future__ import annotations, print_function
 
 import mimetypes
 import os
+from pathlib import Path
 from time import time
 from pydantic import BaseModel
 import gzip
@@ -22,20 +23,18 @@ from sklearn.cluster._kmeans import (
 
 
 class BaseClustering(BaseModel):
-
-    def calculate_n50(self, seqLens):
-        thresholdN50 = sum(seqLens) / 2.0
-
-        seqLens.sort(reverse=True)
-
-        testSum = 0
-        N50 = 0
-        for seqLen in seqLens:
-            testSum += seqLen
-            if testSum >= thresholdN50:
-                N50 = seqLen
-                break
-        return N50
+    def __call__(
+        self,
+        embeddings: pd.DataFrame,
+        seed_file: str = "",
+        contigs: str = "",
+        output_path: Path = None,
+        contig_len: int = 1000,
+        cluster_num: int = None,
+        threads: int = 1,
+        **kwargs,
+    ) -> None:
+        raise NotImplementedError("Subclasses must implement __call__ method.")
 
     def get_length(self, fastx_file):
         file_type = mimetypes.guess_type(fastx_file)[1]

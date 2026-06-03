@@ -7,11 +7,21 @@ from collections import defaultdict
 from typing import List, Tuple, Dict, Optional
 import csv
 import logging
-from biolib.common import check_dir_exists, make_sure_path_exists
+from biolib.common import make_sure_path_exists
 from biolib.external.execute import check_on_path
 
 
-class BaseResults(BaseModel):
+class BaseWriter(BaseModel):
+    def __call__(
+        self,
+        contigs: str,
+        cluster_res_dir: str,
+        output_path: str,
+        plastid: bool = False,
+        minbin_size: int = 200000,
+        ) -> None:
+        raise NotImplementedError("BaseWriter is an abstract class. Please implement the __call__ method.")
+    
     class Profile:
         """
         Profile genome bins across binning methods using CheckM.
