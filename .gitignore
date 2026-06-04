@@ -230,3 +230,6 @@ dist
 prodigal_markers
 ./__pycache__/*
 note.txt
+*.sh
+*.yaml
+binferno/cluster_res_only.py
