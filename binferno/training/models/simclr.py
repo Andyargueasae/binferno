@@ -4,6 +4,13 @@ import torch.nn.functional as F
 import numpy as np
 
 
+# engineering ideas: Kmer set to 4 first. (index represent priority)
+#1. auxiliary losses on separate modality encoders.
+#2. residual connection in fusion network after fusion, add the learned to the original tnf features. For sample coverage, if n_sample is small, don't add; 
+#3. new embedding network architecture resembling COMEBin. Please at least have a god damn try!
+#4. weighted gate fusion is a bottleneck and should not be used in long terms. 
+#5. Maybe borrow one Vae from taxvamb/vamb to do a reconstruction here? Maybe not, as tnf is 103-dim in vamb's context. We may could try coverage by vae. 
+
 class NeuralNetwork(nn.Module):
     def __init__(
         self,
@@ -30,46 +37,13 @@ class NeuralNetwork(nn.Module):
         self.corgi_dim = corgi_dim
 
         # this is barlow-twins style.
-        n_samples = max(
-            1, coverage_dim // 2
-        )
-        # apply adaptive coverage dim choices.
-        # n_samples = max(
-        #     1, coverage_dim // 2
-        # )  # one coverage mean and one coverage std, divide by 2.
-
-        # if n_samples <= 2:
-        #     cov_hidden1 = 32
-        #     cov_hidden2 = 16
-
-        # elif n_samples <= 5:
-        #     cov_hidden1 = 64
-        #     cov_hidden2 = 32
-
-        # elif n_samples <= 10:
-        #     cov_hidden1 = 128
-        #     cov_hidden2 = 64
-
-        # cov_hidden1 = 512
-        # cov_hidden2 = 512
-        cov_hidden3 = output_dim
 
         # if n_samples <= 2: # which is the case now.
-        self.coverage_encoder = nn.Sequential(
-            nn.Linear(coverage_dim, 64),      # 2 → 64, not 2 → 512
-            nn.LayerNorm(64),
-            nn.LeakyReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(64, 128),
-            nn.LayerNorm(128),
-            nn.LeakyReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(128, output_dim),
-            nn.LayerNorm(output_dim),
-            nn.LeakyReLU(),
+        self.coverage_encoder = _build_coverage_encoder(
+            coverage_dim=coverage_dim, output_dim=output_dim, dropout=dropout
         )
 
-        self.final_cov_dim = cov_hidden3
+        self.final_cov_dim = output_dim
 
         if corgi_dim > 0:
             self.tnf_enc_dim += (
@@ -96,17 +70,6 @@ class NeuralNetwork(nn.Module):
         )
         # Run A: 4-mer + correct architecture (your previous run, already done — ~71%)
         # Run B: 5-mer + same architecture structure (just change input dim)
-
-        # else:  # tnf->256->128
-        #     self.tnf_encoder = nn.Sequential(
-        #         nn.Linear(self.tnf_enc_dim, 256),
-        #         nn.BatchNorm1d(256),
-        #         nn.LeakyReLU(),
-        #         nn.Dropout(dropout),
-        #         nn.Linear(256, output_dim),
-        #         nn.BatchNorm1d(output_dim),
-        #         nn.LeakyReLU(),  # the forgoten leakyrelu after batchnorm can cause the representation to have a lot of zeros, which can lead to worse performance. Adding it back can improve the performance.
-        #     )
 
         # leave fusion network to be implemented later.
         self.fusion_network = fusion_network(
@@ -171,7 +134,37 @@ def fusion_network(
         )
     return ConcatFusion(emb_dim=emb_dim)
 
-def _build_coverage_encoder(self, coverage_dim: int, output_dim: int, dropout: float):
+class vae_for_coverage(nn.Module): # Look at vamb to borrow some thoughts. 
+    def __init__(self, coverage_dim, output_dim, dropout):
+        super(vae_for_coverage, self).__init__()
+        hidden = 128
+        self.encoder = nn.Sequential(
+            nn.Linear(coverage_dim, hidden),
+            nn.BatchNorm1d(hidden),
+            nn.LeakyReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, hidden),
+            nn.BatchNorm1d(hidden),
+            nn.LeakyReLU(),
+            nn.Dropout(dropout),
+        )
+        self.mu_layer = nn.Linear(hidden, output_dim)
+        self.logvar_layer = nn.Linear(hidden, output_dim)
+
+    def reparameterize(self, mu, logvar):
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+
+    def forward(self, x):
+        h = self.encoder(x)
+        mu = self.mu_layer(h)
+        logvar = self.logvar_layer(h)
+        z = self.reparameterize(mu, logvar)
+        return z, mu, logvar
+
+def _build_coverage_encoder(coverage_dim: int, output_dim: int, dropout: float,
+                            vae_encoder=False):
     """
     Adaptive coverage encoder that scales capacity with input information content.
     
@@ -179,6 +172,9 @@ def _build_coverage_encoder(self, coverage_dim: int, output_dim: int, dropout: f
     n_samples drives capacity, not coverage_dim directly.
     """
     n_samples = max(1, coverage_dim // 2)
+
+    if vae_encoder:
+        return vae_for_coverage(coverage_dim, output_dim, dropout)
 
     if n_samples == 1:
         # Single-sample: 2D input, low complexity.
@@ -477,10 +473,6 @@ class EmbNet2(nn.Module):
         self.dropout = dropout
         self.output_dim = output_dim
         self.kmer_dim = kmer_dim
-
-        n_samples = max(
-            1, coverage_dim // 2
-        )
 
         self.coverage_encoder = _build_coverage_encoder(
             self, coverage_dim=coverage_dim, output_dim=output_dim, dropout=dropout

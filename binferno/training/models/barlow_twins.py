@@ -75,25 +75,11 @@ class NeuralNetwork(nn.Module):
         #     cov_hidden1 = 128
         #     cov_hidden2 = 64
         # else:
-        cov_hidden1 = 64
-        cov_hidden2 = 128
-        cov_hidden3 = output_dim
-
-        self.coverage_encoder = nn.Sequential(
-            nn.Linear(coverage_dim, cov_hidden1),
-            nn.BatchNorm1d(cov_hidden1),
-            nn.LeakyReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(cov_hidden1, cov_hidden2),
-            nn.BatchNorm1d(cov_hidden2),
-            nn.LeakyReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(cov_hidden2, cov_hidden3),
-            nn.BatchNorm1d(cov_hidden3),
-            nn.LeakyReLU(),
+        self.coverage_encoder = _build_coverage_encoder(
+            coverage_dim=coverage_dim, output_dim=output_dim, dropout=dropout
         )
 
-        self.final_cov_dim = cov_hidden3
+        self.final_cov_dim = output_dim
 
         self.fusion_network = fusion_network(
             emb_dim=output_dim,
@@ -335,3 +321,81 @@ def fusion_network(
         emb_dim=emb_dim,
         coverage_dim=coverage_dim,
     )
+
+def _build_coverage_encoder(coverage_dim: int, output_dim: int, dropout: float):
+    """
+    Adaptive coverage encoder that scales capacity with input information content.
+    
+    coverage_dim is always 2 * n_samples (mean + std per sample).
+    n_samples drives capacity, not coverage_dim directly.
+    """
+    n_samples = max(1, coverage_dim // 2)
+
+    if n_samples == 1:
+        # Single-sample: 2D input, low complexity.
+        # Small network with LayerNorm (BatchNorm is unstable for near-2D manifolds).
+        return nn.Sequential(
+            nn.Linear(coverage_dim, 64),
+            nn.LayerNorm(64),
+            nn.LeakyReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(64, 128),
+            nn.LayerNorm(128),
+            nn.LeakyReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(128, output_dim),
+            nn.LayerNorm(output_dim),
+            nn.LeakyReLU(),
+        )
+
+    elif n_samples <= 5:
+        # Few samples: coverage starts carrying differential signal.
+        # Transition to BatchNorm — enough input dimensions to be stable.
+        hidden = 128
+        return nn.Sequential(
+            nn.Linear(coverage_dim, hidden),
+            nn.BatchNorm1d(hidden),
+            nn.LeakyReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, hidden),
+            nn.BatchNorm1d(hidden),
+            nn.LeakyReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, output_dim),
+            nn.BatchNorm1d(output_dim),
+            nn.LeakyReLU(),
+        )
+
+    elif n_samples <= 20:
+        # Medium samples: genuine multi-dimensional coverage signal.
+        hidden = 256
+        return nn.Sequential(
+            nn.Linear(coverage_dim, hidden),
+            nn.BatchNorm1d(hidden),
+            nn.LeakyReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, hidden),
+            nn.BatchNorm1d(hidden),
+            nn.LeakyReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, output_dim),
+            nn.BatchNorm1d(output_dim),
+            nn.LeakyReLU(),
+        )
+
+    else:
+        # Many samples: full COMEBin-style wide encoder justified.
+        hidden = 512
+        return nn.Sequential(
+            nn.Linear(coverage_dim, hidden),
+            nn.BatchNorm1d(hidden),
+            nn.LeakyReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, hidden),
+            nn.BatchNorm1d(hidden),
+            nn.LeakyReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, output_dim),
+            nn.BatchNorm1d(output_dim),
+            nn.LeakyReLU(),
+        )

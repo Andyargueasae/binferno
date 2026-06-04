@@ -24,7 +24,7 @@ from collections import OrderedDict
 class BarlowTwinsTrainer(BaseTrainer):
 
     learning_rate: float = Field(
-        default=2.5e-3, description="Learning rate for training."
+        default=1e-3, description="Learning rate for training."
     )
     batch_size: int = Field(default=1024, description="Batch size for training.")
     epochs: int = Field(default=300, description="Number of epochs for training.")
@@ -45,7 +45,14 @@ class BarlowTwinsTrainer(BaseTrainer):
     seed: int = Field(
         default=42, description="Random seed for training and augmentation."
     )
-    multisample: bool = Field(default=False, description="Whether to use multisample training.")
+    max_lr_epochs: int = Field(
+        default=10,
+        description="Number of epochs to wait before resuming learning rate scheduling after reaching the maximum learning rate.",
+    )
+    get_individual_embs: bool = Field(
+        default=False,
+        description="Whether to save individual embeddings for each view separately. If False, only the final embeddings after fusion are saved.",
+    )
 
     def __call__(
         self,
@@ -172,7 +179,7 @@ class BarlowTwinsTrainer(BaseTrainer):
                 data_df=feature_df,
                 output_path=embedding_path,
                 batch_size=self.batch_size,
-                save_individual_embs=False,
+                save_individual_embs=self.get_individual_embs,
             )
 
         embeddings = pd.DataFrame(
@@ -442,10 +449,10 @@ class BarlowTwinsTrainer(BaseTrainer):
         )
         scheduler = self.warmup_cosine_scheduler(
             optimizer,
-            learning_rate=2.5e-3,
+            learning_rate=self.learning_rate,
             min_learning_rate=1e-4,
             epochs=epochs,
-            batch_size=effective_batch_size,
+            max_lr_hold_epochs=self.max_lr_epochs,
         )
         return dataloader, optimizer, scheduler
 
@@ -478,8 +485,11 @@ class BarlowTwinsTrainer(BaseTrainer):
             avg_loss, stats = self.train_an_epoch(
                 model=model, dataloader=dataloader, optimizer=optimizer, device=device
             )
+
             scheduler.step()
+
             current_lr = optimizer.param_groups[0]["lr"]
+            logger.info("Current learning rate: {:.2e}".format(current_lr))
 
             if (epoch + 1) % 20 == 0 or epoch == epochs - 1:
                 logger.info(
@@ -537,7 +547,7 @@ class BarlowTwinsTrainer(BaseTrainer):
             torch.nn.utils.clip_grad_norm_(
                 model.parameters(), max_norm=1.0
             )  # prevent the exploding gradient.
-            # then, do the optimization.
+            
             optimizer.step()
             total_loss += loss.item()  # sum loss.
 
