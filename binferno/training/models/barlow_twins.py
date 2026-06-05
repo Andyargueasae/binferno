@@ -25,9 +25,9 @@ class NeuralNetwork(nn.Module):
         self.tnf_enc_dim = kmer_dim
         self.corgi_dim = corgi_dim
 
-        if corgi_dim > 0: # concat kmer with corgi and run single encoder. 
+        if corgi_dim > 0:  # concat kmer with corgi and run single encoder.
             self.tnf_enc_dim += corgi_dim
-        
+
         # fix the number of layers to 3.
         tnf_hidden1 = 512
         tnf_hidden2 = 256
@@ -44,7 +44,7 @@ class NeuralNetwork(nn.Module):
             nn.Linear(tnf_hidden2, tnf_hidden3),
             nn.BatchNorm1d(tnf_hidden3),
             nn.LeakyReLU(),
-            )
+        )
         # else:  # tnf->256->128
         #     self.tnf_encoder = nn.Sequential(
         #         nn.Linear(self.tnf_enc_dim, 256),
@@ -100,9 +100,13 @@ class NeuralNetwork(nn.Module):
     def _encode(self, x):
         # encode tnf and coverage features separately, then fuse them together.
         tnf_features = x[:, : self.tnf_enc_dim]
-        tnf_encode = F.normalize(self.tnf_encoder(tnf_features), dim=-1)  # 128, not normalized.
+        tnf_encode = F.normalize(
+            self.tnf_encoder(tnf_features), dim=-1
+        )  # 128, not normalized.
         cov_features = x[:, self.tnf_enc_dim :]
-        cov_encode = F.normalize(self.coverage_encoder(cov_features), dim=-1)  # 128, not normalized.
+        cov_encode = F.normalize(
+            self.coverage_encoder(cov_features), dim=-1
+        )  # 128, not normalized.
         fused_encode = self.fusion_network(tnf_encode, cov_encode)  # 128
         return fused_encode
 
@@ -178,7 +182,7 @@ class attentionFusion(nn.Module):
             dropout=self.DROPOUT,
             batch_first=True,
         )
-        # corgi was once treated as a separate modality and entered attention, but gave poor results. 
+        # corgi was once treated as a separate modality and entered attention, but gave poor results.
 
         self.kmer_gate = nn.Sequential(
             nn.Linear(self.emb_dim * self.GATE_INPUT_MULTIPLIER, self.emb_dim),
@@ -280,14 +284,18 @@ class attentionFusion(nn.Module):
 
         residual_weight_clamped = torch.clamp(self.residual_weight, min=0.1, max=0.9)
 
-        gated_kmer = self.fusion_dropout(self.batch_norm1(
-            (1 - residual_weight_clamped) * gated_kmer
-            + residual_weight_clamped * kmer_emb
-        ))
-        gated_coverage = self.fusion_dropout(self.batch_norm2(
-            (1 - residual_weight_clamped) * gated_coverage
-            + residual_weight_clamped * cov_emb
-        ))
+        gated_kmer = self.fusion_dropout(
+            self.batch_norm1(
+                (1 - residual_weight_clamped) * gated_kmer
+                + residual_weight_clamped * kmer_emb
+            )
+        )
+        gated_coverage = self.fusion_dropout(
+            self.batch_norm2(
+                (1 - residual_weight_clamped) * gated_coverage
+                + residual_weight_clamped * cov_emb
+            )
+        )
 
         scale_features = []
         for scale_layer in self.multiscale_fusion:
@@ -307,25 +315,23 @@ class attentionFusion(nn.Module):
             ],
             dim=1,
         )
-        
+
         output = self.fused_proj(final_fused_features)
         return output
 
-def fusion_network(
-    emb_dim=128,
-    kmer_enc_dim=128,
-    coverage_dim=128
-):
+
+def fusion_network(emb_dim=128, kmer_enc_dim=128, coverage_dim=128):
     return attentionFusion(
         kmer_enc_dim=kmer_enc_dim,
         emb_dim=emb_dim,
         coverage_dim=coverage_dim,
     )
 
+
 def _build_coverage_encoder(coverage_dim: int, output_dim: int, dropout: float):
     """
     Adaptive coverage encoder that scales capacity with input information content.
-    
+
     coverage_dim is always 2 * n_samples (mean + std per sample).
     n_samples drives capacity, not coverage_dim directly.
     """

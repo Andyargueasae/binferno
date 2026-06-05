@@ -18,10 +18,8 @@ class BinfernoClustering(BaseClustering):
     leiden: LeidenClustering
     dimension_reduction: bool = Field(
         default=False,
-        description=
-        "Whether to perform dimension reduction before clustering."
+        description="Whether to perform dimension reduction before clustering."
         "Used only if training.concat is set to True and the dimension of embeddings > 128.",
-
     )
     plastid: bool = Field(
         default=False,
@@ -31,17 +29,16 @@ class BinfernoClustering(BaseClustering):
     class Config:
         arbitrary_types_allowed = True
 
-
     def __call__(
         self,
         embeddings: pd.DataFrame,
-        seed_file: str = "",
-        contigs: str = "",
+        seed_file: Path,
+        contigs: Path,
         output_path: Path = None,
         contig_len: int = 1000,
         cluster_num: int = None,
+        logger: loguru.logger = None,  # type: ignore
         threads: int = 1,
-        logger: loguru.logger = None, # type: ignore
         **kwargs,
     ) -> None:
         np.random.seed(42)
@@ -55,7 +52,10 @@ class BinfernoClustering(BaseClustering):
                 marker_name="pltd_marker",
                 quarter="2quarter",
             )
-            seed_file = os.path.join(output_path, f"{os.path.basename(str(contigs))}.pltd_marker.2quarter_lencutoff_1001.seed")
+            seed_file = os.path.join(
+                output_path,
+                f"{os.path.basename(str(contigs))}.pltd_marker.2quarter_lencutoff_1001.seed",
+            )
         else:
             n_genome = gen_seed(
                 logger,
@@ -66,7 +66,10 @@ class BinfernoClustering(BaseClustering):
                 marker_name="bacar_marker",
                 quarter="2quarter",
             )
-            seed_file = os.path.join(output_path, f"{os.path.basename(str(contigs))}.bacar_marker.2quarter_lencutoff_1001.seed")
+            seed_file = os.path.join(
+                output_path,
+                f"{os.path.basename(str(contigs))}.bacar_marker.2quarter_lencutoff_1001.seed",
+            )
         if embeddings is None or embeddings.empty:
             raise ValueError("embeddings must be a non-empty DataFrame")
         if seed_file is None or contigs is None or output_path is None:

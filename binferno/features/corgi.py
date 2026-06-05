@@ -117,7 +117,9 @@ class CorgiFeatureBuilder(BaseFeatureBuilder):
             N50_aug_zero != N50_raw
         ):  # view 0 isn't direct copy of raw contigs, run corgi on raw contigs first and add to the corgi_df.
             raw_emb = Path(f"{seq_dir}/{contig_basename.split('.')[0]}_embeddings.npy")
-            raw_index = Path(f"{seq_dir}/{contig_basename.split('.')[0]}_embeddings.index")
+            raw_index = Path(
+                f"{seq_dir}/{contig_basename.split('.')[0]}_embeddings.index"
+            )
             if not os.path.exists(raw_emb) or not os.path.exists(raw_index):
                 run_corgi(
                     input_fasta=contigs,
@@ -152,7 +154,7 @@ class CorgiFeatureBuilder(BaseFeatureBuilder):
             ):
                 run_corgi(
                     input_fasta=fasta,
-                    min_length=0, # here, min length must be 0, as views are all required.
+                    min_length=0,  # here, min length must be 0, as views are all required.
                     model_path=self.model_path,
                     embedding=embedding_path,
                 )
@@ -166,5 +168,7 @@ class CorgiFeatureBuilder(BaseFeatureBuilder):
             del view_df, view_emb, view_index
 
         if self.corgi_normalize:
-            corgi_df = corgi_df.apply(lambda x: x / np.linalg.norm(x), axis=1) # L2 normalization by row.
+            corgi_df = corgi_df.apply(
+                lambda x: x / np.linalg.norm(x), axis=1
+            )  # L2 normalization by row.
         return corgi_df

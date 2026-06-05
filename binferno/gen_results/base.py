@@ -19,9 +19,11 @@ class BaseWriter(BaseModel):
         output_path: str,
         plastid: bool = False,
         minbin_size: int = 200000,
-        ) -> None:
-        raise NotImplementedError("BaseWriter is an abstract class. Please implement the __call__ method.")
-    
+    ) -> None:
+        raise NotImplementedError(
+            "BaseWriter is an abstract class. Please implement the __call__ method."
+        )
+
     class Profile:
         """
         Profile genome bins across binning methods using CheckM.

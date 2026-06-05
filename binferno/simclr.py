@@ -108,7 +108,9 @@ class SimCLR(object):
         if cache_key not in self._infonce_mask_cache:
             sample_ids = torch.arange(batch_size, device=device).repeat(n_views)
             diag_mask = torch.eye(total, dtype=torch.bool, device=device)
-            positive_mask = sample_ids.unsqueeze(0).eq(sample_ids.unsqueeze(1)) & (~diag_mask)
+            positive_mask = sample_ids.unsqueeze(0).eq(sample_ids.unsqueeze(1)) & (
+                ~diag_mask
+            )
             negative_mask = (~positive_mask) & (~diag_mask)
             self._infonce_mask_cache[cache_key] = (positive_mask, negative_mask)
 
@@ -126,7 +128,7 @@ class SimCLR(object):
         logits = logits / self.temperature
         return logits, labels
 
-    # new version but with different behavior when n_views > 2. 
+    # new version but with different behavior when n_views > 2.
     class info_nce_loss(nn.Module):
         def __init__(self, temperature=0.15):
             super().__init__()
@@ -148,7 +150,9 @@ class SimCLR(object):
             if cache_key not in self._cache:
                 sample_ids = torch.arange(batch_size, device=device).repeat(n_views)
                 diag_mask = torch.eye(total, dtype=torch.bool, device=device)
-                pos_mask = sample_ids.unsqueeze(0).eq(sample_ids.unsqueeze(1)) & ~diag_mask
+                pos_mask = (
+                    sample_ids.unsqueeze(0).eq(sample_ids.unsqueeze(1)) & ~diag_mask
+                )
                 pos_rows, pos_cols = pos_mask.nonzero(as_tuple=True)
                 self._cache[cache_key] = (pos_rows, pos_cols, diag_mask, sample_ids)
 
@@ -156,7 +160,7 @@ class SimCLR(object):
 
             features = F.normalize(features, dim=1)
             sim = torch.matmul(features, features.T) / self.temperature
-            sim = sim.masked_fill(diag_mask, float('-inf'))
+            sim = sim.masked_fill(diag_mask, float("-inf"))
 
             # Single fused log_softmax; gather only at positive locations
             log_probs = F.log_softmax(sim, dim=1)
@@ -164,10 +168,12 @@ class SimCLR(object):
 
             with torch.no_grad():
                 top1_preds = sim.argmax(dim=1)
-                top1_acc = (sample_ids[top1_preds] == sample_ids).float().mean().item() * 100.0
+                top1_acc = (
+                    sample_ids[top1_preds] == sample_ids
+                ).float().mean().item() * 100.0
 
             return loss, top1_acc
-    
+
     def covmodel_info_nce_loss(self, features, device, args_dict):
         """
         Calculate the InfoNCE loss for the coverage model.

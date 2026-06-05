@@ -6,6 +6,7 @@ from pydantic import BaseModel
 import pandas as pd
 from pathlib import Path
 import torch
+from loguru._logger import Logger
 
 from ..features import BinfernoFeatureBuilder
 
@@ -17,10 +18,9 @@ class BaseTrainer(BaseModel):
         contigs: Path,
         bam: Path,
         output_dir: Path,
-        logger=None,
-        threads: int = 4,
         features: BinfernoFeatureBuilder = None,
-        **kwargs,
+        threads: int = 4,
+        logger: Logger = None,
     ) -> pd.DataFrame:
         raise NotImplementedError(
             "The __call__ method must be implemented by the subclass."
@@ -80,8 +80,13 @@ class BaseTrainer(BaseModel):
             )
 
     def warmup_cosine_scheduler(
-        self, optimizer, min_learning_rate, epochs,
-        warmup_epochs=10, max_lr_hold_epochs=0, learning_rate=1e-3
+        self,
+        optimizer,
+        min_learning_rate,
+        epochs,
+        warmup_epochs=10,
+        max_lr_hold_epochs=0,
+        learning_rate=1e-3,
     ):
         max_lr = learning_rate
         # warmup_start_lr = max_lr * 0.1w
@@ -163,7 +168,9 @@ class BaseTrainer(BaseModel):
 
                     # Save encoder embeddings if requested
                     if save_individual_embs:
-                        kmer_emb, cov_emb = model.get_separate_modality_embs(batch_features)
+                        kmer_emb, cov_emb = model.get_separate_modality_embs(
+                            batch_features
+                        )
                         kmer_embs[clean_header] = kmer_emb[j].cpu().numpy()
                         cov_embs[clean_header] = cov_emb[j].cpu().numpy()
 
@@ -229,6 +236,7 @@ class BaseTrainer(BaseModel):
             # for each view, make sure to sort the features by index.
             features_df = sorted_features_df.drop(columns=["view"])
             return features_df
+
 
 """ class info_nce_loss(nn.Module):
         def __init__(self, temperature=0.15):

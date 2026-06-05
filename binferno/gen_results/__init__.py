@@ -14,10 +14,10 @@ import gzip
 import shutil
 from collections import defaultdict
 
-
 BinDict = Dict[str, Dict[str, set]]
 ContigAssignmentDict = Dict[str, Dict[str, str]]
 QualityCache = Dict[str, Dict[str, Tuple[float, float]]]
+
 
 class BinfernoWriter(BaseWriter):
     checkm_database: str = Field(default="", description="Path to CheckM database")
@@ -35,7 +35,7 @@ class BinfernoWriter(BaseWriter):
         ignore_kmeans_res: bool = False,
         output_path: Path = None,
         num_threads: int = 5,
-        logger: loguru.logger = None, # type: ignore
+        logger: loguru.logger = None,  # type: ignore
         res_name: str = None,
         plastid: bool = False,
         contigs: str = None,
@@ -129,8 +129,9 @@ class BinfernoWriter(BaseWriter):
         _, comp, cont = markers.bin_quality(bin_contig_names)
         return comp, cont
 
-
-    def list_result_tsvs(self, res_path: str, ignore_kmeans_res: bool = False) -> List[str]:
+    def list_result_tsvs(
+        self, res_path: str, ignore_kmeans_res: bool = False
+    ) -> List[str]:
         """
         Collect clustering result TSV filenames from a result directory.
         """
@@ -144,7 +145,6 @@ class BinfernoWriter(BaseWriter):
 
         selected.sort()
         return selected
-
 
     def read_bins_nosequences(
         self,
@@ -183,7 +183,6 @@ class BinfernoWriter(BaseWriter):
 
         return bins, contigs_in_bins
 
-
     def compute_bin_quality_cache(
         self,
         bins: BinDict,
@@ -201,7 +200,6 @@ class BinfernoWriter(BaseWriter):
                 quality_cache[method_id][bin_id] = (comp, cont)
 
         return quality_cache
-
 
     def summarize_method_quality(
         self,
@@ -273,7 +271,6 @@ class BinfernoWriter(BaseWriter):
 
         return bin_quality_dict, best_method
 
-
     def savecontigs_with_high_bin_quality(
         self,
         bins: BinDict,
@@ -307,7 +304,6 @@ class BinfernoWriter(BaseWriter):
                         handle_5005.write(f"{contig_id}\t{bin_count_5005}\n")
                     bin_count_5005 += 1
 
-
     def write_estimated_bin_quality(self, bin_quality_dict, output_file):
         """
         Write method-level quality summary table, sorted by num_905 and sum_cont5.
@@ -335,7 +331,6 @@ class BinfernoWriter(BaseWriter):
                     f"{stats['sum_cont5']}\n"
                 )
 
-
     def estimate_bins_quality_nobins(
         self,
         bac_mg_table,
@@ -358,7 +353,6 @@ class BinfernoWriter(BaseWriter):
             save_high_quality_contigs=True,
         )
 
-
     def estimate_bins_quality_nobins_pltd(
         self,
         pltd_mg_table,
@@ -380,7 +374,6 @@ class BinfernoWriter(BaseWriter):
             save_high_quality_contigs=False,
         )
 
-
     def _estimate_bins_quality_common(
         self,
         markers,
@@ -391,9 +384,13 @@ class BinfernoWriter(BaseWriter):
         """
         Shared internal implementation for bin-quality estimation.
         """
-        result_files = self.list_result_tsvs(res_path, ignore_kmeans_res=ignore_kmeans_res)
+        result_files = self.list_result_tsvs(
+            res_path, ignore_kmeans_res=ignore_kmeans_res
+        )
 
-        bin_dirs = {filename: os.path.join(res_path, filename) for filename in result_files}
+        bin_dirs = {
+            filename: os.path.join(res_path, filename) for filename in result_files
+        }
 
         bins, contigs = self.read_bins_nosequences(bin_dirs)
         methods_sorted = sorted(bins.keys())
@@ -434,7 +431,6 @@ class BinfernoWriter(BaseWriter):
             return gzip.open(filepath, "rt", encoding="utf-8")
         return open(filepath, "r", encoding="utf-8")
 
-
     def _iter_fasta(self, filepath: str) -> Iterator[Tuple[str, str]]:
         """
         Yield (header_without_>, sequence) pairs from a FASTA file.
@@ -463,8 +459,9 @@ class BinfernoWriter(BaseWriter):
             if current_header is not None:
                 yield current_header, "".join(seq_chunks)
 
-
-    def _read_result_map(self, resultfile: str) -> Tuple[Dict[str, list], Dict[str, str]]:
+    def _read_result_map(
+        self, resultfile: str
+    ) -> Tuple[Dict[str, list], Dict[str, str]]:
         """
         Read contig-to-cluster assignments.
 
@@ -489,7 +486,6 @@ class BinfernoWriter(BaseWriter):
                 contig_to_cluster[contig_name] = cluster_name
 
         return dict(cluster_to_contigs), contig_to_cluster
-
 
     def gen_bins(self, fastafile: str, resultfile: str, outputdir: str) -> None:
         """
@@ -527,7 +523,6 @@ class BinfernoWriter(BaseWriter):
         finally:
             for handle in open_handles.values():
                 handle.close()
-
 
     def filter_small_bins(
         self,

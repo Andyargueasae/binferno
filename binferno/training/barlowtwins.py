@@ -3,6 +3,7 @@ import itertools
 import os
 from typing import Dict
 from pydantic import Field
+from loguru._logger import Logger
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -59,10 +60,9 @@ class BarlowTwinsTrainer(BaseTrainer):
         contigs: Path,
         bam: Path,
         output_dir: Path,
-        logger=None,
-        threads: int = 4,
         features: BinfernoFeatureBuilder = None,
-        **kwargs,
+        threads: int = 4,
+        logger: Logger = None,
     ) -> pd.DataFrame:
         """
         Args:
@@ -150,7 +150,7 @@ class BarlowTwinsTrainer(BaseTrainer):
             epochs=self.epochs,
             num_workers=threads,
         )
-        
+
         model_path = output_train_dir / "best_model.pt"
         if not model_path.exists():
             model = self.train(
@@ -170,7 +170,6 @@ class BarlowTwinsTrainer(BaseTrainer):
             )
             model.load_state_dict(torch.load(model_path, map_location=device))
 
-        
         if not embedding_path.exists():
             orig_df = feature_df[feature_df.index.str.endswith(".original")]
             namelist = [index.rsplit(".", 1)[0] for index in orig_df.index]
@@ -217,8 +216,12 @@ class BarlowTwinsTrainer(BaseTrainer):
                 self._cache[cache_key] = torch.eye(D, device=device)
             eye = self._cache[cache_key]
 
-            z1 = (feature1 - feature1.mean(dim=0)) / (feature1.std(dim=0, unbiased=False) + self.eps)
-            z2 = (feature2 - feature2.mean(dim=0)) / (feature2.std(dim=0, unbiased=False) + self.eps)
+            z1 = (feature1 - feature1.mean(dim=0)) / (
+                feature1.std(dim=0, unbiased=False) + self.eps
+            )
+            z2 = (feature2 - feature2.mean(dim=0)) / (
+                feature2.std(dim=0, unbiased=False) + self.eps
+            )
 
             C = torch.mm(z1.T, z2) / N
 
@@ -240,15 +243,18 @@ class BarlowTwinsTrainer(BaseTrainer):
                 with torch.no_grad():
                     # Isolate off-diagonals cleanly using the cached identity matrix
                     off_diag_abs = C.abs().masked_fill(eye.to(torch.bool), 0.0)
-                    
+
                     # Bundle tensors together into a single structure before sending to CPU
                     # This minimizes the overhead of calling .item() sequentially
-                    stats_tensor = torch.stack([
-                        diag.mean(),
-                        diag.std(),
-                        off_diag_abs.sum() / (D * D - D), # True mean of off-diagonals
-                        off_diag_abs.max()
-                    ])
+                    stats_tensor = torch.stack(
+                        [
+                            diag.mean(),
+                            diag.std(),
+                            off_diag_abs.sum()
+                            / (D * D - D),  # True mean of off-diagonals
+                            off_diag_abs.max(),
+                        ]
+                    )
                     stats_cpu = stats_tensor.cpu().tolist()
 
                     stats = {
@@ -547,7 +553,7 @@ class BarlowTwinsTrainer(BaseTrainer):
             torch.nn.utils.clip_grad_norm_(
                 model.parameters(), max_norm=1.0
             )  # prevent the exploding gradient.
-            
+
             optimizer.step()
             total_loss += loss.item()  # sum loss.
 
@@ -834,9 +840,13 @@ class BarlowTwinsTrainer(BaseTrainer):
         )
 
         for view in range(view_num):
-            output_fasta = os.path.join(output_dir, f"augmented_fragments_view{view}.fasta")
+            output_fasta = os.path.join(
+                output_dir, f"augmented_fragments_view{view}.fasta"
+            )
             view_fragments = [
-                    (header, seq) for header, seq in All_Fragments if header.endswith(f".{view}")
+                (header, seq)
+                for header, seq in All_Fragments
+                if header.endswith(f".{view}")
             ]
             with open(output_fasta, "w") as f:
                 for fragment_header, fragment_seq in view_fragments:
@@ -865,9 +875,13 @@ class BarlowTwinsTrainer(BaseTrainer):
         )  # the ordered contig names which will be used for indexing the features.
 
         for view in range(view_num):
-            output_fasta = os.path.join(output_dir, f"augmented_fragments_view{view}.fasta")
+            output_fasta = os.path.join(
+                output_dir, f"augmented_fragments_view{view}.fasta"
+            )
             view_fragments = [
-                    (header, seq) for header, seq in All_Fragments if header.endswith(f".{view}")
+                (header, seq)
+                for header, seq in All_Fragments
+                if header.endswith(f".{view}")
             ]
             with open(output_fasta, "w") as f:
                 for fragment_header, fragment_seq in view_fragments:

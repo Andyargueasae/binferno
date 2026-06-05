@@ -1,13 +1,15 @@
-import pandas as pd
-from pydantic import Field
 from pathlib import Path
-import loguru
+from pydantic import Field
+from loguru._logger import Logger
+import pandas as pd
 import torch
+import torch.nn.functional as F
+
 from .barlowtwins import BarlowTwinsTrainer
 from .simclr import SimCLRTrainer
 from .base import BaseTrainer
 from ..features import BinfernoFeatureBuilder
-import torch.nn.functional as F
+
 
 class BinfernoTrainer(BaseTrainer):
     simclr: SimCLRTrainer
@@ -30,9 +32,9 @@ class BinfernoTrainer(BaseTrainer):
         contigs: Path,
         bam: Path,
         output_dir: Path,
-        logger: loguru.logger = None, # type: ignore
-        threads: int = 4,
         features: BinfernoFeatureBuilder = None,
+        threads: int = 4,
+        logger: Logger = None,
         **kwargs,
     ) -> pd.DataFrame:
         """
@@ -59,7 +61,7 @@ class BinfernoTrainer(BaseTrainer):
         if barlow_twins:
             output_dirs.append(output_dir / "barlow_twins")
             train_modules.append(self.barlowtwins)
-        
+
         for out_dir, train_module in zip(output_dirs, train_modules):
             out_dir.mkdir(
                 parents=True, exist_ok=True
@@ -81,7 +83,11 @@ class BinfernoTrainer(BaseTrainer):
         if not self.concat:
             # split the embeddings first, then add and normalize them.
             num_methods = len(train_modules)
-            split_embs = torch.split(torch.tensor(embeddings.values), embeddings.shape[1] // num_methods, dim=1)
+            split_embs = torch.split(
+                torch.tensor(embeddings.values),
+                embeddings.shape[1] // num_methods,
+                dim=1,
+            )
             summed_emb = torch.zeros_like(split_embs[0])
             for emb in split_embs:
                 summed_emb += emb

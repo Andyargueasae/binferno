@@ -12,12 +12,12 @@ def binferno(
     contigs: Path,
     bam: Path,
     output_dir: Path,
+    features: BinfernoFeatureBuilder,
     training: BinfernoTrainer,
     clustering: BinfernoClustering,
-    results: BinfernoWriter,
-    features: BinfernoFeatureBuilder,
+    writer: BinfernoWriter,
     threads: int = 4,
-    only_training: bool = False,  # True: only run training, False: full process.
+    train_only: bool = False,  # True: only run training, False: full process.
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     logger.add(f"{output_dir}/binferno.log", rotation="1 MB", retention="10 days")
@@ -26,12 +26,12 @@ def binferno(
         contigs=contigs,
         bam=bam,
         output_dir=output_dir,
-        logger=logger,
-        threads=threads,
         features=features,
+        threads=threads,
+        logger=logger,
     )
 
-    if only_training:
+    if train_only:
         logger.info(
             "Only training stage is set, temperarily skipping clustering and results generations."
         )
@@ -46,21 +46,20 @@ def binferno(
         shutil.rmtree(cluster_output_dir)
     cluster_output_dir.mkdir(parents=True, exist_ok=True)
 
-    
     n_genome = clustering(
-            contigs=str(contigs),
-            embeddings=embeddings,
-            output_path=cluster_output_dir,
-            logger=logger,
-            threads=threads,
-        )
-    
+        contigs=str(contigs),
+        embeddings=embeddings,
+        output_path=cluster_output_dir,
+        threads=threads,
+        logger=logger,
+    )
+
     # Run Output results generation
     logger.info("Start writing results.")
     results_output_dir = output_dir / "res_bins"
     results_output_dir.mkdir(parents=True, exist_ok=True)
 
-    results(
+    writer(
         contigs=str(contigs),
         seed_num=n_genome,
         num_threads=threads,
@@ -72,8 +71,10 @@ def binferno(
     logger.info("Binferno pipeline completed successfully.")
     return
 
+
 def main():
     tyro.cli(binferno)
+
 
 if __name__ == "__main__":
     main()

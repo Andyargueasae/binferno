@@ -4,6 +4,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import numpy as np
+from loguru._logger import Logger
 from tqdm import tqdm
 from torch.backends import cudnn
 from .models.simclr import SimCLRNet, EmbeddingNet, NeuralNetwork, EmbNet2
@@ -60,12 +61,11 @@ class SimCLRTrainer(BaseTrainer):
         default=False,
         description="Whether to use attention fusion in the Fusion module instead of gated fusion.",
     )
-    temperature: float|None = Field(
-        default=None, 
-        description=
-            "Temperature parameter for the InfoNCE loss. "
-            "By default, it is set based on the N50 of the input contigs. "
-            "If the N50 is greater than 10,000, the temperature is set to 0.07; otherwise, it is set to 0.15."
+    temperature: float | None = Field(
+        default=None,
+        description="Temperature parameter for the InfoNCE loss. "
+        "By default, it is set based on the N50 of the input contigs. "
+        "If the N50 is greater than 10,000, the temperature is set to 0.07; otherwise, it is set to 0.15.",
     )
     multisample: bool = Field(
         default=False,
@@ -94,10 +94,9 @@ class SimCLRTrainer(BaseTrainer):
         contigs: Path,
         bam: Path,
         output_dir: Path,
-        logger=None,
-        threads: int = 4,
         features: BinfernoFeatureBuilder = None,
-        **kwargs,
+        threads: int = 4,
+        logger: Logger = None,
     ) -> pd.DataFrame:
         """
         Args:
@@ -127,7 +126,7 @@ class SimCLRTrainer(BaseTrainer):
             )
             embeddings = pd.read_csv(embedding_path, sep="\t", header=0, index_col=0)
             return embeddings
-        
+
         fragment_dict, all_fragments, namelist = self.gen_views(
             contigs=contigs,
             output_dir=output_aug_dir,
@@ -155,7 +154,7 @@ class SimCLRTrainer(BaseTrainer):
                 kmer_dim = features._get_kmer_dim()
             else:
                 kmer_dim = 0
-                
+
         # after getting the features, sort the features by method to ensure integrity before training.
         feature_df = self.sort_features_by_method(
             feature_df,
@@ -233,7 +232,7 @@ class SimCLRTrainer(BaseTrainer):
         )
 
         # train loop.
-        
+
         model_path = output_train_dir / "best_model.pt"
         if model_path.exists():
             logger.info(
@@ -286,15 +285,19 @@ class SimCLRTrainer(BaseTrainer):
             with torch.no_grad():
                 sample_batch = next(iter(train_loader))
                 x = sample_batch[0][:32].to(device)
-                tnf = x[:, :model.tnf_enc_dim]
-                cov = x[:, model.tnf_enc_dim:]
+                tnf = x[:, : model.tnf_enc_dim]
+                cov = x[:, model.tnf_enc_dim :]
                 kmer_emb = model.tnf_encoder(tnf)
                 cov_emb = model.coverage_encoder(cov)
                 cat = torch.cat([kmer_emb, cov_emb], dim=1)
                 kg = model.fusion_network.kmer_gate(cat)
                 cg = model.fusion_network.coverage_gate(cat)
-                logger.info(f"kmer_gate mean: {kg.mean():.3f}, coverage_gate mean: {cg.mean():.3f}")
-                logger.info(f"kmer_emb norm: {kmer_emb.norm(dim=1).mean():.3f}, cov_emb norm: {cov_emb.norm(dim=1).mean():.3f}")
+                logger.info(
+                    f"kmer_gate mean: {kg.mean():.3f}, coverage_gate mean: {cg.mean():.3f}"
+                )
+                logger.info(
+                    f"kmer_emb norm: {kmer_emb.norm(dim=1).mean():.3f}, cov_emb norm: {cov_emb.norm(dim=1).mean():.3f}"
+                )
 
         # in case embeddings isn't exist, get embeddings from the trained model and save to file.
         if self.simclrnet:
@@ -320,9 +323,9 @@ class SimCLRTrainer(BaseTrainer):
             index=embeddings.index,
             columns=embeddings.columns,
         )
-        
+
         return embeddings
-    
+
     def sort_features_by_method(
         self,
         features_df: pd.DataFrame,
@@ -340,7 +343,9 @@ class SimCLRTrainer(BaseTrainer):
             return features_df
         else:
             # for simclr, group by view, stack the features of same view together, then concatenate the features.
-            features_df["view"] = features_df.index.str.rsplit(".", n=1).str[-1].astype(str)
+            features_df["view"] = (
+                features_df.index.str.rsplit(".", n=1).str[-1].astype(str)
+            )
             # replace "original" as "0".
             # features_df["view"] = features_df["view"].replace("original", "0")
             features_df["view"] = features_df["view"].astype(int)
@@ -473,18 +478,18 @@ class SimCLRTrainer(BaseTrainer):
             # --- Efficient Persistent Caching ---
             if cache_key not in self._cache:
                 sample_ids = torch.arange(batch_size, device=device).repeat(n_views)
-                
+
                 # Construct masks for structured extraction
                 pos_mask = sample_ids.unsqueeze(0).eq(sample_ids.unsqueeze(1))
                 diag_mask = torch.eye(total, dtype=torch.bool, device=device)
                 pos_mask_no_diag = pos_mask & ~diag_mask
-                
+
                 # Fast index matrix for gathering positive scores: [total, n_views - 1]
                 pos_indices = pos_mask_no_diag.nonzero()[:, 1].view(total, n_views - 1)
-                
+
                 # Complete negative mask to isolate true negative elements
                 neg_mask = pos_mask
-                
+
                 self._cache[cache_key] = (pos_indices, neg_mask, sample_ids)
 
             pos_indices, neg_mask, sample_ids = self._cache[cache_key]
@@ -498,17 +503,21 @@ class SimCLRTrainer(BaseTrainer):
             positives = torch.gather(sim, dim=1, index=pos_indices).view(-1, 1)
 
             # 3. Mask out true positives and self-diagonal targets to isolate negatives
-            negatives_only = sim.masked_fill(neg_mask, float('-inf'))
-            
+            negatives_only = sim.masked_fill(neg_mask, float("-inf"))
+
             # Virtual repetition to pair each row's negatives against each individual positive view
             # Shape: [total * (n_views - 1), total]
-            negatives_repeated = torch.repeat_interleave(negatives_only, n_views - 1, dim=0)
+            negatives_repeated = torch.repeat_interleave(
+                negatives_only, n_views - 1, dim=0
+            )
 
             # 4. Fused Mathematical Log-Sum-Exp Reduction (Avoids huge torch.cat calls)
-            max_val = torch.clamp(positives, min=0.0) 
+            max_val = torch.clamp(positives, min=0.0)
             pos_exp = torch.exp(positives - max_val)
-            neg_sum_exp = torch.sum(torch.exp(negatives_repeated - max_val), dim=1, keepdim=True)
-            
+            neg_sum_exp = torch.sum(
+                torch.exp(negatives_repeated - max_val), dim=1, keepdim=True
+            )
+
             # Final objective calculation matching comebin's multi-view behavior
             loss = -(positives - max_val - torch.log(pos_exp + neg_sum_exp)).mean()
 
@@ -517,21 +526,29 @@ class SimCLRTrainer(BaseTrainer):
                 # Extract pure negative scores across the batch
                 # Shape: [total, total] -> max negative per row: [total, 1]
                 max_negatives = negatives_only.max(dim=1, keepdim=True).values
-                max_negatives_repeated = torch.repeat_interleave(max_negatives, n_views - 1, dim=0)
-                
+                max_negatives_repeated = torch.repeat_interleave(
+                    max_negatives, n_views - 1, dim=0
+                )
+
                 # Top-1: Check if the individual positive view score beats the best negative score
-                top1_acc = (positives > max_negatives_repeated).float().mean().item() * 100.0
+                top1_acc = (
+                    positives > max_negatives_repeated
+                ).float().mean().item() * 100.0
 
                 # Top-5: Sort or partition the negative space to find the 5th highest negative baseline
                 # topk(5) returns sorted negative tensor of shape [total, 5]. The 5th item (index 4) is our threshold.
-                top5_neg_threshold = torch.topk(negatives_only, k=5, dim=1).values[:, 4:5]
-                top5_neg_repeated = torch.repeat_interleave(top5_neg_threshold, n_views - 1, dim=0)
-                
+                top5_neg_threshold = torch.topk(negatives_only, k=5, dim=1).values[
+                    :, 4:5
+                ]
+                top5_neg_repeated = torch.repeat_interleave(
+                    top5_neg_threshold, n_views - 1, dim=0
+                )
+
                 # Top-5: True if the positive score beats the 5th highest negative score
                 top5_acc = (positives > top5_neg_repeated).float().mean().item() * 100.0
 
             return loss, top1_acc, top5_acc
-        
+
     class info_nce_kmer_loss(nn.Module):
         def __init__(self, temperature=0.15):
             super().__init__()
@@ -572,18 +589,18 @@ class SimCLRTrainer(BaseTrainer):
             # --- Efficient Persistent Caching ---
             if cache_key not in self._cache:
                 sample_ids = torch.arange(batch_size, device=device).repeat(n_views)
-                
+
                 # Construct masks for structured extraction
                 pos_mask = sample_ids.unsqueeze(0).eq(sample_ids.unsqueeze(1))
                 diag_mask = torch.eye(total, dtype=torch.bool, device=device)
                 pos_mask_no_diag = pos_mask & ~diag_mask
-                
+
                 # Fast index matrix for gathering positive scores: [total, n_views - 1]
                 pos_indices = pos_mask_no_diag.nonzero()[:, 1].view(total, n_views - 1)
-                
+
                 # Complete negative mask to isolate true negative elements
                 neg_mask = pos_mask
-                
+
                 self._cache[cache_key] = (pos_indices, neg_mask, sample_ids)
 
             pos_indices, neg_mask, sample_ids = self._cache[cache_key]
@@ -597,17 +614,21 @@ class SimCLRTrainer(BaseTrainer):
             positives = torch.gather(sim, dim=1, index=pos_indices).view(-1, 1)
 
             # 3. Mask out true positives and self-diagonal targets to isolate negatives
-            negatives_only = sim.masked_fill(neg_mask, float('-inf'))
-            
+            negatives_only = sim.masked_fill(neg_mask, float("-inf"))
+
             # Virtual repetition to pair each row's negatives against each individual positive view
             # Shape: [total * (n_views - 1), total]
-            negatives_repeated = torch.repeat_interleave(negatives_only, n_views - 1, dim=0)
+            negatives_repeated = torch.repeat_interleave(
+                negatives_only, n_views - 1, dim=0
+            )
 
             # 4. Fused Mathematical Log-Sum-Exp Reduction (Avoids huge torch.cat calls)
-            max_val = torch.clamp(positives, min=0.0) 
+            max_val = torch.clamp(positives, min=0.0)
             pos_exp = torch.exp(positives - max_val)
-            neg_sum_exp = torch.sum(torch.exp(negatives_repeated - max_val), dim=1, keepdim=True)
-            
+            neg_sum_exp = torch.sum(
+                torch.exp(negatives_repeated - max_val), dim=1, keepdim=True
+            )
+
             # Final objective calculation matching comebin's multi-view behavior
             loss = -(positives - max_val - torch.log(pos_exp + neg_sum_exp)).mean()
 
@@ -616,16 +637,24 @@ class SimCLRTrainer(BaseTrainer):
                 # Extract pure negative scores across the batch
                 # Shape: [total, total] -> max negative per row: [total, 1]
                 max_negatives = negatives_only.max(dim=1, keepdim=True).values
-                max_negatives_repeated = torch.repeat_interleave(max_negatives, n_views - 1, dim=0)
-                
+                max_negatives_repeated = torch.repeat_interleave(
+                    max_negatives, n_views - 1, dim=0
+                )
+
                 # Top-1: Check if the individual positive view score beats the best negative score
-                top1_acc = (positives > max_negatives_repeated).float().mean().item() * 100.0
+                top1_acc = (
+                    positives > max_negatives_repeated
+                ).float().mean().item() * 100.0
 
                 # Top-5: Sort or partition the negative space to find the 5th highest negative baseline
                 # topk(5) returns sorted negative tensor of shape [total, 5]. The 5th item (index 4) is our threshold.
-                top5_neg_threshold = torch.topk(negatives_only, k=5, dim=1).values[:, 4:5]
-                top5_neg_repeated = torch.repeat_interleave(top5_neg_threshold, n_views - 1, dim=0)
-                
+                top5_neg_threshold = torch.topk(negatives_only, k=5, dim=1).values[
+                    :, 4:5
+                ]
+                top5_neg_repeated = torch.repeat_interleave(
+                    top5_neg_threshold, n_views - 1, dim=0
+                )
+
                 # Top-5: True if the positive score beats the 5th highest negative score
                 top5_acc = (positives > top5_neg_repeated).float().mean().item() * 100.0
 
@@ -671,7 +700,7 @@ class SimCLRTrainer(BaseTrainer):
             self.seed
         )  # ensure reproducibility by unifying seeds across random, numpy, and torch.
         temperature = kwargs.get("temperature", 0.15)
-        MODEL_PATH = output_dir / "best_model.pt" 
+        MODEL_PATH = output_dir / "best_model.pt"
         logger = kwargs.get("logger", None)
         if logger is None:
             raise ValueError(
@@ -682,7 +711,9 @@ class SimCLRTrainer(BaseTrainer):
         if not self.hard_weighted_nce:
             info_nceloss_fn = self.info_nce_loss(temperature=temperature).to(device)
         else:
-            info_nceloss_fn = self.info_nce_loss_hard_weight(temperature=temperature).to(device)
+            info_nceloss_fn = self.info_nce_loss_hard_weight(
+                temperature=temperature
+            ).to(device)
 
         epoch_iter = tqdm(range(epochs), desc="Training Epochs")
         early_stopping = EarlyStoppingManagerSimCLR(patience=15)
@@ -711,18 +742,22 @@ class SimCLRTrainer(BaseTrainer):
             if stats is not None:
                 self.print_stats(stats, epoch, method=method, logger=logger)
 
-            early_stopping.check_improvement(avg_loss, stats["top1_acc"], model.state_dict())
+            early_stopping.check_improvement(
+                avg_loss, stats["top1_acc"], model.state_dict()
+            )
             if early_stopping.should_stop():
                 logger.info(
                     f"Early stopping after {epoch+1} epochs (patience: {early_stopping.patience})"
                 )
                 break
 
-            best_state, best_loss,best_acc = early_stopping.get_best_state()
+            best_state, best_loss, best_acc = early_stopping.get_best_state()
 
         if best_state is not None:
             model.load_state_dict(best_state)
-            logger.info(f"Loaded best model with loss: {best_loss:.4f} and accuracy: {best_acc:.4f}")
+            logger.info(
+                f"Loaded best model with loss: {best_loss:.4f} and accuracy: {best_acc:.4f}"
+            )
 
             torch.save(model.state_dict(), MODEL_PATH)
             logger.info(f"Model saved to {MODEL_PATH}")
@@ -755,7 +790,10 @@ class SimCLRTrainer(BaseTrainer):
             actual_batch_size = contig_features.shape[0] // self.view_num
             enc_feature = model.forward_one(contig_features)
             loss, batch_acc, _ = info_nceloss_fn(
-                enc_feature, batch_size=actual_batch_size, device=device, n_views=self.view_num
+                enc_feature,
+                batch_size=actual_batch_size,
+                device=device,
+                n_views=self.view_num,
             )
 
             loss.backward()
@@ -867,7 +905,7 @@ class SimCLRTrainer(BaseTrainer):
             out = np.concatenate(
                 [
                     model(
-                        data[0][i : i + bs_,:].to(device),
+                        data[0][i : i + bs_, :].to(device),
                     )[0]
                     .to("cpu")
                     .numpy()
@@ -932,7 +970,7 @@ class SimCLRTrainer(BaseTrainer):
             contigs=contigs,
             view_num=view_num,
             contig_length=contig_length,
-            output_dir=output_dir
+            output_dir=output_dir,
         )
 
         namelist = list(
@@ -941,12 +979,7 @@ class SimCLRTrainer(BaseTrainer):
 
         return FragMent_Dict, All_Fragments, namelist
 
-    def augmentation(
-        self,
-        fasta_file=None,
-        num_views=6,
-        length_threshold=1000
-    ):
+    def augmentation(self, fasta_file=None, num_views=6, length_threshold=1000):
         # initialize the augmentation.
         seqs = pyfastx.Fastx(fasta_file)
         all_fragments = []
@@ -1045,11 +1078,15 @@ class SimCLRTrainer(BaseTrainer):
         )
 
         # save the fragments to file for potential reuse in the future stages, to save time for augmentation in the future.
-        
+
         for view in range(view_num):
-            output_fasta = os.path.join(output_dir, f"augmented_fragments_view{view}.fasta")
+            output_fasta = os.path.join(
+                output_dir, f"augmented_fragments_view{view}.fasta"
+            )
             view_fragments = [
-                    (header, seq) for header, seq in All_Fragments if header.endswith(f".{view}")
+                (header, seq)
+                for header, seq in All_Fragments
+                if header.endswith(f".{view}")
             ]
             with open(output_fasta, "w") as f:
                 for fragment_header, fragment_seq in view_fragments:
@@ -1062,35 +1099,36 @@ class SimCLRTrainer(BaseTrainer):
         #     os.symlink(os.path.abspath(contigs), raw_fasta) # create a symbolic link to the original contigs fasta file for view 0, which is the unaugmented view.
 
         return FragMent_Dict, All_Fragments
-    
+
+
 class EarlyStoppingManagerSimCLR:
     def __init__(self, patience=10):
-            self.patience = patience
-            self._lowest_loss = float("inf")
-            self._top_acc = 0.0
-            self._saved_state = None
-            self._stagnant_epochs = 0
+        self.patience = patience
+        self._lowest_loss = float("inf")
+        self._top_acc = 0.0
+        self._saved_state = None
+        self._stagnant_epochs = 0
 
     def check_improvement(self, loss, top_acc, model_state):
-            loss_improved = loss < self._lowest_loss - 1e-4
-            acc_improved = top_acc > self._top_acc + 0.05  # at least 0.05% gain
-            improved = loss_improved or acc_improved
-            # improved = loss < self._lowest_loss or top_acc > self._top_acc
+        loss_improved = loss < self._lowest_loss - 1e-4
+        acc_improved = top_acc > self._top_acc + 0.05  # at least 0.05% gain
+        improved = loss_improved or acc_improved
+        # improved = loss < self._lowest_loss or top_acc > self._top_acc
 
-            if improved:
-                if loss < self._lowest_loss:
-                    self._lowest_loss = loss
-                if top_acc > self._top_acc:
-                    self._top_acc = top_acc
-                self._saved_state = model_state
-                self._stagnant_epochs = 0
-                return
+        if improved:
+            if loss < self._lowest_loss:
+                self._lowest_loss = loss
+            if top_acc > self._top_acc:
+                self._top_acc = top_acc
+            self._saved_state = model_state
+            self._stagnant_epochs = 0
+            return
 
-            self._stagnant_epochs += 1
+        self._stagnant_epochs += 1
 
     def should_stop(self):
-            return self._stagnant_epochs >= self.patience
+        return self._stagnant_epochs >= self.patience
 
     def get_best_state(self):
-            """Return the best checkpoint state and its associated loss and top accuracy."""
-            return self._saved_state, self._lowest_loss, self._top_acc
+        """Return the best checkpoint state and its associated loss and top accuracy."""
+        return self._saved_state, self._lowest_loss, self._top_acc

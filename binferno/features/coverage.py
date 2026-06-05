@@ -487,7 +487,9 @@ def _normalise_coverage_dicts(
             {k: v / std_max for k, v in std.items()},
         )
 
-    raise ValueError(f"Unsupported normalization method: rpkm_normalize={rpkm_normalize}, max_normalize={max_normalize}")
+    raise ValueError(
+        f"Unsupported normalization method: rpkm_normalize={rpkm_normalize}, max_normalize={max_normalize}"
+    )
 
 
 def calculate_bam_cov(
@@ -563,7 +565,7 @@ def calculate_bam_cov(
             bam_batch,
             disable_progress=disable_inner_progress,
         )
-        
+
         if max_norm_stacked:
             coverage, coverage_std = _normalise_coverage_dicts(
                 coverage=coverage,
@@ -643,15 +645,11 @@ def max_normalize_stacked_coverage(
 class CoverageFeatureBuilder(BaseFeatureBuilder):
     rpkm_normalize: bool = Field(
         default=True,
-        description=(
-            "Whether to apply RPKM normalization for non-SimCLR paths."
-        ),
+        description=("Whether to apply RPKM normalization for non-SimCLR paths."),
     )
     max_normalize: bool = Field(
         default=False,
-        description=(
-            "Whether to apply max normalization."
-        ),
+        description=("Whether to apply max normalization."),
     )
 
     def __call__(
@@ -679,6 +677,7 @@ class CoverageFeatureBuilder(BaseFeatureBuilder):
             cov_df = max_normalize_stacked_coverage(cov_df)
 
         return cov_df
+
 
 # ======= Multisample coverage features. =======
 # class CoverageMultiFeatureBuilder(CoverageFeatureBuilder):

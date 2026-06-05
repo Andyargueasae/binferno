@@ -7,6 +7,7 @@ import pyfastx
 from pathlib import Path
 import sys
 
+
 def get_length(fastx_file):
     file_type = mimetypes.guess_type(fastx_file)[1]
     if file_type == "gzip":
@@ -48,8 +49,11 @@ def save_result(result, filepath, namelist):
 
 def calc_n50(contigs: Path, min_length: int = 1000) -> int:
     seq_record = pyfastx.Fastx(contigs)
-    lengths = sorted([len(record) for _, record in seq_record if len(record) >= min_length], reverse=True)
-    # only care about the lengths over 1000bp. 
+    lengths = sorted(
+        [len(record) for _, record in seq_record if len(record) >= min_length],
+        reverse=True,
+    )
+    # only care about the lengths over 1000bp.
     total_length = sum(lengths)
     cumulative_length = 0
     for length in lengths:
@@ -57,6 +61,7 @@ def calc_n50(contigs: Path, min_length: int = 1000) -> int:
         if cumulative_length >= total_length / 2:
             return length
     return 0
+
 
 def file_len(fname):
     with open(fname) as f:
@@ -93,11 +98,24 @@ def gen_seed(
     markerURL = os.path.join(
         os.path.dirname(__file__), "auxiliary", marker_name + ".hmm"
     )
-    
-    
-    fragResult_prefix = os.path.join(output_dir, os.path.basename(contig_file) + ".frag")
-    hmmResultURL = os.path.join(output_dir, os.path.basename(contig_file) + "." + marker_name + ".hmmout")
-    seedURL = os.path.join(output_dir, os.path.basename(contig_file) + "." + marker_name + "." + quarter + "_lencutoff_" + str(contig_length_threshold) + ".seed")
+
+    fragResult_prefix = os.path.join(
+        output_dir, os.path.basename(contig_file) + ".frag"
+    )
+    hmmResultURL = os.path.join(
+        output_dir, os.path.basename(contig_file) + "." + marker_name + ".hmmout"
+    )
+    seedURL = os.path.join(
+        output_dir,
+        os.path.basename(contig_file)
+        + "."
+        + marker_name
+        + "."
+        + quarter
+        + "_lencutoff_"
+        + str(contig_length_threshold)
+        + ".seed",
+    )
     marker_gene_faa = f"{fragResult_prefix}.faa"
     if not (os.path.exists(marker_gene_faa)):
         fragCmd = (

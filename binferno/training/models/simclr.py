@@ -3,13 +3,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
-
 # engineering ideas: Kmer set to 4 first. (index represent priority)
-#1. auxiliary losses on separate modality encoders.
-#2. residual connection in fusion network after fusion, add the learned to the original tnf features. For sample coverage, if n_sample is small, don't add; 
-#3. new embedding network architecture resembling COMEBin. Please at least have a god damn try!
-#4. weighted gate fusion is a bottleneck and should not be used in long terms. 
-#5. Maybe borrow one Vae from taxvamb/vamb to do a reconstruction here? Maybe not, as tnf is 103-dim in vamb's context. We may could try coverage by vae. 
+# 1. auxiliary losses on separate modality encoders.
+# 2. residual connection in fusion network after fusion, add the learned to the original tnf features. For sample coverage, if n_sample is small, don't add;
+# 3. new embedding network architecture resembling COMEBin. Please at least have a god damn try!
+# 4. weighted gate fusion is a bottleneck and should not be used in long terms.
+# 5. Maybe borrow one Vae from taxvamb/vamb to do a reconstruction here? Maybe not, as tnf is 103-dim in vamb's context. We may could try coverage by vae.
+
 
 class NeuralNetwork(nn.Module):
     def __init__(
@@ -46,9 +46,7 @@ class NeuralNetwork(nn.Module):
         self.final_cov_dim = output_dim
 
         if corgi_dim > 0:
-            self.tnf_enc_dim += (
-                corgi_dim
-            )        
+            self.tnf_enc_dim += corgi_dim
 
         # was using 512.
         tnf_hidden1 = 512
@@ -91,12 +89,10 @@ class NeuralNetwork(nn.Module):
     def _encode(self, x):
         # encode tnf and coverage features separately, then fuse them together.
         tnf_features = x[:, : self.tnf_enc_dim]
-        tnf_encode = self.tnf_encoder(tnf_features) # not normalized anymore.
+        tnf_encode = self.tnf_encoder(tnf_features)  # not normalized anymore.
         cov_features = x[:, self.tnf_enc_dim :]
-        cov_encode = self.coverage_encoder(cov_features) # not normalized anymore.
-        fused_encode = self.fusion_network(
-            tnf_encode, cov_encode
-        )
+        cov_encode = self.coverage_encoder(cov_features)  # not normalized anymore.
+        fused_encode = self.fusion_network(tnf_encode, cov_encode)
         return fused_encode
 
     def get_embedding(self, x):
@@ -119,6 +115,7 @@ class NeuralNetwork(nn.Module):
         z2 = self.forward_one(x2)
         return z1, z2
 
+
 def fusion_network(
     emb_dim=128,
     gated=False,
@@ -134,7 +131,8 @@ def fusion_network(
         )
     return ConcatFusion(emb_dim=emb_dim)
 
-class vae_for_coverage(nn.Module): # Look at vamb to borrow some thoughts. 
+
+class vae_for_coverage(nn.Module):  # Look at vamb to borrow some thoughts.
     def __init__(self, coverage_dim, output_dim, dropout):
         super(vae_for_coverage, self).__init__()
         hidden = 128
@@ -163,11 +161,13 @@ class vae_for_coverage(nn.Module): # Look at vamb to borrow some thoughts.
         z = self.reparameterize(mu, logvar)
         return z, mu, logvar
 
-def _build_coverage_encoder(coverage_dim: int, output_dim: int, dropout: float,
-                            vae_encoder=False):
+
+def _build_coverage_encoder(
+    coverage_dim: int, output_dim: int, dropout: float, vae_encoder=False
+):
     """
     Adaptive coverage encoder that scales capacity with input information content.
-    
+
     coverage_dim is always 2 * n_samples (mean + std per sample).
     n_samples drives capacity, not coverage_dim directly.
     """
@@ -245,6 +245,7 @@ def _build_coverage_encoder(coverage_dim: int, output_dim: int, dropout: float,
             nn.LeakyReLU(),
         )
 
+
 # Then our model got an attention-based fusion network.
 class AttentionFusion(nn.Module):
     def __init__(self, emb_dim=128, num_heads=4, dropout=0.1):
@@ -305,6 +306,7 @@ class gated_fusion(nn.Module):
         fused = kmer_gate * kmer_emb + coverage_gate * coverage_emb
         return self.out_norm(fused)
 
+
 class ConcatFusion(nn.Module):
     def __init__(self, emb_dim=128, dropout=0.2):
         super().__init__()
@@ -320,6 +322,7 @@ class ConcatFusion(nn.Module):
 
     def forward(self, kmer_emb, cov_emb):
         return self.net(torch.cat([kmer_emb, cov_emb], dim=-1))
+
 
 # The raw COMEBin's embedding network is a simple MLP with batch normalization and dropout. We can use it as a baseline model for our experiments. We can also implement a more complex fusion network later to see if we can improve the performance.
 class EmbeddingNet(nn.Module):
@@ -458,6 +461,7 @@ class SimCLRNet(nn.Module):
         else:
             return output  # F.normalize(output) #output #/ torch.linalg.vector_norm(output, dim=-1, keepdim=True)
 
+
 class EmbNet2(nn.Module):
     def __init__(
         self,
@@ -494,11 +498,11 @@ class EmbNet2(nn.Module):
             nn.Linear(256, output_dim),
             nn.BatchNorm1d(output_dim),
             nn.LeakyReLU(),
-        ) # 3 internal layers plus in-projection and out-projection, all with batchnorm and leakyrelu.
+        )  # 3 internal layers plus in-projection and out-projection, all with batchnorm and leakyrelu.
 
     def forward_one(self, x):
         tnf_features = x[:, : self.tnf_dim]
-        cov_features = x[:, self.tnf_dim:]
+        cov_features = x[:, self.tnf_dim :]
         cov_encode = F.normalize(self.coverage_encoder(cov_features), dim=-1)
         fused_input = torch.cat([tnf_features, cov_encode], dim=-1)
         fused_encode = self.fuse_encoder(fused_input)
