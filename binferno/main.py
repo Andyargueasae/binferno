@@ -47,7 +47,7 @@ def binferno(
     cluster_output_dir.mkdir(parents=True, exist_ok=True)
 
     n_genome = clustering(
-        contigs=str(contigs),
+        contigs=contigs,
         embeddings=embeddings,
         output_path=cluster_output_dir,
         threads=threads,
@@ -60,7 +60,7 @@ def binferno(
     results_output_dir.mkdir(parents=True, exist_ok=True)
 
     writer(
-        contigs=str(contigs),
+        contigs=contigs,
         seed_num=n_genome,
         num_threads=threads,
         output_path=output_dir,
