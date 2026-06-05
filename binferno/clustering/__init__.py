@@ -36,11 +36,9 @@ class BinfernoClustering(BaseClustering):
     def __call__(
         self,
         embeddings: pd.DataFrame,
-        seed_file: Path,
         contigs: Path,
         output_path: Path = None,
         contig_len: int = 1000,
-        cluster_num: int = None,
         logger: loguru.logger = None,  # type: ignore
         threads: int = 1,
     ) -> None:

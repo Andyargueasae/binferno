@@ -3,7 +3,7 @@ import shutil
 import tyro
 from binferno.training import BinfernoTrainer
 from binferno.clustering import BinfernoClustering
-from binferno.gen_results import BinfernoWriter
+from binferno.writer import BinfernoWriter
 from binferno.features import BinfernoFeatureBuilder
 from loguru import logger
 

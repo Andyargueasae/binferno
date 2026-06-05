@@ -1,7 +1,7 @@
 from pathlib import Path
 from pydantic import BaseModel
 import loguru
-
+import pandas as pd
 class BaseClustering(BaseModel):
     def __call__(
         self,
