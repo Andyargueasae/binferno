@@ -1,23 +1,27 @@
 from pathlib import Path
 import random
+from collections import OrderedDict
+import os
+
 import torch
 from torch import nn
 import torch.nn.functional as F
 import numpy as np
-from loguru._logger import Logger
 from tqdm import tqdm
 from torch.backends import cudnn
-from .models.simclr import SimCLRNet, EmbeddingNet, NeuralNetwork, EmbNet2
-from .base import BaseTrainer
-from ..features import BinfernoFeatureBuilder
 from pydantic import Field
 import pyfastx
 from torch.amp import GradScaler
-import os
+import loguru
 import pandas as pd
 from typing import Dict, List
-from collections import OrderedDict
+
+
 from ..utils import calc_n50
+from .base import BaseTrainer
+from ..features import BinfernoFeatureBuilder
+from .models.simclr import SimCLRNet, EmbeddingNet, NeuralNetwork, EmbNet2
+from .InfoNCEloss import info_nce_loss, info_nce_loss_hard_weight
 
 KMER_DIM = 136
 
@@ -79,7 +83,6 @@ class SimCLRTrainer(BaseTrainer):
         default=0,
         description="Number of epochs to wait before resuming learning rate scheduling after reaching the maximum learning rate.",
     )
-
     hard_weighted_nce: bool = Field(
         default=False,
         description="Whether to use the hard weighted InfoNCE loss instead of the standard InfoNCE loss. This loss gives more weight to hard negative samples during training.",
@@ -87,6 +90,10 @@ class SimCLRTrainer(BaseTrainer):
     get_individual_embs: bool = Field(
         default=False,
         description="Whether to save individual embeddings for each view separately. If False, only the final embeddings after fusion are saved.",
+    )
+    auxiliary_loss: bool = Field(
+        default=False,
+        description="Whether to include an auxiliary loss on the individual view embeddings in addition to the main InfoNCE loss on the fused embeddings. This can help encourage the model to learn useful representations in each view before fusion.",
     )
 
     def __call__(
@@ -96,7 +103,7 @@ class SimCLRTrainer(BaseTrainer):
         output_dir: Path,
         features: BinfernoFeatureBuilder = None,
         threads: int = 4,
-        logger: Logger = None,
+        logger: loguru._logger.Logger = None,
     ) -> pd.DataFrame:
         """
         Args:
@@ -228,10 +235,7 @@ class SimCLRTrainer(BaseTrainer):
             simclrnet=self.simclrnet,
             contigs=contigs,
             num_workers=threads,
-            **kwargs,
         )
-
-        # train loop.
 
         model_path = output_train_dir / "best_model.pt"
         if model_path.exists():
@@ -278,7 +282,8 @@ class SimCLRTrainer(BaseTrainer):
                 logger=logger,
                 n_cov=cov_dim,
                 output_dir=output_train_dir,
-                **kwargs,
+                auxiliary_loss=self.auxiliary_loss,
+                temperature=temperature,
             )
 
         if self.gated:
@@ -460,206 +465,6 @@ class SimCLRTrainer(BaseTrainer):
 
         return train_loader, optimizer, scheduler, dataset
 
-    class info_nce_loss_hard_weight(nn.Module):
-        def __init__(self, temperature=0.15):
-            super().__init__()
-            self.temperature = temperature
-            self._cache = {}
-
-        def forward(self, features, device, batch_size=1024, n_views=6):
-            """
-            Ultra-fast multi-view InfoNCE loss matching the 'comebin' style.
-            Computes (n_views - 1) independent losses per anchor view against all negatives,
-            leveraging fused mathematical operators and memory-bound optimizations.
-            """
-            total = batch_size * n_views
-            cache_key = (batch_size, n_views, str(device))
-
-            # --- Efficient Persistent Caching ---
-            if cache_key not in self._cache:
-                sample_ids = torch.arange(batch_size, device=device).repeat(n_views)
-
-                # Construct masks for structured extraction
-                pos_mask = sample_ids.unsqueeze(0).eq(sample_ids.unsqueeze(1))
-                diag_mask = torch.eye(total, dtype=torch.bool, device=device)
-                pos_mask_no_diag = pos_mask & ~diag_mask
-
-                # Fast index matrix for gathering positive scores: [total, n_views - 1]
-                pos_indices = pos_mask_no_diag.nonzero()[:, 1].view(total, n_views - 1)
-
-                # Complete negative mask to isolate true negative elements
-                neg_mask = pos_mask
-
-                self._cache[cache_key] = (pos_indices, neg_mask, sample_ids)
-
-            pos_indices, neg_mask, sample_ids = self._cache[cache_key]
-
-            # 1. High-speed Matrix Multiplication
-            features = F.normalize(features, dim=1)
-            sim = torch.matmul(features, features.T) / self.temperature
-
-            # 2. Extract Positives and Flatten: Shape [total * (n_views - 1), 1]
-            # This gathers exactly the 5 positive pairs per row
-            positives = torch.gather(sim, dim=1, index=pos_indices).view(-1, 1)
-
-            # 3. Mask out true positives and self-diagonal targets to isolate negatives
-            negatives_only = sim.masked_fill(neg_mask, float("-inf"))
-
-            # Virtual repetition to pair each row's negatives against each individual positive view
-            # Shape: [total * (n_views - 1), total]
-            negatives_repeated = torch.repeat_interleave(
-                negatives_only, n_views - 1, dim=0
-            )
-
-            # 4. Fused Mathematical Log-Sum-Exp Reduction (Avoids huge torch.cat calls)
-            max_val = torch.clamp(positives, min=0.0)
-            pos_exp = torch.exp(positives - max_val)
-            neg_sum_exp = torch.sum(
-                torch.exp(negatives_repeated - max_val), dim=1, keepdim=True
-            )
-
-            # Final objective calculation matching comebin's multi-view behavior
-            loss = -(positives - max_val - torch.log(pos_exp + neg_sum_exp)).mean()
-
-            # 5. Optimized Metric Computation (Top-1 and Top-5 Accuracy)
-            with torch.no_grad():
-                # Extract pure negative scores across the batch
-                # Shape: [total, total] -> max negative per row: [total, 1]
-                max_negatives = negatives_only.max(dim=1, keepdim=True).values
-                max_negatives_repeated = torch.repeat_interleave(
-                    max_negatives, n_views - 1, dim=0
-                )
-
-                # Top-1: Check if the individual positive view score beats the best negative score
-                top1_acc = (
-                    positives > max_negatives_repeated
-                ).float().mean().item() * 100.0
-
-                # Top-5: Sort or partition the negative space to find the 5th highest negative baseline
-                # topk(5) returns sorted negative tensor of shape [total, 5]. The 5th item (index 4) is our threshold.
-                top5_neg_threshold = torch.topk(negatives_only, k=5, dim=1).values[
-                    :, 4:5
-                ]
-                top5_neg_repeated = torch.repeat_interleave(
-                    top5_neg_threshold, n_views - 1, dim=0
-                )
-
-                # Top-5: True if the positive score beats the 5th highest negative score
-                top5_acc = (positives > top5_neg_repeated).float().mean().item() * 100.0
-
-            return loss, top1_acc, top5_acc
-
-    class info_nce_kmer_loss(nn.Module):
-        def __init__(self, temperature=0.15):
-            super().__init__()
-            self.temperature = temperature
-            self._cache = {}
-
-        def forward(self, features, device, batch_size=1024, n_views=6):
-            # Similar implementation to info_nce_loss but with additional handling for k-mer features.
-            # This is a placeholder for the actual implementation which would depend on how k-mer features are integrated into the model.
-            pass
-
-    class info_nce_cov_loss(nn.Module):
-        def __init__(self, temperature=0.15):
-            super().__init__()
-            self.temperature = temperature
-            self._cache = {}
-
-        def forward(self, features, device, batch_size=1024, n_views=6):
-            # Similar implementation to info_nce_loss but with additional handling for coverage features.
-            # This is a placeholder for the actual implementation which would depend on how coverage features are integrated into the model.
-            pass
-
-    class info_nce_loss(nn.Module):
-        def __init__(self, temperature=0.15):
-            super().__init__()
-            self.temperature = temperature
-            self._cache = {}
-
-        def forward(self, features, device, batch_size=1024, n_views=6):
-            """
-            Ultra-fast multi-view InfoNCE loss matching the 'comebin' style.
-            Computes (n_views - 1) independent losses per anchor view against all negatives,
-            leveraging fused mathematical operators and memory-bound optimizations.
-            """
-            total = batch_size * n_views
-            cache_key = (batch_size, n_views, str(device))
-
-            # --- Efficient Persistent Caching ---
-            if cache_key not in self._cache:
-                sample_ids = torch.arange(batch_size, device=device).repeat(n_views)
-
-                # Construct masks for structured extraction
-                pos_mask = sample_ids.unsqueeze(0).eq(sample_ids.unsqueeze(1))
-                diag_mask = torch.eye(total, dtype=torch.bool, device=device)
-                pos_mask_no_diag = pos_mask & ~diag_mask
-
-                # Fast index matrix for gathering positive scores: [total, n_views - 1]
-                pos_indices = pos_mask_no_diag.nonzero()[:, 1].view(total, n_views - 1)
-
-                # Complete negative mask to isolate true negative elements
-                neg_mask = pos_mask
-
-                self._cache[cache_key] = (pos_indices, neg_mask, sample_ids)
-
-            pos_indices, neg_mask, sample_ids = self._cache[cache_key]
-
-            # 1. High-speed Matrix Multiplication
-            features = F.normalize(features, dim=1)
-            sim = torch.matmul(features, features.T) / self.temperature
-
-            # 2. Extract Positives and Flatten: Shape [total * (n_views - 1), 1]
-            # This gathers exactly the 5 positive pairs per row
-            positives = torch.gather(sim, dim=1, index=pos_indices).view(-1, 1)
-
-            # 3. Mask out true positives and self-diagonal targets to isolate negatives
-            negatives_only = sim.masked_fill(neg_mask, float("-inf"))
-
-            # Virtual repetition to pair each row's negatives against each individual positive view
-            # Shape: [total * (n_views - 1), total]
-            negatives_repeated = torch.repeat_interleave(
-                negatives_only, n_views - 1, dim=0
-            )
-
-            # 4. Fused Mathematical Log-Sum-Exp Reduction (Avoids huge torch.cat calls)
-            max_val = torch.clamp(positives, min=0.0)
-            pos_exp = torch.exp(positives - max_val)
-            neg_sum_exp = torch.sum(
-                torch.exp(negatives_repeated - max_val), dim=1, keepdim=True
-            )
-
-            # Final objective calculation matching comebin's multi-view behavior
-            loss = -(positives - max_val - torch.log(pos_exp + neg_sum_exp)).mean()
-
-            # 5. Optimized Metric Computation (Top-1 and Top-5 Accuracy)
-            with torch.no_grad():
-                # Extract pure negative scores across the batch
-                # Shape: [total, total] -> max negative per row: [total, 1]
-                max_negatives = negatives_only.max(dim=1, keepdim=True).values
-                max_negatives_repeated = torch.repeat_interleave(
-                    max_negatives, n_views - 1, dim=0
-                )
-
-                # Top-1: Check if the individual positive view score beats the best negative score
-                top1_acc = (
-                    positives > max_negatives_repeated
-                ).float().mean().item() * 100.0
-
-                # Top-5: Sort or partition the negative space to find the 5th highest negative baseline
-                # topk(5) returns sorted negative tensor of shape [total, 5]. The 5th item (index 4) is our threshold.
-                top5_neg_threshold = torch.topk(negatives_only, k=5, dim=1).values[
-                    :, 4:5
-                ]
-                top5_neg_repeated = torch.repeat_interleave(
-                    top5_neg_threshold, n_views - 1, dim=0
-                )
-
-                # Top-5: True if the positive score beats the 5th highest negative score
-                top5_acc = (positives > top5_neg_repeated).float().mean().item() * 100.0
-
-            return loss, top1_acc, top5_acc
-
     def accuracy(self, output, target, topk=(1,)):
         """Computes the accuracy over the k top predictions for the specified values of k"""
         with torch.no_grad():
@@ -689,31 +494,25 @@ class SimCLRTrainer(BaseTrainer):
         optimizer: torch.optim.Optimizer,
         scheduler: torch.optim.lr_scheduler._LRScheduler,
         device: torch.device,
+        logger: loguru._logger.Logger,
         method: str = "barlow_twins",
         epochs: int = 300,
         model=None,
         n_cov: int = 0,
         output_dir: Path = None,
-        **kwargs,
+        auxiliary_loss: bool = False,
+        temperature: float = 0.15,
     ):
         self.unify_seeds(
             self.seed
         )  # ensure reproducibility by unifying seeds across random, numpy, and torch.
-        temperature = kwargs.get("temperature", 0.15)
         MODEL_PATH = output_dir / "best_model.pt"
-        logger = kwargs.get("logger", None)
         if logger is None:
             raise ValueError(
                 "Logger is not provided for training. Please provide a logger in the kwargs with key 'logger'."
             )
 
         # Create once so the index cache persists across all epochs
-        if not self.hard_weighted_nce:
-            info_nceloss_fn = self.info_nce_loss(temperature=temperature).to(device)
-        else:
-            info_nceloss_fn = self.info_nce_loss_hard_weight(
-                temperature=temperature
-            ).to(device)
 
         epoch_iter = tqdm(range(epochs), desc="Training Epochs")
         early_stopping = EarlyStoppingManagerSimCLR(patience=15)
@@ -726,7 +525,7 @@ class SimCLRTrainer(BaseTrainer):
                 device=device,
                 temperature=temperature,
                 n_cov=n_cov,
-                info_nceloss_fn=info_nceloss_fn,
+                auxiliary_loss=auxiliary_loss
             )
 
             scheduler.step()
@@ -772,11 +571,16 @@ class SimCLRTrainer(BaseTrainer):
         device,
         temperature=0.15,
         n_cov=0,
-        info_nceloss_fn=None,
-        **kwargs,
+        auxiliary_loss=False,
     ):
-        if info_nceloss_fn is None:
-            info_nceloss_fn = self.info_nce_loss(temperature=temperature).to(device)
+        # get the info nce loss, and see if auxiliary loss is needed.
+        if not self.hard_weighted_nce:
+            info_nceloss_fn = info_nce_loss(temperature=temperature).to(device)
+        else:
+            info_nceloss_fn = info_nce_loss_hard_weight(
+                temperature=temperature
+            ).to(device)
+        
         model.train()
         stats = None
         total_loss = 0.0
@@ -788,13 +592,22 @@ class SimCLRTrainer(BaseTrainer):
             contig_features = torch.cat(features, dim=0).to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
             actual_batch_size = contig_features.shape[0] // self.view_num
-            enc_feature = model.forward_one(contig_features)
+            enc_feature, kmer_emb, cov_emb = model.forward_one(contig_features)
             loss, batch_acc, _ = info_nceloss_fn(
                 enc_feature,
                 batch_size=actual_batch_size,
                 device=device,
                 n_views=self.view_num,
             )
+
+            if auxiliary_loss:
+                L_kmer = 1.0
+                L_cov = 1.0
+                kmer_loss, _, _ = info_nceloss_fn(kmer_emb, batch_size=actual_batch_size,
+                                            device=device, n_views=self.view_num)
+                cov_loss, _, _ = info_nceloss_fn(cov_emb, batch_size=actual_batch_size,
+                                            device=device, n_views=self.view_num)
+                loss = loss + L_kmer * kmer_loss + L_cov * cov_loss
 
             loss.backward()
             optimizer.step()
