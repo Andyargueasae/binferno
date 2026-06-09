@@ -58,8 +58,8 @@ class BinfernoPostprocessor(BasePostprocessor):
 
         res_name = f"weight_seed_kmeans_k_{n_genome}_result.tsv"
 
-        # this is going to rewrite, change to use cluster_result object.
-        bin_dirs = {res_name: glob(str(cluster_res_dir / f"{res_name}_bins" / "*.fa"))}
+        # Dict[str, Tuple[str, str]]: res_name -> (bin_path, suffix)
+        bin_dirs = {res_name: (str(cluster_res_dir / f"{res_name}_bins"), "fa")}
 
         assert not unitem_profile_dir.exists()
         unitem_profile_dir.mkdir(parents=True, exist_ok=False)

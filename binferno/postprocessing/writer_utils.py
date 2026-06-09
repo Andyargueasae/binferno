@@ -356,7 +356,7 @@ class GenomeProfiler:
 
         self._report_genome_quality(genome_quality, output_dir)
 
-    def run(self, bin_dirs, output_dir, skip_existing: bool = True):
+    def run(self, bin_dirs: str, output_dir: str, skip_existing: bool = True):
         """
         Profile bins with bacterial and archaeal marker sets.
         """
@@ -372,7 +372,7 @@ class GenomeProfiler:
             skip_existing=skip_existing,
         )
 
-    def run_pltd(self, bin_dirs, output_dir, skip_existing: bool = True):
+    def run_pltd(self, bin_dirs: str, output_dir: str, skip_existing: bool = True):
         """
         Profile bins with plastid marker set.
         """

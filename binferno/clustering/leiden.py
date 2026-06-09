@@ -100,8 +100,6 @@ class LeidenClustering(BaseClustering):
         mode = f"weight_seed_kmeans"
 
         bin_nums = seed_num
-        bin_nums = sorted(set(bin_nums))
-
         logger.info(f"Bin_numbers:\t{bin_nums}")
         
         kmeans_output = seed_kmeans_full(
@@ -362,7 +360,8 @@ class LeidenClustering(BaseClustering):
         length_weight_path: str,
         bandwidth: float,
         lmode: str,
-        initial_list,
+        initial_list: Optional[List[Union[int, None]]],
+        result_wrapper: ClusterResult,
         is_membership_fixed_path: str,
         resolution_parameter: float,
         partgraph_ratio: int,
@@ -381,6 +380,7 @@ class LeidenClustering(BaseClustering):
             bandwidth=bandwidth,
             lmode=lmode,
             initial_list=initial_list,
+            result_wrapper=result_wrapper,
             is_membership_fixed=is_membership_fixed,
             resolution_parameter=resolution_parameter,
             partgraph_ratio=partgraph_ratio,

@@ -62,9 +62,9 @@ def binferno(
     cluster_output_dir = output_dir / "cluster_res"
     if cluster_output_dir.exists():
         logger.warning(
-            f"Cluster output directory {cluster_output_dir} already exists. It will be overwritten."
+            f"Cluster output directory {cluster_output_dir} already exists."
         )
-        shutil.rmtree(cluster_output_dir)
+        
     cluster_output_dir.mkdir(parents=True, exist_ok=True)
 
     cluster_result = clustering(

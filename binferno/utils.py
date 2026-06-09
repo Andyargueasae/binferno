@@ -122,36 +122,36 @@ def gen_seed(
     if os.path.exists(marker_gene_faa):
         if not (os.path.exists(hmmResultURL)):
             hmmCmd = (
-                hmmExeURL
+                str(hmmExeURL)
                 + " --domtblout "
-                + hmmResultURL
+                + str(hmmResultURL)
                 + " -E 1e-10 --cpu "
                 + str(threads)
                 + " "
-                + markerURL
+                + str(markerURL)
                 + " "
-                + marker_gene_faa
+                + str(marker_gene_faa)
                 + " 1>"
-                + hmmResultURL
+                + str(hmmResultURL)
                 + ".out 2>"
-                + hmmResultURL
+                + str(hmmResultURL)
                 + ".err"
             )
             if marker_name == "pltd_marker":
                 hmmCmd = (
-                    hmmExeURL
+                    str(hmmExeURL)
                     + " --domtblout "
-                    + hmmResultURL
+                    + str(hmmResultURL)
                     + " -E 1e-10 --cpu "
                     + str(threads)
                     + " "
-                    + markerURL
+                    + str(markerURL)
                     + " "
-                    + marker_gene_faa
+                    + str(marker_gene_faa)
                     + " 1>"
-                    + hmmResultURL
+                    + str(hmmResultURL)
                     + ".out 2>"
-                    + hmmResultURL
+                    + str(hmmResultURL)
                     + ".err"
                 )
             logger.info("exec cmd: " + hmmCmd)
@@ -160,15 +160,15 @@ def gen_seed(
         if os.path.exists(hmmResultURL):
             if not (os.path.exists(seedURL)):
                 markerCmd = (
-                    markerExeURL
+                    str(markerExeURL)
                     + " "
-                    + hmmResultURL
+                    + str(hmmResultURL)
                     + " "
-                    + contig_file
+                    + str(contig_file)
                     + " "
                     + str(contig_length_threshold)
                     + " "
-                    + seedURL
+                    + str(seedURL)
                 )
                 logger.info("exec cmd: " + markerCmd)
                 subprocess.run(markerCmd, shell=True, check=True)
@@ -176,14 +176,14 @@ def gen_seed(
             if os.path.exists(seedURL):
                 candK = file_len(seedURL)
             else:
-                logger.info("markerCmd failed! Not exist: " + markerCmd)
+                logger.info("markerCmd failed! Not exist: " + str(seedURL))
                 candK = 0
         else:
-            logger.info("Hmmsearch failed! Not exist: " + hmmResultURL)
+            logger.info("Hmmsearch failed! Not exist: " + str(hmmResultURL))
             os.remove(hmmResultURL)
             sys.exit()
     else:
-        logger.info("FragGeneScan failed! Not exist: " + marker_gene_faa.name)
+        logger.info("FragGeneScan failed! Not exist: " + str(marker_gene_faa))
         os.remove(marker_gene_faa)
         sys.exit()
     return candK
