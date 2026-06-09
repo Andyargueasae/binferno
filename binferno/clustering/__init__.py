@@ -43,22 +43,26 @@ class BinfernoClustering(BaseClustering):
         threads: int = 1,
     ) -> None:
         if self.use_leiden:
-            self.leiden(
+            n_genome = self.leiden(
                 contigs=contigs,
                 output_path=output_path,
                 embeddings=embeddings,
                 logger=logger,
                 threads=threads,
                 contig_len=contig_len,
+                plastid=self.plastid,
+                dimension_reduction=self.dimension_reduction,
             )
         elif self.use_DBSCAN:
-            self.dbscan(
+            n_genome = self.dbscan(
                 contigs=contigs,
                 output_path=output_path,
                 embeddings=embeddings,
                 logger=logger,
                 threads=threads,
                 contig_len=contig_len,
+                plastid=self.plastid,
+                dimension_reduction=self.dimension_reduction,
             )
-        return
+        return n_genome
 

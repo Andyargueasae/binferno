@@ -100,18 +100,14 @@ class NeuralNetwork(nn.Module):
     def _encode(self, x):
         # encode tnf and coverage features separately, then fuse them together.
         tnf_features = x[:, : self.tnf_enc_dim]
-        tnf_encode = F.normalize(
-            self.tnf_encoder(tnf_features), dim=-1
-        )  # 128, not normalized.
+        tnf_encode = self.tnf_encoder(tnf_features)
         cov_features = x[:, self.tnf_enc_dim :]
-        cov_encode = F.normalize(
-            self.coverage_encoder(cov_features), dim=-1
-        )  # 128, not normalized.
+        cov_encode = self.coverage_encoder(cov_features)
         fused_encode = self.fusion_network(tnf_encode, cov_encode)  # 128
-        return fused_encode
+        return fused_encode, tnf_encode, cov_encode
 
     def get_embedding(self, x):
-        return self._encode(x)
+        return self._encode(x)[0]
 
     def get_separate_modality_embs(self, x):
         kmer_features = x[:, : self.tnf_enc_dim]
@@ -121,14 +117,14 @@ class NeuralNetwork(nn.Module):
         return kmer_encoded, coverage_encoded
 
     def forward_one(self, x):
-        fused_emb = self._encode(x)
+        fused_emb, tnf_emb, cov_emb = self._encode(x)
         proj_emb = self.proj_head(fused_emb)  # 512
-        return proj_emb
+        return proj_emb, tnf_emb, cov_emb
 
     def forward(self, x1, x2):
-        z1 = self.forward_one(x1)
-        z2 = self.forward_one(x2)
-        return z1, z2
+        z1,kmer_z1,cov_z1 = self.forward_one(x1)
+        z2,kmer_z2,cov_z2 = self.forward_one(x2)
+        return z1, z2, kmer_z1, kmer_z2, cov_z1, cov_z2
 
 
 # Then our model got an attention-based fusion network.

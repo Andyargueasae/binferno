@@ -1,9 +1,11 @@
 import hashlib
 import itertools
 import os
+from collections import OrderedDict
+from pathlib import Path
+
 from typing import Dict
 from pydantic import Field
-from loguru._logger import Logger
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -14,13 +16,12 @@ import numpy as np
 import random
 import pandas as pd
 from tqdm import tqdm
-from pathlib import Path
+import pyfastx
+import loguru
+
 from .models.barlow_twins import NeuralNetwork
 from ..features import BinfernoFeatureBuilder
 from .base import BaseTrainer
-import pyfastx
-from collections import OrderedDict
-
 
 class BarlowTwinsTrainer(BaseTrainer):
 
@@ -54,6 +55,10 @@ class BarlowTwinsTrainer(BaseTrainer):
         default=False,
         description="Whether to save individual embeddings for each view separately. If False, only the final embeddings after fusion are saved.",
     )
+    auxiliary_loss: bool = Field(
+        default=False,
+        description="Whether to include an auxiliary loss term that encourages the model to produce similar embeddings for the original and augmented views of the same contig. This can help improve the quality of the learned embeddings by providing an additional training signal that reinforces the relationship between the original and augmented data.",
+    )
 
     def __call__(
         self,
@@ -62,7 +67,7 @@ class BarlowTwinsTrainer(BaseTrainer):
         output_dir: Path,
         features: BinfernoFeatureBuilder = None,
         threads: int = 4,
-        logger: Logger = None,
+        logger: loguru._logger.Logger = None,
     ) -> pd.DataFrame:
         """
         Args:
@@ -99,7 +104,6 @@ class BarlowTwinsTrainer(BaseTrainer):
             threads=threads,
             logger=logger,
             output_dir=output_aug_dir,
-            # multisample=multisample
         )
 
         if isinstance(feature_result, tuple):
@@ -163,6 +167,7 @@ class BarlowTwinsTrainer(BaseTrainer):
                 model=model,
                 output_dir=output_train_dir,
                 logger=logger,
+                auxiliary_loss=self.auxiliary_loss,
             )
         else:
             logger.info(
@@ -231,11 +236,6 @@ class BarlowTwinsTrainer(BaseTrainer):
                 (diag - 1.0).pow(2).sum()
             )  # this is the invariance loss, which encourages the diagonal elements of the correlation matrix to be close to 1, meaning that the corresponding features in the two views are highly correlated.
 
-            # off_diag_mask = ~torch.eye(D, dtype=torch.bool, device=feature1.device)
-            # redundancy_loss = (
-            #     C[off_diag_mask].pow(2).sum()
-            # )  # off diagonal elements of the correlation matrix to be close to 0, meaning that different features are decorrelated and carry unique information.
-
             redundancy_loss = loss_matrix.sum() - torch.diagonal(loss_matrix).sum()
             loss = self.alpha * invariance_loss + self.lambda_bt * redundancy_loss
 
@@ -267,6 +267,40 @@ class BarlowTwinsTrainer(BaseTrainer):
                     }
                 return loss, stats
 
+            return loss
+    
+    class modality_BT_loss(nn.Module):
+        def __init__(self, lambda_bt=5e-3, alpha=1.0, eps=1e-6):
+            super().__init__()
+            self.lambda_bt = lambda_bt  # lambda barlow twins tunes the importance of the redundancy reduction term relative to the invariance term. A higher lambda_bt encourages the model to produce more decorrelated features, while a lower lambda_bt allows for more redundancy in the features.
+            self.alpha = alpha  # alpha tunes the importance of the invariance loss relative to the redundancy loss. A higher alpha emphasizes the importance of making the diagonal elements of the correlation matrix close to 1, while a lower alpha allows for more flexibility in the diagonal elements.
+            self.eps = eps
+            self._cache = {}
+
+        def forward(self, feature1, feature2):
+            N, D = feature1.size()
+            device = feature1.device
+            cache_key = (D, str(device))
+            if cache_key not in self._cache:
+                self._cache[cache_key] = torch.eye(D, device=device)
+
+            z1 = (feature1 - feature1.mean(dim=0)) / (
+                feature1.std(dim=0, unbiased=False) + self.eps
+            )
+            z2 = (feature2 - feature2.mean(dim=0)) / (
+                feature2.std(dim=0, unbiased=False) + self.eps
+            )
+
+            C = torch.mm(z1.T, z2) / N
+
+            loss_matrix = C.pow(2)
+            diag = torch.diagonal(C)
+            invariance_loss = (
+                (diag - 1.0).pow(2).sum()
+            )
+
+            redundancy_loss = loss_matrix.sum() - torch.diagonal(loss_matrix).sum()
+            loss = self.alpha * invariance_loss + self.lambda_bt * redundancy_loss
             return loss
 
     class BuildDataset:
@@ -472,8 +506,8 @@ class BarlowTwinsTrainer(BaseTrainer):
         epochs: int = 300,
         model=None,
         output_dir: Path = None,
-        logger=None,
-        **kwargs,
+        auxiliary_loss=False,
+        logger=loguru._logger.Logger,
     ):
         self.unify_seeds(
             self.seed
@@ -489,7 +523,8 @@ class BarlowTwinsTrainer(BaseTrainer):
         for epoch in epoch_iter:
 
             avg_loss, stats = self.train_an_epoch(
-                model=model, dataloader=dataloader, optimizer=optimizer, device=device
+                model=model, dataloader=dataloader, optimizer=optimizer, 
+                device=device, auxiliary_loss=auxiliary_loss,
             )
 
             scheduler.step()
@@ -523,8 +558,10 @@ class BarlowTwinsTrainer(BaseTrainer):
 
         return model
 
-    def train_an_epoch(self, model, dataloader, optimizer, device):
+    def train_an_epoch(self, model, dataloader, optimizer, device, auxiliary_loss=False):
         criterion = self.BT_loss(lambda_bt=5e-3, alpha=1.0).to(device)
+        # if using kmer or coverage. 
+        auxiliary_criterion = self.modality_BT_loss(lambda_bt=5e-3, alpha=1.0).to(device)
         model.train()
         total_loss = 0.0
         stats = None
@@ -536,17 +573,27 @@ class BarlowTwinsTrainer(BaseTrainer):
 
             optimizer.zero_grad(set_to_none=True)
 
-            output1, output2 = model(features1, features2)
+            output1, output2, kmer_z1, kmer_z2, cov_z1, cov_z2 = model(features1, features2)
 
             last_batch = batch_i == len(dataloader) - 1
 
+            # fused_embedding derived loss. 
             if last_batch:
-                loss, stats = criterion(
+                fuse_loss, stats = criterion(
                     feature1=output1, feature2=output2, return_stats=True
                 )
 
             else:
-                loss = criterion(feature1=output1, feature2=output2)
+                fuse_loss = criterion(feature1=output1, feature2=output2)
+
+            if auxiliary_loss:
+                L_kmer = 1.0
+                L_cov = 1.0
+                aux_loss_kmer = auxiliary_criterion(feature1=kmer_z1, feature2=kmer_z2)
+                aux_loss_cov = auxiliary_criterion(feature1=cov_z1, feature2=cov_z2)
+                loss = fuse_loss + L_kmer * aux_loss_kmer + L_cov * aux_loss_cov
+            else:
+                loss = fuse_loss
 
             loss.backward()
 
@@ -555,7 +602,7 @@ class BarlowTwinsTrainer(BaseTrainer):
             )  # prevent the exploding gradient.
 
             optimizer.step()
-            total_loss += loss.item()  # sum loss.
+            total_loss += fuse_loss.item()  # sum loss.
 
         avg_loss = total_loss / len(dataloader)
         return avg_loss, stats

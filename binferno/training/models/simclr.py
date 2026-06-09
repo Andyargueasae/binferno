@@ -93,10 +93,10 @@ class NeuralNetwork(nn.Module):
         cov_features = x[:, self.tnf_enc_dim :]
         cov_encode = self.coverage_encoder(cov_features)  # not normalized anymore.
         fused_encode = self.fusion_network(tnf_encode, cov_encode)
-        return fused_encode
+        return fused_encode, tnf_encode, cov_encode
 
     def get_embedding(self, x):
-        return self._encode(x)
+        return self._encode(x)[0]
 
     def get_separate_modality_embs(self, x):
         kmer_features = x[:, : self.tnf_enc_dim]
@@ -106,13 +106,13 @@ class NeuralNetwork(nn.Module):
         return kmer_encoded, coverage_encoded
 
     def forward_one(self, x):
-        fused_emb = self._encode(x)
+        fused_emb, tnf_emb, cov_emb = self._encode(x)
         proj_emb = self.proj_head(fused_emb)  # 512
-        return proj_emb
+        return proj_emb, tnf_emb, cov_emb
 
     def forward(self, x1, x2):
-        z1 = self.forward_one(x1)
-        z2 = self.forward_one(x2)
+        z1,_,_ = self.forward_one(x1)
+        z2,_,_ = self.forward_one(x2)
         return z1, z2
 
 

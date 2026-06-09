@@ -2,6 +2,7 @@ from pathlib import Path
 
 from pydantic import Field
 import pandas as pd 
+import loguru
 
 from .base import BaseClustering
 

@@ -32,9 +32,11 @@ class LeidenClustering(BaseClustering):
         logger: loguru._logger.Logger,
         threads: int=1,
         contig_len: int = 1000,
+        plastid: bool = False,
+        dimension_reduction: bool = False,
     ) -> None:
         np.random.seed(42)
-        if self.plastid:
+        if plastid:
             n_genome = gen_seed(
                 logger,
                 contig_file=str(contigs),
@@ -86,7 +88,7 @@ class LeidenClustering(BaseClustering):
         norm_embeddings = normalize(emb_mat).astype(np.float32, copy=False)
 
         # check if to apply dimension reduction.
-        if self.dimension_reduction:
+        if dimension_reduction:
             norm_embeddings = apply_dimension_reduction(norm_embeddings)
 
         seed_num = _read_seed_count(seed_file)
@@ -139,7 +141,7 @@ class LeidenClustering(BaseClustering):
         # after the last two runs, update clustering. Also, debug the "both" mode, and add-corgi mode.
         with mp.Pool(processes=num_workers) as pool:
             for max_edges in max_edges_list:
-                index = self.leiden.fit_hnsw_index(
+                index = self.fit_hnsw_index(
                     logger=logger,
                     features=norm_embeddings,
                     num_threads=num_workers,
@@ -177,7 +179,7 @@ class LeidenClustering(BaseClustering):
                         continue
 
                     job = pool.apply_async(
-                        self.leiden.run_leiden_memmap,
+                        self.run_leiden_memmap,
                         kwds={
                             "output_file": str(output_file),
                             "namelist": namelist,

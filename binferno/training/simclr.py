@@ -521,7 +521,6 @@ class SimCLRTrainer(BaseTrainer):
                 model=model,
                 dataloader=dataloader,
                 optimizer=optimizer,
-                scheduler=scheduler,
                 device=device,
                 temperature=temperature,
                 n_cov=n_cov,

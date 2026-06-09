@@ -140,12 +140,11 @@ def seed_kmeans_full(
     km.fit(X_mat, sample_weight=length_weight)
 
     save_result(km.labels_, output_tsv, namelist)
-    gen_bins(contig_file, output_tsv, f"{output_tsv}_bins")
+    gen_bins(str(contig_file), output_tsv, f"{output_tsv}_bins")
 
     logger.info(f"Weighted seed-kmeans time:\t{time() - start:.3f}s")
 
 def partial_seed_init(
-    self,
     X,
     n_clusters: int,
     random_state,
@@ -236,7 +235,7 @@ def partial_seed_init(
 
     return centers
 
-def apply_dimension_reduction(self, X: np.ndarray) -> np.ndarray:
+def apply_dimension_reduction(X: np.ndarray) -> np.ndarray:
     """
     Apply dimension reduction to the input features.
     Placeholder for actual dimension reduction method (e.g., PCA, UMAP and SUDE).
@@ -244,22 +243,21 @@ def apply_dimension_reduction(self, X: np.ndarray) -> np.ndarray:
 
     return X
 
-def file_len(self, fname):
+def file_len(fname):
     with open(fname) as f:
         for i, l in enumerate(f):
             pass
     return i + 1
 
-def save_result(self, result, filepath, namelist):
+def save_result(result, filepath, namelist):
     filedir, filename = os.path.split(filepath)
     if not filename:
         filename = "result.tsv"
-    if not os.path.exists(filedir):
+    if filedir and not os.path.exists(filedir):
         os.makedirs(filedir)
-    f = open(filepath, "w")
-    for contigIdx in range(len(result)):
-        f.write(namelist[contigIdx] + "\t" + str(result[contigIdx].item(0)) + "\n")
-    f.close()
+    with open(filepath, "w") as f:
+        for contigIdx in range(len(result)):
+            f.write(namelist[contigIdx] + "\t" + str(int(result[contigIdx])) + "\n")
 
 def gen_bins(fastafile, resultfile, outputdir):
     # read fasta file

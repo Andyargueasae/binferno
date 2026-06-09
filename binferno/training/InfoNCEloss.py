@@ -91,18 +91,6 @@ class info_nce_loss_hard_weight(nn.Module):
 
         return loss, top1_acc, top5_acc
 
-# class modality_info_nce_loss(nn.Module):
-#     def __init__(self, temperature=0.15):
-#         super().__init__()
-#         self.temperature = temperature
-#         self._cache = {}
-
-#     # the features is modality-specific: by having kmer-only encoded features or coverage-only encoded features. 
-#     def forward(self, features, device, batch_size=1024, n_views=6):
-#         # Similar implementation to info_nce_loss but with additional handling for k-mer features.
-#         # This is a placeholder for the actual implementation which would depend on how k-mer features are integrated into the model.
-#         pass
-
 class info_nce_loss(nn.Module):
     def __init__(self, temperature=0.15):
         super().__init__()

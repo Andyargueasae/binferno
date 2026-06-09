@@ -6,6 +6,7 @@ from pydantic import BaseModel
 import pandas as pd
 from pathlib import Path
 import torch
+import torch.nn.functional as F
 from loguru._logger import Logger
 
 from ..features import BinfernoFeatureBuilder
@@ -159,7 +160,7 @@ class BaseTrainer(BaseModel):
                 ).to(device)
 
                 batch_embeddings = model.get_embedding(batch_features)
-                batch_embeddings = torch.nn.functional.normalize(
+                batch_embeddings = F.normalize(
                     batch_embeddings, p=2, dim=1
                 )
                 for j, header in enumerate(batch_encode.index):
