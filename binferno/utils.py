@@ -72,8 +72,8 @@ def file_len(fname):
 
 def gen_seed(
     logger,
-    contig_file: str,
-    output_dir: str,
+    contig_file: Path,
+    output_dir: Path,
     threads: int,
     contig_length_threshold: int,
     marker_name: str = "marker",
@@ -92,44 +92,28 @@ def gen_seed(
     fragScanURL = "run_FragGeneScan.pl"
 
     hmmExeURL = "hmmsearch"
-    markerExeURL = os.path.join(
-        os.path.dirname(__file__), "auxiliary", "test_getmarker_" + quarter + ".pl"
-    )
-    markerURL = os.path.join(
-        os.path.dirname(__file__), "auxiliary", marker_name + ".hmm"
-    )
+    # rewrite to Path.
+    markerExeURL = Path(__file__).parent / "auxiliary" / f"test_getmarker_{quarter}.pl"
+    markerURL = Path(__file__).parent / "auxiliary" / f"{marker_name}.hmm"
 
-    fragResult_prefix = os.path.join(
-        output_dir, os.path.basename(contig_file) + ".frag"
-    )
-    hmmResultURL = os.path.join(
-        output_dir, os.path.basename(contig_file) + "." + marker_name + ".hmmout"
-    )
-    seedURL = os.path.join(
-        output_dir,
-        os.path.basename(contig_file)
-        + "."
-        + marker_name
-        + "."
-        + quarter
-        + "_lencutoff_"
-        + str(contig_length_threshold)
-        + ".seed",
-    )
-    marker_gene_faa = f"{fragResult_prefix}.faa"
+    fragResult_prefix = output_dir / (contig_file.name + ".frag")
+    hmmResultURL = output_dir / (contig_file.name + "." + marker_name + ".hmmout")
+    seedURL = output_dir / (contig_file.name + "." + marker_name + "." + quarter + "_lencutoff_" + str(contig_length_threshold) + ".seed")
+    marker_gene_faa = output_dir / (contig_file.name + ".frag.faa")
+    
     if not (os.path.exists(marker_gene_faa)):
         fragCmd = (
             fragScanURL
             + " -genome="
-            + contig_file
+            + str(contig_file)
             + " -out="
-            + fragResult_prefix
+            + str(fragResult_prefix)
             + " -complete=0 -train=complete -thread="
             + str(threads)
             + " 1>"
-            + fragResult_prefix
+            + str(fragResult_prefix)
             + ".out 2>"
-            + fragResult_prefix
+            + str(fragResult_prefix)
             + ".err"
         )
         logger.info("exec cmd: " + fragCmd)
@@ -199,7 +183,7 @@ def gen_seed(
             os.remove(hmmResultURL)
             sys.exit()
     else:
-        logger.info("FragGeneScan failed! Not exist: " + marker_gene_faa)
+        logger.info("FragGeneScan failed! Not exist: " + marker_gene_faa.name)
         os.remove(marker_gene_faa)
         sys.exit()
     return candK

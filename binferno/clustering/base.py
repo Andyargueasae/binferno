@@ -1,18 +1,34 @@
 from pathlib import Path
-from pydantic import BaseModel
+from typing import Dict, List
+from pydantic import BaseModel, Field
 import loguru
 import pandas as pd
+from dataclasses import dataclass
+
+# make this a data object to store clustering results, including cluster assignments and other relevant information.
+
+@dataclass
+class ClusterResult:
+    kmeans_clusters: Dict[str, pd.DataFrame]
+    leiden_cluster_assignments: Dict[str, pd.DataFrame]
+    n_genome: int
+
+
 class BaseClustering(BaseModel):
+    contig_len: int = 1000 # minimum contig length to consider for clustering, default 1000 bp.
+    dimension_reduction: bool = Field(
+        default=False,
+        description="Whether to perform dimension reduction before clustering."
+        "Used only if training.concat is set to True and the dimension of embeddings > 128.",
+    )
     def __call__(
         self,
-        embeddings: pd.DataFrame,
-        seed_file: Path,
         contigs: Path,
         output_path: Path,
-        contig_len: int = 1000,
-        cluster_num: int = None,
-        threads: int = 1,
-        logger: loguru._logger.Logger = None,
-    ) -> None:
+        embeddings: pd.DataFrame,
+        logger: loguru._logger.Logger,
+        threads: int=1,
+        plastid: bool = False,
+    ) -> ClusterResult:
         raise NotImplementedError("Subclasses must implement __call__ method.")
 

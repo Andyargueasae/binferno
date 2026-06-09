@@ -14,7 +14,7 @@ import loguru
 import multiprocessing as mp
 
 from ..utils import gen_seed, calc_n50
-from .base import BaseClustering
+from .base import BaseClustering, ClusterResult
 from .cluster_utils import (
     _filter_embeddings_by_length,
     seed_kmeans_full,
@@ -23,7 +23,10 @@ from .cluster_utils import (
     apply_dimension_reduction
 )
 
+
 class LeidenClustering(BaseClustering):
+    seed:int = 42
+
     def __call__(
         self,
         contigs: Path,
@@ -31,39 +34,41 @@ class LeidenClustering(BaseClustering):
         embeddings: pd.DataFrame,
         logger: loguru._logger.Logger,
         threads: int=1,
-        contig_len: int = 1000,
         plastid: bool = False,
-        dimension_reduction: bool = False,
-    ) -> None:
-        np.random.seed(42)
+    ) -> ClusterResult:
+        np.random.seed(self.seed)
+
+        result = ClusterResult(
+            kmeans_clusters=[],
+            leiden_cluster_assignments={},
+            n_genome=0,
+        ) # instantiate an empty ClusterResult to store results and return at the end.
+
         if plastid:
             n_genome = gen_seed(
                 logger,
-                contig_file=str(contigs),
-                output_dir=str(output_path),
+                contig_file=contigs,
+                output_dir=output_path,
                 threads=threads,
                 contig_length_threshold=1001,
                 marker_name="pltd_marker",
                 quarter="2quarter",
             )
-            seed_file = os.path.join(
-                output_path,
-                f"{os.path.basename(str(contigs))}.pltd_marker.2quarter_lencutoff_1001.seed",
-            )
+            seed_file = output_path / f"{contigs.name}.pltd_marker.2quarter_lencutoff_1001.seed"
         else:
             n_genome = gen_seed(
                 logger,
-                contig_file=str(contigs),
-                output_dir=str(output_path),
+                contig_file=contigs,
+                output_dir=output_path,
                 threads=threads,
                 contig_length_threshold=1001,
                 marker_name="bacar_marker",
                 quarter="2quarter",
             )
-            seed_file = os.path.join(
-                output_path,
-                f"{os.path.basename(str(contigs))}.bacar_marker.2quarter_lencutoff_1001.seed",
-            )
+            seed_file = output_path / f"{contigs.name}.bacar_marker.2quarter_lencutoff_1001.seed"
+
+        result.n_genome = n_genome
+
         if embeddings is None or embeddings.empty:
             raise ValueError("embeddings must be a non-empty DataFrame")
         if seed_file is None or contigs is None or output_path is None:
@@ -76,7 +81,7 @@ class LeidenClustering(BaseClustering):
         emb_mat, namelist, length_weight = _filter_embeddings_by_length(
             emb_df=embeddings,
             contig_file=contigs,
-            contig_len=contig_len,
+            contig_len=self.contig_len,
         )
 
         if len(namelist) == 0:
@@ -88,30 +93,29 @@ class LeidenClustering(BaseClustering):
         norm_embeddings = normalize(emb_mat).astype(np.float32, copy=False)
 
         # check if to apply dimension reduction.
-        if dimension_reduction:
+        if self.dimension_reduction:
             norm_embeddings = apply_dimension_reduction(norm_embeddings)
 
         seed_num = _read_seed_count(seed_file)
         mode = f"weight_seed_kmeans"
 
-        bin_nums = [seed_num]
+        bin_nums = seed_num
         bin_nums = sorted(set(bin_nums))
 
         logger.info(f"Bin_numbers:\t{bin_nums}")
-
-        logger.info(f"Bin_numbers:\t{bin_nums}")
-        for k in bin_nums:
-            seed_kmeans_full(
-                logger=logger,
-                contig_file=contigs,
-                namelist=namelist,
-                out_path=str(output_path) + os.sep,
-                X_mat=norm_embeddings,
-                bin_number=k,
-                prefix=mode,
-                length_weight=length_weight,
-                seed_file=seed_file,
-            )
+        
+        kmeans_output = seed_kmeans_full(
+            logger=logger,
+            contig_file=contigs,
+            namelist=namelist,
+            out_path=str(output_path) + os.sep,
+            X_mat=norm_embeddings,
+            bin_number=bin_nums,
+            prefix=mode,
+            length_weight=length_weight,
+            seed_file=seed_file,
+        )
+        result.kmeans_clusters = kmeans_output
 
         num_workers = max(1, int(threads or 1))
 
@@ -181,13 +185,14 @@ class LeidenClustering(BaseClustering):
                     job = pool.apply_async(
                         self.run_leiden_memmap,
                         kwds={
-                            "output_file": str(output_file),
+                            "output_file": output_file,
                             "namelist": namelist,
                             "neighbor_path": str(neighbor_path),
                             "distance_path": str(distance_path),
                             "length_weight_path": str(length_weight_path),
                             "bandwidth": bandwidth,
                             "lmode": "l2",
+                            "result_wrapper": result,
                             "initial_list": initial_list,
                             "is_membership_fixed_path": str(fixed_path),
                             "resolution_parameter": resolution,
@@ -198,15 +203,16 @@ class LeidenClustering(BaseClustering):
 
             for job in jobs:
                 job.get()
-        return n_genome
+        return result
     
     def run_leiden(
         self,
-        output_file: str,
+        output_file: Path,
         namelist: Sequence[str],
         ann_neighbor_indices: np.ndarray,
         ann_distances: np.ndarray,
         length_weight: Sequence[float],
+        result_wrapper: ClusterResult,
         bandwidth: float = 0.1,
         lmode: str = "l2",
         initial_list: Optional[List[Union[int, None]]] = None,
@@ -257,7 +263,10 @@ class LeidenClustering(BaseClustering):
             for contig_name in namelist:
                 handle.write(f"{contig_name}\t{assignments[contig_name]}\n")
 
-        return
+        df = pd.DataFrame.from_dict(assignments, orient="index", columns=["cluster"])
+        df.reset_index(inplace=True)
+        df.rename(columns={"index": "contig_id", "cluster": "cluster_id"}, inplace=True)
+        result_wrapper.leiden_cluster_assignments[output_file.name] = df
 
     def _prepare_leiden_edges(
         self,
@@ -346,7 +355,7 @@ class LeidenClustering(BaseClustering):
 
     def run_leiden_memmap(
         self,
-        output_file: str,
+        output_file: Path,
         namelist: Sequence[str],
         neighbor_path: str,
         distance_path: str,

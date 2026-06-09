@@ -1,23 +1,44 @@
 from pathlib import Path
 import shutil
+
 import tyro
+from typing_extensions import Annotated
+from loguru import logger
+
 from binferno.training import BinfernoTrainer
 from binferno.clustering import BinfernoClustering
-from binferno.writer import BinfernoWriter
+from binferno.postprocessing import BinfernoPostprocessor
 from binferno.features import BinfernoFeatureBuilder
-from loguru import logger
 
 
 def binferno(
+    # Input contigs in fasta format.
     contigs: Path,
+    # Input bam file for the contigs, used for coverage estimation.
     bam: Path,
+    # Output directory to store all results, including intermediate results and final bins.
     output_dir: Path,
+    
     features: BinfernoFeatureBuilder,
     training: BinfernoTrainer,
     clustering: BinfernoClustering,
-    writer: BinfernoWriter,
-    threads: int = 4,
-    train_only: bool = False,  # True: only run training, False: full process.
+    postprocessor: BinfernoPostprocessor,
+    threads: Annotated[
+        int,
+        tyro.conf.arg(
+            name="threads",
+            metavar="THREADS", 
+            help="Number of threads to use for parallel processing."),
+    ] = 4,
+    train_only: Annotated[
+        bool,
+        tyro.conf.arg(
+            name="train_only",
+            metavar="TRAIN_ONLY",
+            help="True: only run training, False: full process.",
+        ),
+    ] = False,
+
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     logger.add(f"{output_dir}/binferno.log", rotation="1 MB", retention="10 days")
@@ -46,7 +67,7 @@ def binferno(
         shutil.rmtree(cluster_output_dir)
     cluster_output_dir.mkdir(parents=True, exist_ok=True)
 
-    n_genome = clustering(
+    cluster_result = clustering(
         contigs=contigs,
         embeddings=embeddings,
         output_path=cluster_output_dir,
@@ -54,14 +75,18 @@ def binferno(
         logger=logger,
     )
 
+    with open(cluster_output_dir / "cluster_results.pkl", "wb") as f:
+        import pickle
+        pickle.dump(cluster_result, f)
+
     # Run Output results generation
     logger.info("Start writing results.")
     results_output_dir = output_dir / "res_bins"
     results_output_dir.mkdir(parents=True, exist_ok=True)
 
-    writer(
+    postprocessor(
         contigs=contigs,
-        seed_num=n_genome,
+        cluster_result=cluster_result,
         num_threads=threads,
         output_path=output_dir,
         plastid=clustering.plastid,

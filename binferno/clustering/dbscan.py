@@ -1,10 +1,19 @@
+import os
 from pathlib import Path
+from collections import defaultdict
 
-from pydantic import Field
 import pandas as pd 
 import loguru
+import numpy as np
+from sklearn.preprocessing import normalize
+from sklearn.cluster import DBSCAN, Birch
+from sklearn.neighbors import kneighbors_graph
 
-from .base import BaseClustering
+from .base import BaseClustering, ClusterResult
+from ..utils import gen_seed
+from .cluster_utils import (
+    _filter_embeddings_by_length,
+)
 
 
 class DbscanClustering(BaseClustering):
@@ -15,7 +24,284 @@ class DbscanClustering(BaseClustering):
         embeddings: pd.DataFrame,
         logger: loguru._logger.Logger,
         threads: int=1,
-        contig_len: int = 1000,
-    ) -> None:
+        plastid: bool = False,
+    ) -> ClusterResult:
+        
+        result = ClusterResult(
+            kmeans_clusters=[],
+            leiden_cluster_assignments={},
+            n_genome=0,
+        )
 
-        raise NotImplementedError("DBSCAN clustering is not yet implemented.")
+        if plastid:
+            n_genome = gen_seed(
+                logger,
+                contig_file=str(contigs),
+                output_dir=str(output_path),
+                threads=threads,
+                contig_length_threshold=1001,
+                marker_name="pltd_marker",
+                quarter="2quarter",
+            )
+            seed_file = os.path.join(
+                output_path,
+                f"{os.path.basename(str(contigs))}.pltd_marker.2quarter_lencutoff_1001.seed",
+            )
+        else:
+            n_genome = gen_seed(
+                logger,
+                contig_file=str(contigs),
+                output_dir=str(output_path),
+                threads=threads,
+                contig_length_threshold=1001,
+                marker_name="bacar_marker",
+                quarter="2quarter",
+            )
+            seed_file = os.path.join(
+                output_path,
+                f"{os.path.basename(str(contigs))}.bacar_marker.2quarter_lencutoff_1001.seed",
+            )
+
+        result.n_genome = n_genome
+
+        if embeddings is None or embeddings.empty:
+            raise ValueError("embeddings must be a non-empty DataFrame")
+        if seed_file is None or contigs is None or output_path is None:
+            raise ValueError("seed_file, contigs, and output_path are required")
+
+        logger.info("Start clustering.")
+
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        emb_mat, namelist, length_weight = _filter_embeddings_by_length(
+            emb_df=embeddings,
+            contig_file=contigs,
+            contig_len=self.contig_len,
+        )
+
+        logger.info(f"Contigs retained after length filter: {len(namelist)}")
+
+        norm_embeddings = normalize(emb_mat).astype(np.float32, copy=False)
+
+        # your part to run these things. 
+        return result
+
+# ---------- marker-based quality ----------
+
+def completeness_contamination(counts, n_scgs):
+    n_total = counts.sum()
+    n_unique = (counts > 0).sum()
+    return n_unique / n_scgs, (n_total - n_unique) / n_scgs
+
+
+def count_markers_saturated(contig_indices, contig_to_markers, namelist, n_scgs):
+    """Count SCGs in a bin; bail early once hopelessly contaminated."""
+    counts = np.zeros(n_scgs, dtype=np.int32)
+    n_markers = n_unique = 0
+    max_dup = n_scgs  # contamination == 1.0
+    for ci in contig_indices:
+        for gene_id in contig_to_markers[namelist[ci]]:
+            existing = counts[gene_id]
+            n_unique += existing == 0
+            counts[gene_id] = existing + 1
+            n_markers += 1
+            if (n_markers - n_unique) > max_dup:
+                return None
+    return counts
+
+
+# ---------- two scoring paths ----------
+
+def score_count(bins, contig_to_markers, namelist, n_scgs,
+                min_completeness=0.75, max_contamination=0.30):
+    """PATH A: hard count of near-complete, low-contamination bins."""
+    good = 0
+    for b in bins:
+        counts = count_markers_saturated(b, contig_to_markers, namelist, n_scgs)
+        if counts is None:
+            continue
+        comp, cont = completeness_contamination(counts, n_scgs)
+        if comp >= min_completeness and cont <= max_contamination:
+            good += 1
+    return float(good)
+
+
+def score_smooth(bins, contig_to_markers, namelist, n_scgs,
+                 lam=1.0, min_completeness=0.50):
+    """PATH B: sum of (completeness - lam*contamination) over qualifying bins.
+
+    Smoother than the hard count: no 0.75/0.30 cliff. A loose
+    min_completeness gate keeps junk bins from contributing noise, but
+    the reward scales continuously so the sweep won't over-split just to
+    manufacture more bins that barely clear a threshold.
+    """
+    total = 0.0
+    for b in bins:
+        counts = count_markers_saturated(b, contig_to_markers, namelist, n_scgs)
+        if counts is None:
+            continue
+        comp, cont = completeness_contamination(counts, n_scgs)
+        if comp >= min_completeness:
+            total += comp - lam * cont
+    return total
+
+
+# ---------- sparse kNN graph + eps grid ----------
+
+def build_knn_graph(latent, k=None, metric="cosine", n_jobs=-1):
+    N = latent.shape[0]
+    k = k or min(200, N - 1)
+    return kneighbors_graph(latent, n_neighbors=k, mode="distance",
+                            metric=metric, n_jobs=n_jobs)
+
+
+def derive_eps_grid(graph, n_points, k_steps=range(1, 80), extra=(0.12, 0.15, 0.2)):
+    data = graph.data
+    eps = []
+    for k in k_steps:
+        idx = n_points * k - 1
+        if idx >= len(data):
+            break
+        v = np.partition(data, idx)[idx]
+        eps.append(round(0.7 * v, 4))
+        eps.append(round(1.2 * v, 4))
+    eps = sorted(set(eps) | set(extra))
+    return [e for e in eps if e > 1e-3]
+
+
+# ---------- noise rescue ----------
+
+def rescue_noise(noise_indices, latent, contig_lengths,
+                 contig_to_markers, namelist, n_scgs,
+                 min_completeness=0.50, max_contamination=0.30):
+    """Recover genomes DBSCAN dumped as noise (label -1).
+
+    Two-tier: (1) emit any single noise contig that alone passes the
+    marker check — on long-read assemblies a near-complete genome can be
+    one contig, and min_samples would have discarded it. (2) BIRCH the
+    remaining noise (LorBin-style) and keep clusters that pass.
+    """
+    rescued = []
+    remaining = []
+
+    # tier 1: singleton rescue
+    for ci in noise_indices:
+        counts = count_markers_saturated([ci], contig_to_markers, namelist, n_scgs)
+        if counts is not None:
+            comp, cont = completeness_contamination(counts, n_scgs)
+            if comp >= min_completeness and cont <= max_contamination:
+                rescued.append({ci})
+                continue
+        remaining.append(ci)
+
+    # tier 2: BIRCH over leftover noise
+    if len(remaining) > 5:
+        sub = latent[remaining]
+        # threshold grid from sub-distances; cheap since noise set is small
+        g = build_knn_graph(sub, k=min(50, len(remaining) - 1))
+        data = g.data
+        thresholds = sorted({
+            round(np.partition(data, len(remaining) * k - 1)[len(remaining) * k - 1], 4)
+            for k in (5, 15, 30) if len(remaining) * k - 1 < len(data)
+        })
+        for thr in thresholds:
+            if thr < 1e-5:
+                continue
+            labels = Birch(threshold=thr, n_clusters=None).fit_predict(sub)
+            bins = defaultdict(set)
+            for local_i, lab in zip(remaining, labels):
+                bins[lab].add(local_i)
+            for b in bins.values():
+                counts = count_markers_saturated(b, contig_to_markers, namelist, n_scgs)
+                if counts is None:
+                    continue
+                comp, cont = completeness_contamination(counts, n_scgs)
+                if comp >= min_completeness and cont <= max_contamination:
+                    rescued.append(b)
+    return rescued
+
+# ---------- the sweep ----------
+def dbscan_marker_sweep(
+    latent, contig_lengths, contig_to_markers, namelist, n_scgs,
+    K_seed=None,
+    min_samples=5,
+    metric="cosine",
+    patience=3,
+    scoring="count",        # "count" (Path A) or "smooth" (Path B)
+    lam=1.0,
+    do_rescue=False,        # noise-rescue pass on the winning clustering
+    logger=None,
+):
+    graph = build_knn_graph(latent, metric=metric)
+    eps_grid = derive_eps_grid(graph, latent.shape[0])
+
+    if scoring == "count":
+        score_fn = lambda bins: score_count(bins, contig_to_markers, namelist, n_scgs)
+    elif scoring == "smooth":
+        score_fn = lambda bins: score_smooth(bins, contig_to_markers, namelist,
+                                             n_scgs, lam=lam)
+    else:
+        raise ValueError(f"unknown scoring: {scoring}")
+
+    best_bins, best_eps, best_score = None, None, -np.inf
+    n_worse = 0
+
+    for eps in eps_grid:
+        labels = DBSCAN(eps=eps, min_samples=min_samples,
+                        metric="precomputed", n_jobs=-1
+                        ).fit_predict(graph, sample_weight=contig_lengths)
+
+        bins = defaultdict(set)
+        for idx, lab in enumerate(labels):
+            if lab != -1:
+                bins[lab].add(idx)
+        bins = list(bins.values())
+        if not bins:
+            continue
+
+        score = score_fn(bins)
+        if score > best_score:
+            best_score, best_bins, best_eps = score, bins, eps
+            n_worse = 0
+        else:
+            n_worse += 1
+            if n_worse > patience:
+                break
+
+    if best_bins is None:
+        return [], best_score, eps_grid
+
+    # noise rescue on the winning eps only (re-run to recover its labels)
+    if do_rescue:
+        labels = DBSCAN(eps=best_eps, min_samples=min_samples,
+                        metric="precomputed", n_jobs=-1
+                        ).fit_predict(graph, sample_weight=contig_lengths)
+        noise = [i for i, lab in enumerate(labels) if lab == -1]
+        if noise:
+            rescued = rescue_noise(noise, latent, contig_lengths,
+                                   contig_to_markers, namelist, n_scgs)
+            if logger:
+                logger.info(f"rescued {len(rescued)} bins from {len(noise)} noise contigs")
+            best_bins = best_bins + rescued
+
+    if logger and K_seed is not None:
+        logger.info(f"best eps={best_eps}, bins={len(best_bins)}, "
+                    f"score={best_score:.3f}, K_seed={K_seed}")
+
+    return best_bins, best_score, eps_grid
+
+
+# ---------- save ----------
+
+def write_bins(best_bins, namelist, contig_seqs, out_dir, min_bin_size=1):
+    os.makedirs(out_dir, exist_ok=True)
+    written = 0
+    for i, bin_indices in enumerate(best_bins):
+        names = [namelist[ci] for ci in bin_indices]
+        if sum(len(contig_seqs[n]) for n in names) < min_bin_size:
+            continue
+        with open(os.path.join(out_dir, f"bin.{i}.fa"), "w") as fh:
+            for n in names:
+                fh.write(f">{n}\n{contig_seqs[n]}\n")
+        written += 1
+    return written

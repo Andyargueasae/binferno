@@ -4,7 +4,7 @@ import gzip
 from Bio import SeqIO
 import functools
 import logging
-from typing import List, Sequence
+from typing import Dict, List, Sequence
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
@@ -108,7 +108,7 @@ def seed_kmeans_full(
     prefix: str,
     length_weight: np.ndarray,
     seed_file: str,
-) -> None:
+) -> Dict[str, pd.DataFrame]:
     """
     Run weighted seed KMeans and write result TSV + bins.
     """
@@ -116,18 +116,19 @@ def seed_kmeans_full(
     output_tsv = f"{output_prefix}_k_{bin_number}_result.tsv"
 
     if os.path.exists(output_tsv):
+        output_df = pd.read_csv(output_tsv, sep="\t", header=None, names=["contig_id", "cluster_id"])
         logger.info(f"Skipping existing KMeans result: {output_tsv}")
-        return
+        return {output_tsv: output_df}
 
     seed_indices = gen_seed_idx(seed_file, contig_id_list=namelist)
     if not seed_indices:
         logger.warning("No seed contigs matched namelist; skipping seed-kmeans.")
-        return
+        return {output_tsv: pd.DataFrame(columns=["contig_id", "cluster_id"])}
     if bin_number > len(namelist):
         logger.warning(
             f"Requested bin_number={bin_number} exceeds number of contigs={len(namelist)}; skipping."
         )
-        return
+        return {output_tsv: pd.DataFrame(columns=["contig_id", "cluster_id"])}
 
     start = time()
     km = KMeans(
@@ -142,7 +143,10 @@ def seed_kmeans_full(
     save_result(km.labels_, output_tsv, namelist)
     gen_bins(str(contig_file), output_tsv, f"{output_tsv}_bins")
 
+    output_df = pd.DataFrame(output_tsv, header=None, columns=["contig_id", "cluster_id"], index=False)
+
     logger.info(f"Weighted seed-kmeans time:\t{time() - start:.3f}s")
+    return {output_tsv: output_df}
 
 def partial_seed_init(
     X,

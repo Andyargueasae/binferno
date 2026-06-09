@@ -12,9 +12,8 @@ import loguru
 
 import pandas as pd
 from typing import Dict, List, Tuple, Iterator, TextIO, Optional
-from biolib.common import make_sure_path_exists
-from biolib.external.execute import check_on_path
 
+from ..clustering.base import ClusterResult
 from .scripts.unitem_markers import Markers, PltdMarkers
 from .scripts.unitem_defaults import *
 
@@ -22,7 +21,7 @@ BinDict = Dict[str, Dict[str, set]]
 ContigAssignmentDict = Dict[str, Dict[str, str]]
 QualityCache = Dict[str, Dict[str, Tuple[float, float]]]
 
-class Profile:
+class GenomeProfiler:
     """
     Profile genome bins across binning methods using CheckM.
     """
@@ -291,7 +290,7 @@ class Profile:
         marker_jobs:
             list of (subdir_name, marker_set_file)
         """
-        self.logger.info("Profiling genomes in %d directories.", len(bin_dirs))
+        self.logger.info(f"Profiling genomes in {len(bin_dirs)} directories.")
 
         genome_quality = defaultdict(dict)
 
@@ -396,30 +395,13 @@ def get_binstats(bin_contig_names, markers):
     _, comp, cont = markers.bin_quality(bin_contig_names)
     return comp, cont
 
-def list_result_tsvs(
-    res_path: str, ignore_kmeans_res: bool = False
-) -> List[str]:
-    """
-    Collect clustering result TSV filenames from a result directory.
-    """
-    selected = []
-    for filename in os.listdir(res_path):
-        if not filename.endswith(".tsv"):
-            continue
-        if ignore_kmeans_res and filename.startswith("weight"):
-            continue
-        selected.append(filename)
-
-    selected.sort()
-    return selected
-
-def read_bins_nosequences(
-    bin_dirs: Dict[str, str],
+def read_cluster_contigs(
+    cluster_results: Dict[str, pd.DataFrame],
 ) -> Tuple[BinDict, ContigAssignmentDict]:
     """
-    Read bin assignments from TSV result files.
+    Read bin assignments from cluster result DataFrames.
 
-    Each TSV is expected to contain:
+    Each DataFrame is expected to contain:
         contig_id <tab> cluster_id
     or equivalent first-two-column assignment layout.
 
@@ -433,15 +415,7 @@ def read_bins_nosequences(
     bins: BinDict = defaultdict(lambda: defaultdict(set))
     contigs_in_bins: ContigAssignmentDict = defaultdict(dict)
 
-    for method_id, bin_file in bin_dirs.items():
-        df = pd.read_csv(
-            bin_file,
-            sep="\t",
-            header=None,
-            usecols=[0, 1],
-            names=["contig_id", "cluster_id"],
-        )
-
+    for method_id, df in cluster_results.items():
         for contig_id, cluster_id in zip(df["contig_id"], df["cluster_id"]):
             cluster_key = str(cluster_id)
             bins[method_id][cluster_key].add(contig_id)
@@ -595,10 +569,10 @@ def write_estimated_bin_quality(bin_quality_dict, output_file):
             )
 
 def estimate_bins_quality_nobins(
-    bac_mg_table,
-    ar_mg_table,
-    res_path,
-    ignore_kmeans_res: bool = False,
+    bac_mg_table: str,
+    ar_mg_table: str,
+    res_path: Path,
+    cluster_result: ClusterResult,
 ):
     """
     Estimate bin quality using bacterial/archaeal marker information.
@@ -611,14 +585,13 @@ def estimate_bins_quality_nobins(
     return _estimate_bins_quality_common(
         markers=markers,
         res_path=res_path,
-        ignore_kmeans_res=ignore_kmeans_res,
         save_high_quality_contigs=True,
     )
 
 def estimate_bins_quality_nobins_pltd(
-    pltd_mg_table,
-    res_path,
-    ignore_kmeans_res: bool = False,
+    pltd_mg_table: str,
+    res_path: Path,
+    cluster_result: ClusterResult,
 ):
     """
     Estimate bin quality using plastid marker information.
@@ -631,28 +604,27 @@ def estimate_bins_quality_nobins_pltd(
     return _estimate_bins_quality_common(
         markers=markers,
         res_path=res_path,
-        ignore_kmeans_res=ignore_kmeans_res,
+        cluster_result=cluster_result,
         save_high_quality_contigs=False,
     )
 
 def _estimate_bins_quality_common(
     markers,
-    res_path: str,
-    ignore_kmeans_res: bool = False,
+    res_path: Path,
+    cluster_result: ClusterResult,
     save_high_quality_contigs: bool = False,
 ):
     """
     Shared internal implementation for bin-quality estimation.
     """
-    result_files = list_result_tsvs(
-        res_path, ignore_kmeans_res=ignore_kmeans_res
-    )
+    # the result_files can now be replaced as cluster_result.leiden_cluster_assignments.
+    result_files = cluster_result.leiden_cluster_assignments # dictionary to pd.DataFrame.
+    kmeans_result = cluster_result.kmeans_clusters # this is the kmeans result tsv file.
 
-    bin_dirs = {
-        filename: os.path.join(res_path, filename) for filename in result_files
-    }
+    # merge two dictionaries together to form the equivalent as bin_dirs.
+    merged_results = {**result_files, **kmeans_result} #Dict[str, pd.DataFrame]
 
-    bins, contigs = read_bins_nosequences(bin_dirs)
+    bins, contigs = read_cluster_contigs(merged_results)
     methods_sorted = sorted(bins.keys())
 
     if not methods_sorted:
@@ -829,3 +801,16 @@ def filter_small_bins(
 
     gen_bins(fastafile, filtered_tsv, os.path.join(output_path, "res_bins"))
     shutil.copy2(filtered_tsv, os.path.join(output_path, "binferno_res.tsv"))
+
+def check_on_path(tool_name: str) -> None:
+    """
+    Check if a tool is available on the system PATH.
+    """
+    if shutil.which(tool_name) is None:
+        raise RuntimeError(f"{tool_name} not found on PATH. Please install it.")
+    
+def make_sure_path_exists(path: str) -> None:
+    """
+    Create a directory if it does not exist.
+    """
+    os.makedirs(path, exist_ok=True)
