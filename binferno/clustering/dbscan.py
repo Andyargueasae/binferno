@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
 from collections import defaultdict
+import re
+from typing import Any, Tuple
 
 import pandas as pd 
 import loguru
@@ -28,9 +30,8 @@ class DbscanClustering(BaseClustering):
     ) -> ClusterResult:
         
         result = ClusterResult(
-            kmeans_clusters=[],
-            leiden_cluster_assignments={},
             n_genome=0,
+            clusters={},
         )
 
         if plastid:
@@ -54,12 +55,12 @@ class DbscanClustering(BaseClustering):
                 output_dir=str(output_path),
                 threads=threads,
                 contig_length_threshold=1001,
-                marker_name="bacar_marker",
+                marker_name="marker",
                 quarter="2quarter",
             )
             seed_file = os.path.join(
                 output_path,
-                f"{os.path.basename(str(contigs))}.bacar_marker.2quarter_lencutoff_1001.seed",
+                f"{os.path.basename(str(contigs))}.marker.2quarter_lencutoff_1001.seed",
             )
 
         result.n_genome = n_genome
@@ -84,17 +85,68 @@ class DbscanClustering(BaseClustering):
         norm_embeddings = normalize(emb_mat).astype(np.float32, copy=False)
 
         # your part to run these things. 
+        marker_name = "pltd_marker" if plastid else "bacar_marker"
+        hmmout_path = _resolve_hmmout_path(contigs, output_path, marker_name)
+        if not os.path.exists(hmmout_path):
+            raise FileNotFoundError(
+                f"Expected hmm output at {hmmout_path}; check gen_seed's "
+                f"output naming and update _resolve_hmmout_path."
+            )
+        contig_to_markers, n_scgs = parse_contig_to_markers(hmmout_path)
+        # contigs with zero marker hits simply won't be keys; the scorer
+        # must treat a missing key as an empty list:
+        contig_to_markers = {
+            **{name: [] for name in namelist},
+            **contig_to_markers,
+        }
+
+        logger.info(
+            f"Parsed markers for {sum(1 for v in contig_to_markers.values() if v)} "
+            f"contigs over {n_scgs} SCGs"
+        )
+
+        # --- DBSCAN sweep, marker-quality-only scoring, with noise rescue ---
+        best_bins, best_score, eps_grid = dbscan_marker_sweep(
+            latent=norm_embeddings,
+            contig_lengths=length_weight.astype(np.int64),
+            contig_to_markers=contig_to_markers,
+            namelist=namelist,
+            n_scgs=n_scgs,
+            K_seed=n_genome,          # sanity check only, per your choice
+            min_samples=1,            # long-read: see note
+            metric="cosine",
+            patience=3,
+            scoring="count",          # Path A; switch to "smooth" to compare
+            do_rescue=True,           # long-read singleton + BIRCH rescue
+            logger=logger,
+        )
+        logger.info(
+            f"DBSCAN sweep: {len(best_bins)} bins, score={best_score:.3f}, "
+            f"swept {len(eps_grid)} eps values; gen_seed K={n_genome}"
+        )
+
+        dbscan_cluster_assignments = {}
+        for bin_label, bin_indices in enumerate(best_bins):
+            for ci in bin_indices:
+                dbscan_cluster_assignments[namelist[ci]] = bin_label
+
+        result.clusters = dbscan_cluster_assignments
+
         return result
 
 # ---------- marker-based quality ----------
 
-def completeness_contamination(counts, n_scgs):
+def completeness_contamination(counts: np.ndarray,
+                            n_scgs: int) -> Tuple[float, float]:
     n_total = counts.sum()
     n_unique = (counts > 0).sum()
     return n_unique / n_scgs, (n_total - n_unique) / n_scgs
 
 
-def count_markers_saturated(contig_indices, contig_to_markers, namelist, n_scgs):
+def count_markers_saturated(contig_indices: list, 
+                            contig_to_markers: dict, 
+                            namelist: list, 
+                            n_scgs: int):
     """Count SCGs in a bin; bail early once hopelessly contaminated."""
     counts = np.zeros(n_scgs, dtype=np.int32)
     n_markers = n_unique = 0
@@ -112,8 +164,12 @@ def count_markers_saturated(contig_indices, contig_to_markers, namelist, n_scgs)
 
 # ---------- two scoring paths ----------
 
-def score_count(bins, contig_to_markers, namelist, n_scgs,
-                min_completeness=0.75, max_contamination=0.30):
+def score_count(bins: list, 
+                contig_to_markers: dict, 
+                namelist: list, 
+                n_scgs: int,
+                min_completeness: float = 0.75,
+                max_contamination: float = 0.30):
     """PATH A: hard count of near-complete, low-contamination bins."""
     good = 0
     for b in bins:
@@ -126,8 +182,11 @@ def score_count(bins, contig_to_markers, namelist, n_scgs,
     return float(good)
 
 
-def score_smooth(bins, contig_to_markers, namelist, n_scgs,
-                 lam=1.0, min_completeness=0.50):
+def score_smooth(bins: list, 
+                contig_to_markers: dict, 
+                namelist: list, n_scgs: int,
+                lam: float = 1.0, 
+                min_completeness: float = 0.50):
     """PATH B: sum of (completeness - lam*contamination) over qualifying bins.
 
     Smoother than the hard count: no 0.75/0.30 cliff. A loose
@@ -146,16 +205,20 @@ def score_smooth(bins, contig_to_markers, namelist, n_scgs,
     return total
 
 
-# ---------- sparse kNN graph + eps grid ----------
-
-def build_knn_graph(latent, k=None, metric="cosine", n_jobs=-1):
+def build_knn_graph(latent: np.ndarray, 
+                    k: int = None, metric: 
+                    str = "cosine", 
+                    n_jobs: int = -1):
     N = latent.shape[0]
     k = k or min(200, N - 1)
     return kneighbors_graph(latent, n_neighbors=k, mode="distance",
                             metric=metric, n_jobs=n_jobs)
 
 
-def derive_eps_grid(graph, n_points, k_steps=range(1, 80), extra=(0.12, 0.15, 0.2)):
+def derive_eps_grid(graph: Any, 
+                    n_points: int, 
+                    k_steps: range = range(1, 80), 
+                    extra: Tuple = (0.12, 0.15, 0.2)):
     data = graph.data
     eps = []
     for k in k_steps:
@@ -169,9 +232,7 @@ def derive_eps_grid(graph, n_points, k_steps=range(1, 80), extra=(0.12, 0.15, 0.
     return [e for e in eps if e > 1e-3]
 
 
-# ---------- noise rescue ----------
-
-def rescue_noise(noise_indices, latent, contig_lengths,
+def rescue_noise(noise_indices, latent,
                  contig_to_markers, namelist, n_scgs,
                  min_completeness=0.50, max_contamination=0.30):
     """Recover genomes DBSCAN dumped as noise (label -1).
@@ -220,17 +281,16 @@ def rescue_noise(noise_indices, latent, contig_lengths,
                     rescued.append(b)
     return rescued
 
-# ---------- the sweep ----------
 def dbscan_marker_sweep(
-    latent, contig_lengths, contig_to_markers, namelist, n_scgs,
-    K_seed=None,
-    min_samples=5,
-    metric="cosine",
-    patience=3,
-    scoring="count",        # "count" (Path A) or "smooth" (Path B)
-    lam=1.0,
-    do_rescue=False,        # noise-rescue pass on the winning clustering
-    logger=None,
+    latent: pd.DataFrame, contig_lengths: list, contig_to_markers: dict, namelist: list, n_scgs: int,
+    K_seed: int = None,
+    min_samples: int = 5,
+    metric: str = "cosine",
+    patience: int = 3,
+    scoring: str = "count",        # "count" (Path A) or "smooth" (Path B)
+    lam: float = 1.0,
+    do_rescue: bool = False,        # noise-rescue pass on the winning clustering
+    logger: loguru._logger.Logger = None,
 ):
     graph = build_knn_graph(latent, metric=metric)
     eps_grid = derive_eps_grid(graph, latent.shape[0])
@@ -290,10 +350,51 @@ def dbscan_marker_sweep(
 
     return best_bins, best_score, eps_grid
 
+def parse_contig_to_markers(hmmout_path: str):
+    """Parse HMMER tblout (or domtblout) produced during gen_seed into
+    {contig_name: [marker_id, ...]} and the marker-id vocabulary.
 
-# ---------- save ----------
+    ASSUMPTIONS — verify on one real run:
+      * file is hmmsearch --tblout format (whitespace-delimited, '#'-comments)
+      * column 0 = target ORF id, column 2 (or 3) = query HMM name
+      * ORF id is '<contig>_<start>_<end>_<strand>' (FragGeneScan).
+        We strip the trailing 3 underscore-fields to recover the contig.
+    Adjust the two marked lines if your gen_seed differs.
+    """
+    marker_vocab = {}            # marker name -> integer id
+    contig_to_markers = {}
 
-def write_bins(best_bins, namelist, contig_seqs, out_dir, min_bin_size=1):
+    orf_suffix = re.compile(r"_\d+_\d+_[+-]$")  # FragGeneScan tail
+
+    with open(hmmout_path) as fh:
+        for line in fh:
+            if line.startswith("#") or not line.strip():
+                continue
+            cols = line.split()
+            orf_id = cols[0]                     # <-- ADJUST if needed
+            hmm_name = cols[2]                   # <-- ADJUST (tblout col 3 = query name)
+            contig = orf_suffix.sub("", orf_id)  # <-- ADJUST split if not FGS
+            mid = marker_vocab.setdefault(hmm_name, len(marker_vocab))
+            contig_to_markers.setdefault(contig, []).append(mid)
+
+    n_scgs = len(marker_vocab)
+    return contig_to_markers, n_scgs
+
+
+def _resolve_hmmout_path(contigs: Path, 
+                        output_path: Path, 
+                        marker_name: str) -> str:
+    """Mirror gen_seed's naming. VERIFY against an actual gen_seed run."""
+    base = os.path.basename(str(contigs))
+    # common COMEBin pattern; correct the suffix if yours differs
+    candidate = os.path.join(str(output_path), f"{base}.{marker_name}.hmmout")
+    return candidate
+
+def write_bins(best_bins: list,
+            namelist: list, 
+            contig_seqs: dict, 
+            out_dir: str, 
+            min_bin_size: int = 1):
     os.makedirs(out_dir, exist_ok=True)
     written = 0
     for i, bin_indices in enumerate(best_bins):

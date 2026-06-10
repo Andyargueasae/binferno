@@ -9,10 +9,8 @@ from dataclasses import dataclass
 
 @dataclass
 class ClusterResult:
-    kmeans_clusters: Dict[str, pd.DataFrame]
-    leiden_cluster_assignments: Dict[str, pd.DataFrame]
     n_genome: int
-
+    clusters: Dict[str, pd.DataFrame] # a generic dictionary to store all the results for a key and the corresponding dataframes.
 
 class BaseClustering(BaseModel):
     contig_len: int = 1000 # minimum contig length to consider for clustering, default 1000 bp.

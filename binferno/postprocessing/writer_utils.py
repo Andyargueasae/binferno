@@ -8,6 +8,8 @@ import shutil
 from collections import defaultdict
 import subprocess
 import csv
+
+from scipy import cluster
 import loguru
 
 import pandas as pd
@@ -585,6 +587,7 @@ def estimate_bins_quality_nobins(
     return _estimate_bins_quality_common(
         markers=markers,
         res_path=res_path,
+        cluster_result=cluster_result,
         save_high_quality_contigs=True,
     )
 
@@ -618,13 +621,9 @@ def _estimate_bins_quality_common(
     Shared internal implementation for bin-quality estimation.
     """
     # the result_files can now be replaced as cluster_result.leiden_cluster_assignments.
-    result_files = cluster_result.leiden_cluster_assignments # dictionary to pd.DataFrame.
-    kmeans_result = cluster_result.kmeans_clusters # this is the kmeans result tsv file.
 
-    # merge two dictionaries together to form the equivalent as bin_dirs.
-    merged_results = {**result_files, **kmeans_result} #Dict[str, pd.DataFrame]
-
-    bins, contigs = read_cluster_contigs(merged_results)
+    # bins should be good to go.
+    bins, contigs = read_cluster_contigs(cluster_result.clusters)
     methods_sorted = sorted(bins.keys())
 
     if not methods_sorted:

@@ -39,8 +39,7 @@ class LeidenClustering(BaseClustering):
         np.random.seed(self.seed)
 
         result = ClusterResult(
-            kmeans_clusters=[],
-            leiden_cluster_assignments={},
+            clusters={},
             n_genome=0,
         ) # instantiate an empty ClusterResult to store results and return at the end.
 
@@ -102,7 +101,7 @@ class LeidenClustering(BaseClustering):
         bin_nums = seed_num
         logger.info(f"Bin_numbers:\t{bin_nums}")
         
-        kmeans_output = seed_kmeans_full(
+        kmeans_out = seed_kmeans_full(
             logger=logger,
             contig_file=contigs,
             namelist=namelist,
@@ -113,7 +112,8 @@ class LeidenClustering(BaseClustering):
             length_weight=length_weight,
             seed_file=seed_file,
         )
-        result.kmeans_clusters = kmeans_output
+        for key, val in kmeans_out.items():
+            result.clusters[key] = val
 
         num_workers = max(1, int(threads or 1))
 
@@ -178,6 +178,9 @@ class LeidenClustering(BaseClustering):
                     )
 
                     if output_file.exists():
+                        logger.warning(f"Output file {output_file} already exists. Skipping Leiden run and save to ClusterResult.")
+                        df = pd.read_csv(output_file, sep="\t", header=None, names=["contig_id", "cluster_id"])
+                        result.clusters[output_file.name] = df
                         continue
 
                     job = pool.apply_async(
@@ -264,7 +267,7 @@ class LeidenClustering(BaseClustering):
         df = pd.DataFrame.from_dict(assignments, orient="index", columns=["cluster"])
         df.reset_index(inplace=True)
         df.rename(columns={"index": "contig_id", "cluster": "cluster_id"}, inplace=True)
-        result_wrapper.leiden_cluster_assignments[output_file.name] = df
+        result_wrapper.clusters[output_file.name] = df
 
     def _prepare_leiden_edges(
         self,
