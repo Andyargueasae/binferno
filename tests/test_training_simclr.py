@@ -1,4 +1,3 @@
-import subprocess
 import tempfile
 from pathlib import Path
 
@@ -7,6 +6,13 @@ import pandas as pd
 import numpy as np
 
 from binferno.training import SimCLRTrainer
+
+
+'''
+Mainly tests the SimCLR path: from embeddings to dataloading to training and encoding. 
+Create dummy data to serve testing purposes.  
+'''
+
 
 @pytest.fixture
 def simclr_trainer():

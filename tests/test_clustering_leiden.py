@@ -7,6 +7,10 @@ import pandas as pd
 
 from binferno.clustering.leiden import LeidenClustering
 
+'''
+Mainly tests leiden path from embedding matrix to ClusterResult.
+'''
+
 @pytest.fixture
 def leiden_clustering():
     with tempfile.TemporaryDirectory() as tmpdir:

@@ -143,7 +143,7 @@ def seed_kmeans_full(
     save_result(km.labels_, output_tsv, namelist)
     gen_bins(str(contig_file), output_tsv, f"{output_tsv}_bins")
 
-    output_df = pd.DataFrame(output_tsv, columns=["contig_id", "cluster_id"], index=False)
+    output_df = pd.DataFrame(output_tsv, columns=["contig_id", "cluster_id"])
 
     logger.info(f"Weighted seed-kmeans time:\t{time() - start:.3f}s")
     return {output_tsv: output_df}

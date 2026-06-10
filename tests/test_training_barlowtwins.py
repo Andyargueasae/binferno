@@ -8,6 +8,11 @@ import numpy as np
 
 from binferno.training import BarlowTwinsTrainer
 
+'''
+Mainly tests the barlow-twins path: from embeddings to dataloading to training and encoding. 
+Create dummy data to serve testing purposes.  
+'''
+
 @pytest.fixture
 def barlowtwins_trainer():
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -40,7 +45,3 @@ def test_barlowtwins_training(barlowtwins_trainer):
     output_dir = barlowtwins_trainer.output_dir
     assert (output_dir / "model.pth").exists(), "Model file not found"
     assert (output_dir / "training_log.txt").exists(), "Training log not found"
-
-# Note: The above tests are basic and only check for the existence of output files. 
-# In a real test, you would want to check the contents of the model file and the training
-# log to ensure that training is proceeding as expected.

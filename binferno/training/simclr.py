@@ -80,7 +80,7 @@ class SimCLRTrainer(BaseTrainer):
         description="Whether to use the EmbNet2 architecture for training instead of SimCLRNet or NeuralNetwork.",
     )
     max_lr_epochs: int = Field(
-        default=0,
+        default=10,
         description="Number of epochs to wait before resuming learning rate scheduling after reaching the maximum learning rate.",
     )
     hard_weighted_nce: bool = Field(
@@ -94,6 +94,10 @@ class SimCLRTrainer(BaseTrainer):
     auxiliary_loss: bool = Field(
         default=False,
         description="Whether to include an auxiliary loss on the individual view embeddings in addition to the main InfoNCE loss on the fused embeddings. This can help encourage the model to learn useful representations in each view before fusion.",
+    )
+    dense_mode: bool = Field(
+        default=False,
+        description="Whether to use dense mode in the NeuralNetwork architecture, which adds additional fully connected layers after concatenating the kmer and coverage embeddings. If False, the model will directly output the final embedding after fusion without additional layers.",
     )
 
     def __call__(
@@ -217,11 +221,11 @@ class SimCLRTrainer(BaseTrainer):
                 coverage_dim=cov_dim,
                 output_dim=self.output_dim,
                 kmer_dim=kmer_dim,
-                n_layers=self.n_layers,
                 gated=self.gated,
                 attention=self.attention,
                 corgi_dim=corgi_dim,
                 proj=self.proj,
+                dense_mode=self.dense_mode,
             ).to(device)
 
         logger.info(f"Model architecture:\n{model}")
@@ -460,6 +464,7 @@ class SimCLRTrainer(BaseTrainer):
                 learning_rate=self.learning_rate,
                 min_learning_rate=1e-4,
                 epochs=epochs,
+                warmup=False,
                 max_lr_hold_epochs=self.max_lr_epochs,
             )
 

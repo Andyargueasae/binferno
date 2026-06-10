@@ -14,17 +14,17 @@ import numpy as np
 class NeuralNetwork(nn.Module):
     def __init__(
         self,
-        tnf_dim,
-        coverage_dim,
-        dropout=0.05,
-        output_dim=128,
-        n_layers=3,
-        kmer_dim=136,
-        corgi_dim=0,
-        proj_head_dim=128,
-        proj=False,
-        gated=False,
-        attention=False,
+        tnf_dim: int,
+        coverage_dim: int,
+        dropout: float = 0.05,
+        output_dim: int = 128,
+        kmer_dim: int = 136,
+        corgi_dim: int = 0,
+        proj_head_dim: int = 128,
+        proj: bool = False,
+        gated: bool = False,
+        attention: bool = False,
+        dense_mode: bool = False,
     ):
         super(NeuralNetwork, self).__init__()
         self.coverage_dim = coverage_dim  # by default we ask users to provide coverage.
@@ -49,23 +49,46 @@ class NeuralNetwork(nn.Module):
             self.tnf_enc_dim += corgi_dim
 
         # was using 512.
-        tnf_hidden1 = 512
-        tnf_hidden2 = 256
-        tnf_hidden3 = output_dim
+        if not dense_mode:
+            tnf_hidden1 = 512
+            tnf_hidden2 = 256
+            tnf_hidden3 = output_dim
 
-        self.tnf_encoder = nn.Sequential(
-            nn.Linear(self.tnf_enc_dim, tnf_hidden1),
-            nn.BatchNorm1d(tnf_hidden1),
-            nn.LeakyReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(tnf_hidden1, tnf_hidden2),
-            nn.BatchNorm1d(tnf_hidden2),
-            nn.LeakyReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(tnf_hidden2, tnf_hidden3),
-            nn.BatchNorm1d(tnf_hidden3),
-            nn.LeakyReLU(),
-        )
+            self.tnf_encoder = nn.Sequential(
+                nn.Linear(self.tnf_enc_dim, tnf_hidden1),
+                nn.BatchNorm1d(tnf_hidden1),
+                nn.LeakyReLU(),
+                nn.Dropout(0.1),
+                nn.Linear(tnf_hidden1, tnf_hidden2),
+                nn.BatchNorm1d(tnf_hidden2),
+                nn.LeakyReLU(),
+                nn.Dropout(0.1),
+                nn.Linear(tnf_hidden2, tnf_hidden3),
+                nn.BatchNorm1d(tnf_hidden3),
+                nn.LeakyReLU(),
+            )
+        else:
+            tnf_hidden1 = 1024
+            tnf_hidden2 = 512
+            tnf_hidden3 = 256
+            tnf_hidden4 = output_dim
+            self.tnf_encoder = nn.Sequential(
+                nn.Linear(self.tnf_enc_dim, tnf_hidden1),
+                nn.BatchNorm1d(tnf_hidden1),
+                nn.LeakyReLU(),
+                nn.Dropout(0.1),
+                nn.Linear(tnf_hidden1, tnf_hidden2),
+                nn.BatchNorm1d(tnf_hidden2),
+                nn.LeakyReLU(),
+                nn.Dropout(0.1),
+                nn.Linear(tnf_hidden2, tnf_hidden3),
+                nn.BatchNorm1d(tnf_hidden3),
+                nn.LeakyReLU(),
+                nn.Dropout(0.1),
+                nn.Linear(tnf_hidden3, tnf_hidden4),
+                nn.BatchNorm1d(tnf_hidden4),
+                nn.LeakyReLU(),
+            )
         # Run A: 4-mer + correct architecture (your previous run, already done — ~71%)
         # Run B: 5-mer + same architecture structure (just change input dim)
 
@@ -84,6 +107,22 @@ class NeuralNetwork(nn.Module):
             nn.ReLU(),
             nn.Linear(2048, 2048),
             nn.BatchNorm1d(2048),
+        )
+
+        self.proj_kmer = nn.Sequential(
+            nn.Linear(self.representation_dim, 2048),
+            nn.BatchNorm1d(2048),
+            nn.ReLU(),
+            nn.Linear(2048, 2048),
+            nn.BatchNorm1d(2048),
+        )
+
+        self.proj_cov = nn.Sequential(
+            nn.Linear(self.final_cov_dim, 1024),
+            nn.BatchNorm1d(1024),
+            nn.ReLU(),
+            nn.Linear(1024, 1024),
+            nn.BatchNorm1d(1024),
         )
 
     def _encode(self, x):
@@ -107,14 +146,10 @@ class NeuralNetwork(nn.Module):
 
     def forward_one(self, x):
         fused_emb, tnf_emb, cov_emb = self._encode(x)
-        proj_emb = self.proj_head(fused_emb)  # 512
-        return proj_emb, tnf_emb, cov_emb
-
-    def forward(self, x1, x2):
-        z1,_,_ = self.forward_one(x1)
-        z2,_,_ = self.forward_one(x2)
-        return z1, z2
-
+        proj_emb = self.proj_head(fused_emb)  # 2048-projection head.
+        proj_kmer = self.proj_kmer(tnf_emb)  # 2048-projection head for tnf features.
+        proj_cov = self.proj_cov(cov_emb)  # 2048-projection head for coverage features.
+        return proj_emb, proj_kmer, proj_cov
 
 def fusion_network(
     emb_dim=128,

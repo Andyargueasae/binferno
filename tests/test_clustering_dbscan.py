@@ -7,6 +7,10 @@ import numpy as np
 
 from binferno.clustering import DbscanClustering
 
+'''
+Mainly tests dbscan path from embeddings to ClusterResult.
+'''
+
 @pytest.fixture
 def dbscan_clustering():
     with tempfile.TemporaryDirectory() as tmpdir:

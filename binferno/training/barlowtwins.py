@@ -26,7 +26,7 @@ from .base import BaseTrainer
 class BarlowTwinsTrainer(BaseTrainer):
 
     learning_rate: float = Field(
-        default=1e-3, description="Learning rate for training."
+        default=2.5e-3, description="Learning rate for training."
     )
     batch_size: int = Field(default=1024, description="Batch size for training.")
     epochs: int = Field(default=300, description="Number of epochs for training.")
@@ -34,9 +34,6 @@ class BarlowTwinsTrainer(BaseTrainer):
     seed: int = Field(default=42, description="Random seed for training.")
     output_dim: int = Field(
         default=128, description="Output dimension for the embeddings."
-    )
-    n_layers: int = Field(
-        default=2, description="Number of layers for the neural network."
     )
     contig_length: int = Field(
         default=1000, description="Minimum contig length to be included in training."
@@ -47,8 +44,16 @@ class BarlowTwinsTrainer(BaseTrainer):
     seed: int = Field(
         default=42, description="Random seed for training and augmentation."
     )
-    max_lr_epochs: int = Field(
+    dense_mode: bool = Field(
+        default=False,
+        description="Whether to use dense layers in the model architecture. If False, the model will use a more lightweight architecture without dense layers.",
+    )
+    warmup_epochs: int = Field(
         default=10,
+        description="Number of epochs to linearly increase the learning rate from a small value to the initial learning rate at the start of training.",
+    )
+    max_lr_epochs: int = Field(
+        default=0,
         description="Number of epochs to wait before resuming learning rate scheduling after reaching the maximum learning rate.",
     )
     get_individual_embs: bool = Field(
@@ -140,8 +145,8 @@ class BarlowTwinsTrainer(BaseTrainer):
             coverage_dim=cov_dim,
             kmer_dim=kmer_dim,
             proj_head_dim=proj_head_dim,
-            n_layers=self.n_layers,
             corgi_dim=corgi_dim,
+            dense_mode=self.dense_mode,
             output_dim=self.output_dim,
         ).to(device)
 
@@ -492,6 +497,8 @@ class BarlowTwinsTrainer(BaseTrainer):
             learning_rate=self.learning_rate,
             min_learning_rate=1e-4,
             epochs=epochs,
+            warmup_epochs=self.warmup_epochs,
+            warmup=True,
             max_lr_hold_epochs=self.max_lr_epochs,
         )
         return dataloader, optimizer, scheduler

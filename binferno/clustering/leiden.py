@@ -183,7 +183,7 @@ class LeidenClustering(BaseClustering):
                         result.clusters[output_file.name] = df
                         continue
 
-                    job = pool.apply_async(
+                    cluster_res = pool.apply_async(
                         self.run_leiden_memmap,
                         kwds={
                             "output_file": output_file,
@@ -193,17 +193,22 @@ class LeidenClustering(BaseClustering):
                             "length_weight_path": str(length_weight_path),
                             "bandwidth": bandwidth,
                             "lmode": "l2",
-                            "result_wrapper": result,
                             "initial_list": initial_list,
                             "is_membership_fixed_path": str(fixed_path),
                             "resolution_parameter": resolution,
                             "partgraph_ratio": partgraph_ratio,
                         },
                     )
-                    jobs.append(job)
+                    jobs.append(cluster_res)
 
-            for job in jobs:
-                job.get()
+            for cluster_res in jobs:
+                cluster_res.get()
+
+        # save the leiden clustering results to ClusterResult.
+        for file in output_path.glob("Leiden_*.tsv"):
+            df = pd.read_csv(file, sep="\t", header=None, names=["contig_id", "cluster_id"])
+            result.clusters[file.name] = df
+
         return result
     
     def run_leiden(
@@ -213,7 +218,6 @@ class LeidenClustering(BaseClustering):
         ann_neighbor_indices: np.ndarray,
         ann_distances: np.ndarray,
         length_weight: Sequence[float],
-        result_wrapper: ClusterResult,
         bandwidth: float = 0.1,
         lmode: str = "l2",
         initial_list: Optional[List[Union[int, None]]] = None,
@@ -263,11 +267,6 @@ class LeidenClustering(BaseClustering):
         with open(output_file, "w") as handle:
             for contig_name in namelist:
                 handle.write(f"{contig_name}\t{assignments[contig_name]}\n")
-
-        df = pd.DataFrame.from_dict(assignments, orient="index", columns=["cluster"])
-        df.reset_index(inplace=True)
-        df.rename(columns={"index": "contig_id", "cluster": "cluster_id"}, inplace=True)
-        result_wrapper.clusters[output_file.name] = df
 
     def _prepare_leiden_edges(
         self,

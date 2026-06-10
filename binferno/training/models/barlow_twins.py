@@ -1,7 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
 
 
 class NeuralNetwork(nn.Module):
@@ -12,7 +10,7 @@ class NeuralNetwork(nn.Module):
         dropout=0.05,
         output_dim=128,
         corgi_dim=0,
-        n_layers=2,
+        dense_mode=False,
         kmer_dim=136,
         proj_head_dim=512,
     ):
@@ -28,53 +26,48 @@ class NeuralNetwork(nn.Module):
         if corgi_dim > 0:  # concat kmer with corgi and run single encoder.
             self.tnf_enc_dim += corgi_dim
 
-        # fix the number of layers to 3.
-        tnf_hidden1 = 512
-        tnf_hidden2 = 256
-        tnf_hidden3 = output_dim
-        self.tnf_encoder = nn.Sequential(
-            nn.Linear(self.tnf_enc_dim, tnf_hidden1),
-            nn.BatchNorm1d(tnf_hidden1),
-            nn.LeakyReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(tnf_hidden1, tnf_hidden2),
-            nn.BatchNorm1d(tnf_hidden2),
-            nn.LeakyReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(tnf_hidden2, tnf_hidden3),
-            nn.BatchNorm1d(tnf_hidden3),
-            nn.LeakyReLU(),
-        )
-        # else:  # tnf->256->128
-        #     self.tnf_encoder = nn.Sequential(
-        #         nn.Linear(self.tnf_enc_dim, 256),
-        #         nn.BatchNorm1d(256),
-        #         nn.LeakyReLU(),
-        #         nn.Dropout(dropout),
-        #         nn.Linear(256, output_dim),
-        #         nn.BatchNorm1d(output_dim),
-        #         nn.LeakyReLU(),  # the forgoten leakyrelu after batchnorm can cause the representation to have a lot of zeros, which can lead to worse performance. Adding it back can improve the performance.
-        #     )
+        # may add more layers. 
+        if not dense_mode:
+            tnf_hidden1 = 512
+            tnf_hidden2 = 256
+            tnf_hidden3 = output_dim
+            self.tnf_encoder = nn.Sequential(
+                nn.Linear(self.tnf_enc_dim, tnf_hidden1),
+                nn.BatchNorm1d(tnf_hidden1),
+                nn.LeakyReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(tnf_hidden1, tnf_hidden2),
+                nn.BatchNorm1d(tnf_hidden2),
+                nn.LeakyReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(tnf_hidden2, tnf_hidden3),
+                nn.BatchNorm1d(tnf_hidden3),
+                nn.LeakyReLU(),
+            )
+        else: # dense mode, tnf->1024->512->256->128
+            tnf_hidden1 = 1024
+            tnf_hidden2 = 512
+            tnf_hidden3 = 256
+            tnf_hidden4 = output_dim
+            self.tnf_encoder = nn.Sequential(
+                nn.Linear(self.tnf_enc_dim, tnf_hidden1),
+                nn.BatchNorm1d(tnf_hidden1),
+                nn.LeakyReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(tnf_hidden1, tnf_hidden2),
+                nn.BatchNorm1d(tnf_hidden2),
+                nn.LeakyReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(tnf_hidden2, tnf_hidden3),
+                nn.BatchNorm1d(tnf_hidden3),
+                nn.LeakyReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(tnf_hidden3, tnf_hidden4),
+                nn.BatchNorm1d(tnf_hidden4),
+                nn.LeakyReLU(),
+            )
 
-        # corgi treated as an individual modality and encode separately.
-
-        # apply adaptive coverage dim choices.
-        # n_samples = max(
-        #     1, coverage_dim // 2
-        # )  # one coverage mean and one coverage std, divide by 2.
-
-        # if n_samples <= 2:
-        #     cov_hidden1 = 32
-        #     cov_hidden2 = 16
-
-        # elif n_samples <= 5:
-        #     cov_hidden1 = 64
-        #     cov_hidden2 = 32
-
-        # elif n_samples <= 10:
-        #     cov_hidden1 = 128
-        #     cov_hidden2 = 64
-        # else:
+        # determined by coverage dim.
         self.coverage_encoder = _build_coverage_encoder(
             coverage_dim=coverage_dim, output_dim=output_dim, dropout=dropout
         )

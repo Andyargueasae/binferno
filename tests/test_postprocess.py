@@ -6,6 +6,10 @@ import numpy as np
 
 from binferno.postprocessing import BinfernoPostprocessor
 
+'''
+From the ClusterResult to the output bin writing.
+'''
+
 @pytest.fixture
 def binferno_postprocessor():
     with tempfile.TemporaryDirectory() as tmpdir:
