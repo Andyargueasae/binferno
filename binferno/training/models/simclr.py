@@ -89,10 +89,7 @@ class NeuralNetwork(nn.Module):
                 nn.BatchNorm1d(tnf_hidden4),
                 nn.LeakyReLU(),
             )
-        # Run A: 4-mer + correct architecture (your previous run, already done — ~71%)
-        # Run B: 5-mer + same architecture structure (just change input dim)
 
-        # leave fusion network to be implemented later.
         self.fusion_network = fusion_network(
             emb_dim=output_dim,
             gated=gated,
@@ -107,22 +104,6 @@ class NeuralNetwork(nn.Module):
             nn.ReLU(),
             nn.Linear(2048, 2048),
             nn.BatchNorm1d(2048),
-        )
-
-        self.proj_kmer = nn.Sequential(
-            nn.Linear(self.representation_dim, 2048),
-            nn.BatchNorm1d(2048),
-            nn.ReLU(),
-            nn.Linear(2048, 2048),
-            nn.BatchNorm1d(2048),
-        )
-
-        self.proj_cov = nn.Sequential(
-            nn.Linear(self.final_cov_dim, 1024),
-            nn.BatchNorm1d(1024),
-            nn.ReLU(),
-            nn.Linear(1024, 1024),
-            nn.BatchNorm1d(1024),
         )
 
     def _encode(self, x):
@@ -147,9 +128,7 @@ class NeuralNetwork(nn.Module):
     def forward_one(self, x):
         fused_emb, tnf_emb, cov_emb = self._encode(x)
         proj_emb = self.proj_head(fused_emb)  # 2048-projection head.
-        proj_kmer = self.proj_kmer(tnf_emb)  # 2048-projection head for tnf features.
-        proj_cov = self.proj_cov(cov_emb)  # 2048-projection head for coverage features.
-        return proj_emb, proj_kmer, proj_cov
+        return proj_emb, tnf_emb, cov_emb
 
 def fusion_network(
     emb_dim=128,
@@ -164,7 +143,6 @@ def fusion_network(
             num_heads=4,
             dropout=0.1,
         )
-    return ConcatFusion(emb_dim=emb_dim)
 
 
 class vae_for_coverage(nn.Module):  # Look at vamb to borrow some thoughts.
@@ -282,81 +260,145 @@ def _build_coverage_encoder(
 
 
 # Then our model got an attention-based fusion network.
+
 class AttentionFusion(nn.Module):
-    def __init__(self, emb_dim=128, num_heads=4, dropout=0.1):
+    """
+    Transformer-style cross-modal fusion over [kmer, coverage] tokens.
+
+    Inputs:
+        kmer_emb: (B, emb_dim)
+        cov_emb:  (B, emb_dim)
+    Output:
+        fused:    (B, out_dim)   default out_dim = 256
+
+    Design notes vs. the original:
+      - Pre-norm attention + FFN sublayers, each with a residual, so the
+        raw token signal is never lost and the block trains stably.
+      - LayerNorm (not BatchNorm) inside the token block: it operates on the
+        (B, 2, emb_dim) sequence per-token and is batch-size robust, which
+        matters for SimCLR where effective batch composition varies.
+      - Readout concatenates mean-pooled and both attended tokens, giving the
+        final projection a richer view than flatten() alone.
+      - out_dim widened to 256 to relieve the downstream bottleneck.
+    """
+
+    def __init__(self, emb_dim=128, num_heads=4, out_dim=256,
+                 ffn_mult=2, dropout=0.1):
         super().__init__()
-
         self.emb_dim = emb_dim
+        self.token_type_emb = nn.Embedding(2, emb_dim)  # 0=kmer, 1=coverage
 
+        # Attention sublayer (pre-norm)
+        self.norm_attn = nn.LayerNorm(emb_dim)
         self.self_attn = nn.MultiheadAttention(
             embed_dim=emb_dim,
             num_heads=num_heads,
             dropout=dropout,
             batch_first=True,
         )
+        self.drop_attn = nn.Dropout(dropout)
 
-        self.fused_proj = nn.Sequential(
-            nn.Linear(emb_dim * 2, emb_dim * 2),
-            nn.BatchNorm1d(emb_dim * 2),
-            nn.LeakyReLU(),
+        # Feed-forward sublayer (pre-norm)
+        self.norm_ffn = nn.LayerNorm(emb_dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(emb_dim, emb_dim * ffn_mult),
+            nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(emb_dim * 2, emb_dim),
-            nn.BatchNorm1d(emb_dim),
-            nn.LeakyReLU(),
+            nn.Linear(emb_dim * ffn_mult, emb_dim),
         )
-        # in __init__
-        self.token_type_emb = nn.Embedding(2, emb_dim)  # 0=kmer, 1=coverage
+        self.drop_ffn = nn.Dropout(dropout)
+
+        # Readout: [kmer_token ; cov_token ; mean_pool] -> out_dim
+        self.readout = nn.Sequential(
+            nn.Linear(emb_dim * 3, emb_dim * 2),
+            nn.LayerNorm(emb_dim * 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(emb_dim * 2, out_dim),
+        )
+        self.out_norm = nn.LayerNorm(out_dim)
 
     def forward(self, kmer_emb, cov_emb):
-        # in forward
+        B = kmer_emb.size(0)
+
         type_ids = torch.tensor([0, 1], device=kmer_emb.device)
-        token_type = self.token_type_emb(type_ids).unsqueeze(0)  # (1, 2, emb_dim)
-        tokens = torch.stack([kmer_emb, cov_emb], dim=1) + token_type
-        attended, _ = self.self_attn(tokens, tokens, tokens)
+        token_type = self.token_type_emb(type_ids).unsqueeze(0)  # (1, 2, D)
+        tokens = torch.stack([kmer_emb, cov_emb], dim=1) + token_type  # (B, 2, D)
 
-        fused = attended.flatten(1)
-        fused = self.fused_proj(fused)
+        # Pre-norm attention with residual
+        x = self.norm_attn(tokens)
+        attended, _ = self.self_attn(x, x, x, need_weights=False)
+        tokens = tokens + self.drop_attn(attended)
 
-        return fused
+        # Pre-norm FFN with residual
+        x = self.norm_ffn(tokens)
+        tokens = tokens + self.drop_ffn(self.ffn(x))
 
-
-class gated_fusion(nn.Module):
-    # gate fusion uses layernorm.
-    def __init__(self, emb_dim):
-        super(gated_fusion, self).__init__()
-        self.emb_dim = emb_dim
-
-        self.kmer_gate = nn.Sequential(
-            nn.LayerNorm(emb_dim * 2), nn.Linear(emb_dim * 2, emb_dim), nn.Sigmoid()
-        )
-        self.coverage_gate = nn.Sequential(
-            nn.LayerNorm(emb_dim * 2), nn.Linear(emb_dim * 2, emb_dim), nn.Sigmoid()
-        )
-        self.out_norm = nn.LayerNorm(self.emb_dim)
-
-    def forward(self, kmer_emb, coverage_emb):
-        # gate_weight = self.gate(torch.cat([kmer_emb, coverage_emb], dim=1))
-        kmer_gate = self.kmer_gate(torch.cat([kmer_emb, coverage_emb], dim=1))
-        coverage_gate = self.coverage_gate(torch.cat([kmer_emb, coverage_emb], dim=1))
-        fused = kmer_gate * kmer_emb + coverage_gate * coverage_emb
+        # Readout
+        kmer_t = tokens[:, 0]                 # (B, D)
+        cov_t = tokens[:, 1]                  # (B, D)
+        pooled = tokens.mean(dim=1)           # (B, D)
+        fused = self.readout(torch.cat([kmer_t, cov_t, pooled], dim=-1))
         return self.out_norm(fused)
 
+class gated_fusion(nn.Module):
+    """
+    Residual gated fusion with concat path and widened output.
 
-class ConcatFusion(nn.Module):
-    def __init__(self, emb_dim=128, dropout=0.2):
+    Inputs:
+        kmer: (B, 128)  from tnf_encoder
+        cov:  (B, 128)  from coverage_encoder
+    Output:
+        fused: (B, out_dim)   default out_dim=256
+
+    Changes vs. the multiplicative-gate version:
+      - Gates modulate a residual branch: signal = base + gate * delta,
+        so the raw modality features can never be zeroed out.
+      - Both modalities are concatenated (256-d) and projected, preserving
+        cross-modal interactions the old gate discarded.
+      - Output dim is configurable (256) to relieve the 128-d bottleneck.
+    """
+
+    def __init__(self, in_dim=128, fused_dim=256, out_dim=256, dropout=0.1):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(emb_dim * 2, 2048),
-            nn.BatchNorm1d(2048),
-            nn.LeakyReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(2048, emb_dim),
-            nn.BatchNorm1d(emb_dim),
-            nn.LeakyReLU(),
+        cat_dim = in_dim * 2  # kmer + cov concatenated
+
+        # Gates see the full concatenated context, output per-modality gates.
+        self.kmer_gate = nn.Sequential(
+            nn.LayerNorm(cat_dim),
+            nn.Linear(cat_dim, in_dim),
+            nn.Sigmoid(),
+        )
+        self.coverage_gate = nn.Sequential(
+            nn.LayerNorm(cat_dim),
+            nn.Linear(cat_dim, in_dim),
+            nn.Sigmoid(),
         )
 
-    def forward(self, kmer_emb, cov_emb):
-        return self.net(torch.cat([kmer_emb, cov_emb], dim=-1))
+        # Residual transforms: the "delta" each gate modulates.
+        self.kmer_transform = nn.Linear(in_dim, in_dim)
+        self.coverage_transform = nn.Linear(in_dim, in_dim)
+
+        # Fuse the concatenated, residually-gated features into fused_dim,
+        # then to out_dim. This is where the bottleneck is widened.
+        self.fuse = nn.Sequential(
+            nn.Linear(cat_dim, fused_dim),
+            nn.LayerNorm(fused_dim),
+            nn.LeakyReLU(0.01),
+            nn.Dropout(dropout),
+            nn.Linear(fused_dim, out_dim),
+        )
+        self.out_norm = nn.LayerNorm(out_dim)
+
+    def forward(self, kmer, cov):
+        cat = torch.cat([kmer, cov], dim=-1)  # (B, 256)
+
+        # Residual gating: base feature is always preserved.
+        kmer_g = kmer + self.kmer_gate(cat) * self.kmer_transform(kmer)
+        cov_g = cov + self.coverage_gate(cat) * self.coverage_transform(cov)
+
+        fused = self.fuse(torch.cat([kmer_g, cov_g], dim=-1))  # (B, out_dim)
+        return self.out_norm(fused)
 
 
 # The raw COMEBin's embedding network is a simple MLP with batch normalization and dropout. We can use it as a baseline model for our experiments. We can also implement a more complex fusion network later to see if we can improve the performance.

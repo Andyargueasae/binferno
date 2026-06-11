@@ -64,6 +64,10 @@ class BarlowTwinsTrainer(BaseTrainer):
         default=False,
         description="Whether to include an auxiliary loss term that encourages the model to produce similar embeddings for the original and augmented views of the same contig. This can help improve the quality of the learned embeddings by providing an additional training signal that reinforces the relationship between the original and augmented data.",
     )
+    proj_head_dim: int = Field(
+        default=512,
+        description="Dimension of the projection head used in the Barlow Twins architecture. The projection head is a small neural network that maps the output of the main encoder to a space where the Barlow Twins loss is applied. A larger proj_head_dim can allow for more complex transformations and potentially better performance, but it also increases the number of parameters and computational cost of the model.",
+    )
 
     def __call__(
         self,
@@ -139,12 +143,11 @@ class BarlowTwinsTrainer(BaseTrainer):
         composition_dim = feature_df.shape[1] - cov_dim
 
         corgi_dim = composition_dim - kmer_dim
-        proj_head_dim = 512
         model = NeuralNetwork(
             tnf_dim=composition_dim,
             coverage_dim=cov_dim,
             kmer_dim=kmer_dim,
-            proj_head_dim=proj_head_dim,
+            proj_head_dim=self.proj_head_dim,
             corgi_dim=corgi_dim,
             dense_mode=self.dense_mode,
             output_dim=self.output_dim,

@@ -99,19 +99,17 @@ class BaseTrainer(BaseModel):
             param_group["lr"] = start_lr  # base for LambdaLR
 
         def lr_lambda(current_epoch):
-            if warmup:
-                if current_epoch < warmup_epochs:
+
+            if current_epoch < warmup_epochs:
+                if warmup:
                     # Linear ramp from start_lr to max_lr
                     progress = current_epoch / max(warmup_epochs - 1, 1)
                     lr = start_lr + progress * (max_lr - start_lr)
                 else:
-                    lr = max_lr
-            if current_epoch < hold_end:
-                # Flat hold at max_lr — scheduler steps but LR doesn't change
-                lr = max_lr
+                    if current_epoch < hold_end:
+                        lr = max_lr
 
             else:
-                # Cosine decay from max_lr to min_learning_rate
                 decay_epochs = epochs - hold_end
                 if decay_epochs <= 0:
                     lr = min_learning_rate

@@ -66,6 +66,13 @@ class NeuralNetwork(nn.Module):
                 nn.BatchNorm1d(tnf_hidden4),
                 nn.LeakyReLU(),
             )
+        # dense mode cannot improve the performance... 
+        # As Barlow twins will reward embeddings more than encoder capacity.
+        # So what really matters won't be the kmer encoder and coverage encoder capacity, 
+        # but the fusion network and projection head capacity, 
+        # which will directly determine the quality of the embeddings 
+        # and the Barlow Twins loss optimization.
+
 
         # determined by coverage dim.
         self.coverage_encoder = _build_coverage_encoder(
@@ -74,11 +81,12 @@ class NeuralNetwork(nn.Module):
 
         self.final_cov_dim = output_dim
 
-        self.fusion_network = fusion_network(
+        self.fusion_network = AttentionFusion(
             emb_dim=output_dim,
             kmer_enc_dim=output_dim,
             coverage_dim=self.final_cov_dim,
         )
+
         self.representation_dim = output_dim
         self.proj_head = nn.Sequential(
             nn.Linear(self.representation_dim, self.proj_head_dim),
@@ -121,7 +129,7 @@ class NeuralNetwork(nn.Module):
 
 
 # Then our model got an attention-based fusion network.
-class attentionFusion(nn.Module):
+class AttentionFusion(nn.Module):
     DEFAULT_NUM_HEADS = 4
     DEFAULT_DROPOUT = 0.1
     GATE_INPUT_MULTIPLIER = 2  # For concatenated features in gates
@@ -141,7 +149,7 @@ class attentionFusion(nn.Module):
         emb_dim,
         coverage_dim,
     ):
-        super(attentionFusion, self).__init__()
+        super(AttentionFusion, self).__init__()
         # we will implement the attention fusion later, for now we can simply concatenate the features.
         self.kmer_enc_dim = kmer_enc_dim
         self.emb_dim = emb_dim
@@ -307,15 +315,6 @@ class attentionFusion(nn.Module):
 
         output = self.fused_proj(final_fused_features)
         return output
-
-
-def fusion_network(emb_dim=128, kmer_enc_dim=128, coverage_dim=128):
-    return attentionFusion(
-        kmer_enc_dim=kmer_enc_dim,
-        emb_dim=emb_dim,
-        coverage_dim=coverage_dim,
-    )
-
 
 def _build_coverage_encoder(coverage_dim: int, output_dim: int, dropout: float):
     """
