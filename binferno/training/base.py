@@ -85,10 +85,10 @@ class BaseTrainer(BaseModel):
         optimizer: torch.optim.Optimizer,
         min_learning_rate: float,
         epochs: int,
-        warmup: bool=False,
-        warmup_epochs: int=10,
-        max_lr_hold_epochs: int=0,
-        learning_rate: float=2.5e-3,
+        warmup: bool = False,
+        warmup_epochs: int = 10,
+        max_lr_hold_epochs: int = 0,
+        learning_rate: float = 2.5e-3,
     ):
         max_lr = learning_rate
         # warmup_start_lr = max_lr * 0.1
@@ -161,9 +161,7 @@ class BaseTrainer(BaseModel):
                 ).to(device)
 
                 batch_embeddings = model.get_embedding(batch_features)
-                batch_embeddings = F.normalize(
-                    batch_embeddings, p=2, dim=1
-                )
+                batch_embeddings = F.normalize(batch_embeddings, p=2, dim=1)
                 for j, header in enumerate(batch_encode.index):
                     clean_header = header.replace(suffix, "")
                     embeddings[clean_header] = batch_embeddings[j].cpu().numpy()

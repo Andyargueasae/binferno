@@ -26,7 +26,7 @@ class NeuralNetwork(nn.Module):
         if corgi_dim > 0:  # concat kmer with corgi and run single encoder.
             self.tnf_enc_dim += corgi_dim
 
-        # may add more layers. 
+        # may add more layers.
         if not dense_mode:
             tnf_hidden1 = 512
             tnf_hidden2 = 256
@@ -44,7 +44,7 @@ class NeuralNetwork(nn.Module):
                 nn.BatchNorm1d(tnf_hidden3),
                 nn.LeakyReLU(),
             )
-        else: # dense mode, tnf->1024->512->256->128
+        else:  # dense mode, tnf->1024->512->256->128
             tnf_hidden1 = 1024
             tnf_hidden2 = 512
             tnf_hidden3 = 256
@@ -66,13 +66,12 @@ class NeuralNetwork(nn.Module):
                 nn.BatchNorm1d(tnf_hidden4),
                 nn.LeakyReLU(),
             )
-        # dense mode cannot improve the performance... 
+        # dense mode cannot improve the performance...
         # As Barlow twins will reward embeddings more than encoder capacity.
-        # So what really matters won't be the kmer encoder and coverage encoder capacity, 
-        # but the fusion network and projection head capacity, 
-        # which will directly determine the quality of the embeddings 
+        # So what really matters won't be the kmer encoder and coverage encoder capacity,
+        # but the fusion network and projection head capacity,
+        # which will directly determine the quality of the embeddings
         # and the Barlow Twins loss optimization.
-
 
         # determined by coverage dim.
         self.coverage_encoder = _build_coverage_encoder(
@@ -88,14 +87,22 @@ class NeuralNetwork(nn.Module):
         )
 
         self.representation_dim = output_dim
-        self.proj_head = nn.Sequential(
-            nn.Linear(self.representation_dim, self.proj_head_dim),
-            nn.BatchNorm1d(self.proj_head_dim),
-            nn.LeakyReLU(),
-            nn.Linear(
-                self.proj_head_dim, self.proj_head_dim
-            ),  # here we projects to a higher dimension to make the Barlow Twins loss work better, since the original paper shows that using a higher dimension for the projection head can improve the performance. We can also add a non-linear activation function here to make the projection head more powerful.
-            nn.BatchNorm1d(self.proj_head_dim),
+
+        # self.proj_head = nn.Sequential(
+        #     nn.Linear(self.representation_dim, self.proj_head_dim),
+        #     nn.BatchNorm1d(self.proj_head_dim),
+        #     nn.LeakyReLU(),
+        #     nn.Linear(
+        #         self.proj_head_dim, self.proj_head_dim
+        #     ),  # here we projects to a higher dimension to make the Barlow Twins loss work better, since the original paper shows that using a higher dimension for the projection head can improve the performance. We can also add a non-linear activation function here to make the projection head more powerful.
+        #     nn.BatchNorm1d(self.proj_head_dim),
+        # )
+
+        self.proj_head = _build_bt_projector(
+            in_dim=self.representation_dim,
+            proj_dim=self.proj_head_dim,
+            n_layers=3,
+            dropout=0.0,
         )
 
     def _encode(self, x):
@@ -123,9 +130,41 @@ class NeuralNetwork(nn.Module):
         return proj_emb, tnf_emb, cov_emb
 
     def forward(self, x1, x2):
-        z1,kmer_z1,cov_z1 = self.forward_one(x1)
-        z2,kmer_z2,cov_z2 = self.forward_one(x2)
+        z1, kmer_z1, cov_z1 = self.forward_one(x1)
+        z2, kmer_z2, cov_z2 = self.forward_one(x2)
         return z1, z2, kmer_z1, kmer_z2, cov_z1, cov_z2
+
+
+# The projection head: which directly gives barlow twin loss the projected embeddings, should be looked with careful caution.
+def _build_bt_projector(in_dim, proj_dim=768, n_layers=3, dropout=0.0):
+    """
+    Barlow Twins projection head.
+
+    BT rewards a wide, non-linear projector: each hidden block is
+    Linear -> BN -> ReLU, and the final layer is Linear -> BN (no activation,
+    no bias on the last linear since BN recenters). Loss is computed on the
+    BN'd output. Width matters most; depth (3 layers) follows the BT recipe.
+
+    in_dim:    representation_dim (fused embedding size, e.g. 128)
+    proj_dim:  projector width — sweep this (512/768/1024), because output dim is only 128, we just bump it to 3-4x of the output dim, which is 512 or 768, to give the projector enough capacity to learn a good representation for the Barlow Twins loss optimization. The original paper uses 2048 for ImageNet, but our input dimension is much smaller, so we can use a smaller projector dimension.
+    n_layers:  total linear layers (BT uses 3)
+    dropout:   keep 0.0 to match the BT recipe; exposed only for experiments
+    """
+    assert n_layers >= 2, "projector needs at least 2 layers"
+    layers = []
+    d = in_dim
+    # hidden blocks: Linear -> BN -> ReLU  (optional dropout)
+    for _ in range(n_layers - 1):
+        layers.append(nn.Linear(d, proj_dim, bias=False))
+        layers.append(nn.BatchNorm1d(proj_dim))
+        layers.append(nn.ReLU(inplace=True))
+        if dropout > 0:
+            layers.append(nn.Dropout(dropout))
+        d = proj_dim
+    # final block: Linear -> BN  (no activation; BT loss reads this)
+    layers.append(nn.Linear(d, proj_dim, bias=False))
+    layers.append(nn.BatchNorm1d(proj_dim))
+    return nn.Sequential(*layers)
 
 
 # Then our model got an attention-based fusion network.
@@ -315,6 +354,7 @@ class AttentionFusion(nn.Module):
 
         output = self.fused_proj(final_fused_features)
         return output
+
 
 def _build_coverage_encoder(coverage_dim: int, output_dim: int, dropout: float):
     """

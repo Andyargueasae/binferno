@@ -130,6 +130,7 @@ class NeuralNetwork(nn.Module):
         proj_emb = self.proj_head(fused_emb)  # 2048-projection head.
         return proj_emb, tnf_emb, cov_emb
 
+
 def fusion_network(
     emb_dim=128,
     gated=False,
@@ -261,6 +262,7 @@ def _build_coverage_encoder(
 
 # Then our model got an attention-based fusion network.
 
+
 class AttentionFusion(nn.Module):
     """
     Transformer-style cross-modal fusion over [kmer, coverage] tokens.
@@ -282,8 +284,7 @@ class AttentionFusion(nn.Module):
       - out_dim widened to 256 to relieve the downstream bottleneck.
     """
 
-    def __init__(self, emb_dim=128, num_heads=4, out_dim=256,
-                 ffn_mult=2, dropout=0.1):
+    def __init__(self, emb_dim=128, num_heads=4, out_dim=256, ffn_mult=2, dropout=0.1):
         super().__init__()
         self.emb_dim = emb_dim
         self.token_type_emb = nn.Embedding(2, emb_dim)  # 0=kmer, 1=coverage
@@ -335,11 +336,12 @@ class AttentionFusion(nn.Module):
         tokens = tokens + self.drop_ffn(self.ffn(x))
 
         # Readout
-        kmer_t = tokens[:, 0]                 # (B, D)
-        cov_t = tokens[:, 1]                  # (B, D)
-        pooled = tokens.mean(dim=1)           # (B, D)
+        kmer_t = tokens[:, 0]  # (B, D)
+        cov_t = tokens[:, 1]  # (B, D)
+        pooled = tokens.mean(dim=1)  # (B, D)
         fused = self.readout(torch.cat([kmer_t, cov_t, pooled], dim=-1))
         return self.out_norm(fused)
+
 
 class gated_fusion(nn.Module):
     """

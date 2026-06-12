@@ -1,5 +1,4 @@
 from pathlib import Path
-import shutil
 
 import tyro
 from typing_extensions import Annotated
@@ -18,7 +17,6 @@ def binferno(
     bam: Path,
     # Output directory to store all results, including intermediate results and final bins.
     output_dir: Path,
-    
     features: BinfernoFeatureBuilder,
     training: BinfernoTrainer,
     clustering: BinfernoClustering,
@@ -27,8 +25,9 @@ def binferno(
         int,
         tyro.conf.arg(
             name="threads",
-            metavar="THREADS", 
-            help="Number of threads to use for parallel processing."),
+            metavar="THREADS",
+            help="Number of threads to use for parallel processing.",
+        ),
     ] = 4,
     train_only: Annotated[
         bool,
@@ -38,7 +37,6 @@ def binferno(
             help="True: only run training, False: full process.",
         ),
     ] = False,
-
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     logger.add(f"{output_dir}/binferno.log", rotation="1 MB", retention="10 days")
@@ -61,10 +59,8 @@ def binferno(
     logger.info("Starting clustering and writing MAGs.")
     cluster_output_dir = output_dir / "cluster_res"
     if cluster_output_dir.exists():
-        logger.warning(
-            f"Cluster output directory {cluster_output_dir} already exists."
-        )
-        
+        logger.warning(f"Cluster output directory {cluster_output_dir} already exists.")
+
     cluster_output_dir.mkdir(parents=True, exist_ok=True)
 
     cluster_result = clustering(
@@ -77,6 +73,7 @@ def binferno(
 
     with open(cluster_output_dir / "cluster_results.pkl", "wb") as f:
         import pickle
+
         pickle.dump(cluster_result, f)
 
     # Run Output results generation
@@ -96,10 +93,8 @@ def binferno(
     logger.info("Binferno pipeline completed successfully.")
     return
 
-
 def main():
     tyro.cli(binferno)
-
 
 if __name__ == "__main__":
     main()

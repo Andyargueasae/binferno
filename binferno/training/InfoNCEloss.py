@@ -2,6 +2,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch
 
+
 class info_nce_loss_hard_weight(nn.Module):
     def __init__(self, temperature=0.15):
         super().__init__()
@@ -49,9 +50,7 @@ class info_nce_loss_hard_weight(nn.Module):
 
         # Virtual repetition to pair each row's negatives against each individual positive view
         # Shape: [total * (n_views - 1), total]
-        negatives_repeated = torch.repeat_interleave(
-            negatives_only, n_views - 1, dim=0
-        )
+        negatives_repeated = torch.repeat_interleave(negatives_only, n_views - 1, dim=0)
 
         # 4. Fused Mathematical Log-Sum-Exp Reduction (Avoids huge torch.cat calls)
         max_val = torch.clamp(positives, min=0.0)
@@ -79,9 +78,7 @@ class info_nce_loss_hard_weight(nn.Module):
 
             # Top-5: Sort or partition the negative space to find the 5th highest negative baseline
             # topk(5) returns sorted negative tensor of shape [total, 5]. The 5th item (index 4) is our threshold.
-            top5_neg_threshold = torch.topk(negatives_only, k=5, dim=1).values[
-                :, 4:5
-            ]
+            top5_neg_threshold = torch.topk(negatives_only, k=5, dim=1).values[:, 4:5]
             top5_neg_repeated = torch.repeat_interleave(
                 top5_neg_threshold, n_views - 1, dim=0
             )
@@ -90,6 +87,7 @@ class info_nce_loss_hard_weight(nn.Module):
             top5_acc = (positives > top5_neg_repeated).float().mean().item() * 100.0
 
         return loss, top1_acc, top5_acc
+
 
 class info_nce_loss(nn.Module):
     def __init__(self, temperature=0.15):
@@ -138,9 +136,7 @@ class info_nce_loss(nn.Module):
 
         # Virtual repetition to pair each row's negatives against each individual positive view
         # Shape: [total * (n_views - 1), total]
-        negatives_repeated = torch.repeat_interleave(
-            negatives_only, n_views - 1, dim=0
-        )
+        negatives_repeated = torch.repeat_interleave(negatives_only, n_views - 1, dim=0)
 
         # 4. Fused Mathematical Log-Sum-Exp Reduction (Avoids huge torch.cat calls)
         max_val = torch.clamp(positives, min=0.0)
@@ -168,9 +164,7 @@ class info_nce_loss(nn.Module):
 
             # Top-5: Sort or partition the negative space to find the 5th highest negative baseline
             # topk(5) returns sorted negative tensor of shape [total, 5]. The 5th item (index 4) is our threshold.
-            top5_neg_threshold = torch.topk(negatives_only, k=5, dim=1).values[
-                :, 4:5
-            ]
+            top5_neg_threshold = torch.topk(negatives_only, k=5, dim=1).values[:, 4:5]
             top5_neg_repeated = torch.repeat_interleave(
                 top5_neg_threshold, n_views - 1, dim=0
             )

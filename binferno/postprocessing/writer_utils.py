@@ -9,9 +9,7 @@ from collections import defaultdict
 import subprocess
 import csv
 
-from scipy import cluster
 import loguru
-
 import pandas as pd
 from typing import Dict, List, Tuple, Iterator, TextIO, Optional
 
@@ -23,6 +21,7 @@ BinDict = Dict[str, Dict[str, set]]
 ContigAssignmentDict = Dict[str, Dict[str, str]]
 QualityCache = Dict[str, Dict[str, Tuple[float, float]]]
 
+
 class GenomeProfiler:
     """
     Profile genome bins across binning methods using CheckM.
@@ -33,7 +32,7 @@ class GenomeProfiler:
         check_on_path("checkm")
         self.cpus = cpus
 
-    def profile_setup(self, database):
+    def profile_setup(self, database: Path):
         """
         Set the active CheckM database root.
         """
@@ -75,9 +74,7 @@ class GenomeProfiler:
         marker_gene_table = os.path.join(output_dir, MARKER_GENE_TABLE)
         genome_quality_table = os.path.join(output_dir, GENOME_QUALITY_TABLE)
 
-        analyze_done = (
-            os.path.exists(output_dir) and len(os.listdir(output_dir)) > 0
-        )
+        analyze_done = os.path.exists(output_dir) and len(os.listdir(output_dir)) > 0
         marker_done = os.path.exists(marker_gene_table)
         quality_done = os.path.exists(genome_quality_table)
 
@@ -343,9 +340,7 @@ class GenomeProfiler:
                 if not os.path.exists(bac_quality_table) or not os.path.exists(
                     ar_quality_table
                 ):
-                    self.logger.error(
-                        "Missing Bac/Ar quality table for %s.", method_id
-                    )
+                    self.logger.error("Missing Bac/Ar quality table for %s.", method_id)
                     self.logger.error(
                         "Please verify there were bins in the bin directory specified for this method."
                     )
@@ -397,6 +392,7 @@ def get_binstats(bin_contig_names, markers):
     _, comp, cont = markers.bin_quality(bin_contig_names)
     return comp, cont
 
+
 def read_cluster_contigs(
     cluster_results: Dict[str, pd.DataFrame],
 ) -> Tuple[BinDict, ContigAssignmentDict]:
@@ -425,6 +421,7 @@ def read_cluster_contigs(
 
     return bins, contigs_in_bins
 
+
 def compute_bin_quality_cache(
     bins: BinDict,
     methods_sorted: List[str],
@@ -441,6 +438,7 @@ def compute_bin_quality_cache(
             quality_cache[method_id][bin_id] = (comp, cont)
 
     return quality_cache
+
 
 def summarize_method_quality(
     bins: BinDict,
@@ -511,6 +509,7 @@ def summarize_method_quality(
 
     return bin_quality_dict, best_method
 
+
 def savecontigs_with_high_bin_quality(
     bins: BinDict,
     best_method: str,
@@ -543,6 +542,7 @@ def savecontigs_with_high_bin_quality(
                     handle_5005.write(f"{contig_id}\t{bin_count_5005}\n")
                 bin_count_5005 += 1
 
+
 def write_estimated_bin_quality(bin_quality_dict, output_file):
     """
     Write method-level quality summary table, sorted by num_905 and sum_cont5.
@@ -570,6 +570,7 @@ def write_estimated_bin_quality(bin_quality_dict, output_file):
                 f"{stats['sum_cont5']}\n"
             )
 
+
 def estimate_bins_quality_nobins(
     bac_mg_table: str,
     ar_mg_table: str,
@@ -591,6 +592,7 @@ def estimate_bins_quality_nobins(
         save_high_quality_contigs=True,
     )
 
+
 def estimate_bins_quality_nobins_pltd(
     pltd_mg_table: str,
     res_path: Path,
@@ -610,6 +612,7 @@ def estimate_bins_quality_nobins_pltd(
         cluster_result=cluster_result,
         save_high_quality_contigs=False,
     )
+
 
 def _estimate_bins_quality_common(
     markers,
@@ -654,6 +657,7 @@ def _estimate_bins_quality_common(
 
     return best_method
 
+
 def _open_text_maybe_gzip(filepath: str) -> TextIO:
     """
     Open a plain-text or gzipped text file.
@@ -661,6 +665,7 @@ def _open_text_maybe_gzip(filepath: str) -> TextIO:
     if filepath.endswith(".gz"):
         return gzip.open(filepath, "rt", encoding="utf-8")
     return open(filepath, "r", encoding="utf-8")
+
 
 def _iter_fasta(filepath: str) -> Iterator[Tuple[str, str]]:
     """
@@ -690,9 +695,8 @@ def _iter_fasta(filepath: str) -> Iterator[Tuple[str, str]]:
         if current_header is not None:
             yield current_header, "".join(seq_chunks)
 
-def _read_result_map(
-    resultfile: str
-) -> Tuple[Dict[str, list], Dict[str, str]]:
+
+def _read_result_map(resultfile: str) -> Tuple[Dict[str, list], Dict[str, str]]:
     """
     Read contig-to-cluster assignments.
 
@@ -717,6 +721,7 @@ def _read_result_map(
             contig_to_cluster[contig_name] = cluster_name
 
     return dict(cluster_to_contigs), contig_to_cluster
+
 
 def gen_bins(fastafile: str, resultfile: str, outputdir: str) -> None:
     """
@@ -754,6 +759,7 @@ def gen_bins(fastafile: str, resultfile: str, outputdir: str) -> None:
     finally:
         for handle in open_handles.values():
             handle.close()
+
 
 def filter_small_bins(
     logger,
@@ -801,13 +807,15 @@ def filter_small_bins(
     gen_bins(fastafile, filtered_tsv, os.path.join(output_path, "res_bins"))
     shutil.copy2(filtered_tsv, os.path.join(output_path, "binferno_res.tsv"))
 
+
 def check_on_path(tool_name: str) -> None:
     """
     Check if a tool is available on the system PATH.
     """
     if shutil.which(tool_name) is None:
         raise RuntimeError(f"{tool_name} not found on PATH. Please install it.")
-    
+
+
 def make_sure_path_exists(path: str) -> None:
     """
     Create a directory if it does not exist.

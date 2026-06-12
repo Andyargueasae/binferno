@@ -1,7 +1,7 @@
-
 from pathlib import Path
 from pydantic import BaseModel
 import loguru
+
 
 class BasePostprocessor(BaseModel):
     def __call__(

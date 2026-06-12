@@ -20,12 +20,12 @@ from .cluster_utils import (
     seed_kmeans_full,
     gen_seed_idx,
     _read_seed_count,
-    apply_dimension_reduction
+    apply_dimension_reduction,
 )
 
 
 class LeidenClustering(BaseClustering):
-    seed:int = 42
+    seed: int = 42
 
     def __call__(
         self,
@@ -33,7 +33,7 @@ class LeidenClustering(BaseClustering):
         output_path: Path,
         embeddings: pd.DataFrame,
         logger: loguru._logger.Logger,
-        threads: int=1,
+        threads: int = 1,
         plastid: bool = False,
     ) -> ClusterResult:
         np.random.seed(self.seed)
@@ -41,7 +41,7 @@ class LeidenClustering(BaseClustering):
         result = ClusterResult(
             clusters={},
             n_genome=0,
-        ) # instantiate an empty ClusterResult to store results and return at the end.
+        )  # instantiate an empty ClusterResult to store results and return at the end.
 
         if plastid:
             n_genome = gen_seed(
@@ -49,22 +49,28 @@ class LeidenClustering(BaseClustering):
                 contig_file=contigs,
                 output_dir=output_path,
                 threads=threads,
-                contig_length_threshold=1001,
+                contig_length_threshold=self.contig_len + 1,
                 marker_name="pltd_marker",
                 quarter="2quarter",
             )
-            seed_file = output_path / f"{contigs.name}.pltd_marker.2quarter_lencutoff_1001.seed"
+            seed_file = (
+                output_path
+                / f"{contigs.name}.pltd_marker.2quarter_lencutoff_{self.contig_len + 1}.seed"
+            )
         else:
             n_genome = gen_seed(
                 logger,
                 contig_file=contigs,
                 output_dir=output_path,
                 threads=threads,
-                contig_length_threshold=1001,
+                contig_length_threshold=self.contig_len + 1,
                 marker_name="bacar_marker",
                 quarter="2quarter",
             )
-            seed_file = output_path / f"{contigs.name}.bacar_marker.2quarter_lencutoff_1001.seed"
+            seed_file = (
+                output_path
+                / f"{contigs.name}.bacar_marker.2quarter_lencutoff_{self.contig_len + 1}.seed"
+            )
 
         result.n_genome = n_genome
 
@@ -100,7 +106,7 @@ class LeidenClustering(BaseClustering):
 
         bin_nums = seed_num
         logger.info(f"Bin_numbers:\t{bin_nums}")
-        
+
         kmeans_out = seed_kmeans_full(
             logger=logger,
             contig_file=contigs,
@@ -178,8 +184,15 @@ class LeidenClustering(BaseClustering):
                     )
 
                     if output_file.exists():
-                        logger.warning(f"Output file {output_file} already exists. Skipping Leiden run and save to ClusterResult.")
-                        df = pd.read_csv(output_file, sep="\t", header=None, names=["contig_id", "cluster_id"])
+                        logger.warning(
+                            f"Output file {output_file} already exists. Skipping Leiden run and save to ClusterResult."
+                        )
+                        df = pd.read_csv(
+                            output_file,
+                            sep="\t",
+                            header=None,
+                            names=["contig_id", "cluster_id"],
+                        )
                         result.clusters[output_file.name] = df
                         continue
 
@@ -206,11 +219,13 @@ class LeidenClustering(BaseClustering):
 
         # save the leiden clustering results to ClusterResult.
         for file in output_path.glob("Leiden_*.tsv"):
-            df = pd.read_csv(file, sep="\t", header=None, names=["contig_id", "cluster_id"])
+            df = pd.read_csv(
+                file, sep="\t", header=None, names=["contig_id", "cluster_id"]
+            )
             result.clusters[file.name] = df
 
         return result
-    
+
     def run_leiden(
         self,
         output_file: Path,

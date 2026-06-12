@@ -8,9 +8,11 @@ from .leiden import LeidenClustering
 from .dbscan import DbscanClustering
 import loguru
 
+
 class ClusterMethod(Enum):
     leiden = "leiden"
     dbscan = "dbscan"
+
 
 class BinfernoClustering(BaseClustering):
     cluster_method: ClusterMethod = Field(
@@ -33,7 +35,6 @@ class BinfernoClustering(BaseClustering):
         embeddings: pd.DataFrame,
         contigs: Path,
         output_path: Path = None,
-        contig_len: int = 1000,
         logger: loguru._logger.Logger = None,  # type: ignore
         threads: int = 1,
     ) -> ClusterResult:
@@ -44,7 +45,7 @@ class BinfernoClustering(BaseClustering):
                     output_path=output_path,
                     embeddings=embeddings,
                     logger=logger,
-                    threads=threads, 
+                    threads=threads,
                     plastid=self.plastid,
                 )
             case ClusterMethod.dbscan:

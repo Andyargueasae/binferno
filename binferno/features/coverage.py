@@ -553,7 +553,21 @@ def calculate_bam_cov(
             f"{os.path.basename(bam_file)}"
         )
 
-        pysam.index(bam_file)
+        # if the bam is empty, we expect coverage to be all zeros, but we still want to return a dataframe with the correct fragment headers and columns.
+        if os.path.getsize(bam_file) == 0:
+            print(f"BAM file {bam_file} is empty. Assigning zero coverage for all fragments.")
+            zero_cov = pd.DataFrame(
+                index=all_fragment_headers,
+                columns=[f"{sample_names_map[bam_file]}_coverage", f"{sample_names_map[bam_file]}_coverage_std"],
+            )
+            # make all values zero.
+            zero_cov = zero_cov.fillna(0.0)
+            mean_series_list.append(zero_cov.iloc[:, 0])
+            std_series_list.append(zero_cov.iloc[:, 1])
+            continue
+
+        if not os.path.exists(str(bam_file) + ".bai"):
+            pysam.index(bam_file)
 
         with pysam.AlignmentFile(bam_file, "rb") as bam:
             total_mapped = bam.mapped

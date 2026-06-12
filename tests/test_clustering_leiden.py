@@ -33,3 +33,6 @@ def test_leiden_clustering(leiden_clustering):
     df = pd.read_csv(output_file)
     assert "cluster" in df.columns, "Output file does not contain 'cluster' column."
     assert len(df) == distance_matrix.shape[0], "Output file does not have the correct number of rows."
+
+def test_dbscan_clustering():
+    return

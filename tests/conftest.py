@@ -1,13 +1,13 @@
-import tempfile
-import pytest
-from unittest.mock import patch
+from os import name
+from re import sub
 
-import subprocess
+import pytest
+import random
 import numpy as np
 import pandas as pd
 from pathlib import Path
 
-CONTIG=Path(__file__).parent / "data" / "fasta.fna"
+CONTIG=Path(__file__).parent / "data" / "tiny.fasta"
 BAM=Path(__file__).parent / "data" / "bam" # a directory.
 
 '''
@@ -26,17 +26,51 @@ def rng() -> np.random.Generator:
 def tiny_fasta(tmp_path: Path) -> Path:
     path = tmp_path / "contigs.fna"
     path.write_text(
-        ">contig_1\n" + "ATGC" * 400 + "\n"
-        ">contig_2\n" + "GCAT" * 500 + "\n"
-        ">contig_3\n" + "AAAA" * 300 + "\n"
+        ">contig_1\n" + "ATGC" * 900 + "\n"
+        ">contig_2\n" + "GCAT" * 900 + "\n"
+        ">contig_3\n" + "AAAA" * 900 + "\n"
     )
     return path
 
+@pytest.fixture
+def bam_dir(tmp_path: Path) -> Path:
+    bam_path = tmp_path / "bam"
+    bam_path.mkdir()
+    # Create a dummy BAM file (empty, just for testing)
+    (bam_path / "sample1.bam").write_text("")
+    return bam_path
 
 @pytest.fixture
-def toy_embeddings(rng): # this is after the encoding step.
-    x = rng.normal(size=(12, 64)).astype("float32")
+def toy_embeddings(rng): # this is after the encoding step, for clustering.
+    x = rng.normal(size=(16, 128)).astype("float32")
     x /= np.linalg.norm(x, axis=1, keepdims=True)
-    return pd.DataFrame(x, index=[f"contig_{i}" for i in range(12)])
+    # assume we have 16 contigs, and each contig is represented by a 128-dim embedding vector.
+    return pd.DataFrame(x, index=[f"contig_{i}" for i in range(16)])
 
-
+@pytest.fixture
+def dummy_all_fragments():
+    seq1="ATGC" * 900
+    seq2="GCAT" * 900
+    seq3="AAAA" * 900
+    frag_dict={}
+    all_frags=[]
+    namelist=[]
+    frag_dict["contig_1"] = {"sequence": seq1, "fragments": [], "fragment_info": {}}
+    frag_dict["contig_2"] = {"sequence": seq2, "fragments": [], "fragment_info": {}}
+    frag_dict["contig_3"] = {"sequence": seq3, "fragments": [], "fragment_info": {}}
+    for i in range(6):
+        subseq_start = random.randint(0, 1000)
+        subseq_end = random.randint(1000, 4*900)
+        frag_dict["contig_1"]["fragments"].append((f"contig_1_frag_{i}", seq1[subseq_start:subseq_end]))
+        frag_dict["contig_2"]["fragments"].append((f"contig_2_frag_{i}", seq2[subseq_start:subseq_end]))
+        frag_dict["contig_3"]["fragments"].append((f"contig_3_frag_{i}", seq3[subseq_start:subseq_end]))
+        frag_dict["contig_1"]["fragment_info"][f"contig_1_frag_{i}"] = {"start": subseq_start, "end": subseq_end}
+        frag_dict["contig_2"]["fragment_info"][f"contig_2_frag_{i}"] = {"start": subseq_start, "end": subseq_end}
+        frag_dict["contig_3"]["fragment_info"][f"contig_3_frag_{i}"] = {"start": subseq_start, "end": subseq_end}
+        all_frags.append((f"contig_1_frag_{i}", seq1[subseq_start:subseq_end]))
+        all_frags.append((f"contig_2_frag_{i}", seq2[subseq_start:subseq_end]))
+        all_frags.append((f"contig_3_frag_{i}", seq3[subseq_start:subseq_end]))
+        namelist.append(f"contig_1_frag_{i}")
+        namelist.append(f"contig_2_frag_{i}")
+        namelist.append(f"contig_3_frag_{i}")
+    return frag_dict, all_frags, namelist

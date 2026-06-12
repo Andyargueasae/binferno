@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-from glob import glob
 from pathlib import Path
 import shutil
 
 import loguru
 from pydantic import Field
-import pandas as pd
+from typing import Tuple, Dict
 
 from .base import BasePostprocessor
 from ..clustering.base import ClusterResult
@@ -17,8 +16,9 @@ from .writer_utils import (
     GenomeProfiler,
 )
 
+
 class BinfernoPostprocessor(BasePostprocessor):
-    checkm_database: str = Field(default="", description="Path to CheckM database")
+    checkm_database: Path = Field(default="", description="Path to CheckM database")
     minbin_size: int = Field(
         default=200_000,
         description="Minimum bin size for filtering contigs before clustering.",
@@ -36,7 +36,7 @@ class BinfernoPostprocessor(BasePostprocessor):
         logger: loguru._logger.Logger = None,
         plastid: bool = False,
     ) -> None:
-        
+
         checkm_database = self.checkm_database
 
         if output_path is None:
@@ -59,18 +59,22 @@ class BinfernoPostprocessor(BasePostprocessor):
         res_name = f"weight_seed_kmeans_k_{n_genome}_result.tsv"
 
         # Dict[str, Tuple[str, str]]: res_name -> (bin_path, suffix)
-        bin_dirs = {res_name: (str(cluster_res_dir / f"{res_name}_bins"), "fa")}
+        bin_dirs: Dict[str, Tuple[str, str]] = {
+            res_name: (str(cluster_res_dir / f"{res_name}_bins"), "fa")
+        }
 
         assert not unitem_profile_dir.exists()
         unitem_profile_dir.mkdir(parents=True, exist_ok=False)
-        
+
         profile = GenomeProfiler(cpus=num_threads, logger=logger)
         profile.profile_setup(checkm_database)
 
         if plastid:
             profile.run_pltd(bin_dirs, str(unitem_profile_dir))
         else:
-            profile.run(bin_dirs, str(unitem_profile_dir)) # make sure that kmeans bins should be there. 
+            profile.run(
+                bin_dirs, str(unitem_profile_dir)
+            )  # make sure that kmeans bins should be there.
 
         bac_mg_table = (
             unitem_profile_dir

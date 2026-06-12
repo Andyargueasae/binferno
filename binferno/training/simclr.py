@@ -14,7 +14,7 @@ import pyfastx
 from torch.amp import GradScaler
 import loguru
 import pandas as pd
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 
 from ..utils import calc_n50
@@ -529,7 +529,7 @@ class SimCLRTrainer(BaseTrainer):
                 device=device,
                 temperature=temperature,
                 n_cov=n_cov,
-                auxiliary_loss=auxiliary_loss
+                auxiliary_loss=auxiliary_loss,
             )
 
             scheduler.step()
@@ -581,10 +581,10 @@ class SimCLRTrainer(BaseTrainer):
         if not self.hard_weighted_nce:
             info_nceloss_fn = info_nce_loss(temperature=temperature).to(device)
         else:
-            info_nceloss_fn = info_nce_loss_hard_weight(
-                temperature=temperature
-            ).to(device)
-        
+            info_nceloss_fn = info_nce_loss_hard_weight(temperature=temperature).to(
+                device
+            )
+
         model.train()
         stats = None
         total_loss = 0.0
@@ -607,10 +607,18 @@ class SimCLRTrainer(BaseTrainer):
             if auxiliary_loss:
                 L_kmer = 1.0
                 L_cov = 1.0
-                kmer_loss, _, _ = info_nceloss_fn(kmer_emb, batch_size=actual_batch_size,
-                                            device=device, n_views=self.view_num)
-                cov_loss, _, _ = info_nceloss_fn(cov_emb, batch_size=actual_batch_size,
-                                            device=device, n_views=self.view_num)
+                kmer_loss, _, _ = info_nceloss_fn(
+                    kmer_emb,
+                    batch_size=actual_batch_size,
+                    device=device,
+                    n_views=self.view_num,
+                )
+                cov_loss, _, _ = info_nceloss_fn(
+                    cov_emb,
+                    batch_size=actual_batch_size,
+                    device=device,
+                    n_views=self.view_num,
+                )
                 loss = loss + L_kmer * kmer_loss + L_cov * cov_loss
 
             loss.backward()
@@ -781,7 +789,7 @@ class SimCLRTrainer(BaseTrainer):
         output_dir=None,
         view_num=6,
         contig_length=1000,
-    ) -> Dict[str, pd.DataFrame]:
+    ) -> Tuple[Dict[str, pd.DataFrame], List, List]:
         # process input contigs into augmented fragments.
         FragMent_Dict, All_Fragments = self.augment_views(
             contigs=contigs,

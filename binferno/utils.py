@@ -93,14 +93,24 @@ def gen_seed(
 
     hmmExeURL = "hmmsearch"
     # rewrite to Path.
-    markerExeURL = Path(__file__).parent / "auxiliary" / f"test_getmarker_{quarter}.pl"
+    # markerExeURL = Path(__file__).parent / "auxiliary" / f"test_getmarker_{quarter}.pl"
+    markerExeURL = Path(__file__).parent / "auxiliary" / f"getmarker_{quarter}.py"
     markerURL = Path(__file__).parent / "auxiliary" / f"{marker_name}.hmm"
 
     fragResult_prefix = output_dir / (contig_file.name + ".frag")
     hmmResultURL = output_dir / (contig_file.name + "." + marker_name + ".hmmout")
-    seedURL = output_dir / (contig_file.name + "." + marker_name + "." + quarter + "_lencutoff_" + str(contig_length_threshold) + ".seed")
+    seedURL = output_dir / (
+        contig_file.name
+        + "."
+        + marker_name
+        + "."
+        + quarter
+        + "_lencutoff_"
+        + str(contig_length_threshold)
+        + ".seed"
+    )
     marker_gene_faa = output_dir / (contig_file.name + ".frag.faa")
-    
+
     if not (os.path.exists(marker_gene_faa)):
         fragCmd = (
             fragScanURL

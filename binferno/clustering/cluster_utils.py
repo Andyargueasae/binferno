@@ -46,6 +46,7 @@ def get_length(fastx_file):
     f.close()
     return length
 
+
 def _filter_embeddings_by_length(
     emb_df: pd.DataFrame,
     contig_file: str,
@@ -69,6 +70,7 @@ def _filter_embeddings_by_length(
         contig_lengths[keep_mask],
     )
 
+
 def _read_seed_count(seed_file: str) -> int:
     if not os.path.exists(seed_file):
         raise FileNotFoundError(f"Seed file '{seed_file}' does not exist.")
@@ -81,6 +83,7 @@ def _read_seed_count(seed_file: str) -> int:
     except ValueError:
         raise ValueError(f"Invalid seed file '{seed_file}'.")
     return seed_num
+
 
 def gen_seed_idx(seed_file: str, contig_id_list: Sequence[str]) -> List[int]:
     """
@@ -97,6 +100,7 @@ def gen_seed_idx(seed_file: str, contig_id_list: Sequence[str]) -> List[int]:
                 resolved.append(idx)
 
     return resolved
+
 
 def seed_kmeans_full(
     logger: logging.Logger,
@@ -116,7 +120,9 @@ def seed_kmeans_full(
     output_tsv = f"{output_prefix}_k_{bin_number}_result.tsv"
 
     if os.path.exists(output_tsv):
-        output_df = pd.read_csv(output_tsv, sep="\t", header=None, names=["contig_id", "cluster_id"])
+        output_df = pd.read_csv(
+            output_tsv, sep="\t", header=None, names=["contig_id", "cluster_id"]
+        )
         logger.info(f"Skipping existing KMeans result: {output_tsv}")
         return {output_tsv: output_df}
 
@@ -143,10 +149,13 @@ def seed_kmeans_full(
     save_result(km.labels_, output_tsv, namelist)
     gen_bins(str(contig_file), output_tsv, f"{output_tsv}_bins")
 
-    output_df = pd.DataFrame(output_tsv, columns=["contig_id", "cluster_id"])
+    output_df = pd.read_csv(
+        output_tsv, sep="\t", header=None, names=["contig_id", "cluster_id"]
+    )
 
     logger.info(f"Weighted seed-kmeans time:\t{time() - start:.3f}s")
     return {output_tsv: output_df}
+
 
 def partial_seed_init(
     X,
@@ -188,9 +197,7 @@ def partial_seed_init(
     ).ravel()
 
     for c, center_id in enumerate(seed_idx[1:], start=1):
-        centers[c] = (
-            X[center_id].toarray().ravel() if sp.issparse(X) else X[center_id]
-        )
+        centers[c] = X[center_id].toarray().ravel() if sp.issparse(X) else X[center_id]
         closest_dist_sq = np.minimum(
             closest_dist_sq,
             euclidean_distances(
@@ -230,14 +237,13 @@ def partial_seed_init(
                 best_dist_sq = new_dist_sq
 
         centers[c] = (
-            X[best_candidate].toarray().ravel()
-            if sp.issparse(X)
-            else X[best_candidate]
+            X[best_candidate].toarray().ravel() if sp.issparse(X) else X[best_candidate]
         )
         closest_dist_sq = best_dist_sq
         current_pot = best_pot
 
     return centers
+
 
 def apply_dimension_reduction(X: np.ndarray) -> np.ndarray:
     """
@@ -247,11 +253,13 @@ def apply_dimension_reduction(X: np.ndarray) -> np.ndarray:
 
     return X
 
+
 def file_len(fname):
     with open(fname) as f:
         for i, l in enumerate(f):
             pass
     return i + 1
+
 
 def save_result(result, filepath, namelist):
     filedir, filename = os.path.split(filepath)
@@ -262,6 +270,7 @@ def save_result(result, filepath, namelist):
     with open(filepath, "w") as f:
         for contigIdx in range(len(result)):
             f.write(namelist[contigIdx] + "\t" + str(int(result[contigIdx])) + "\n")
+
 
 def gen_bins(fastafile, resultfile, outputdir):
     # read fasta file

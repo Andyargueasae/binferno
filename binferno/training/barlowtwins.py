@@ -4,7 +4,7 @@ import os
 from collections import OrderedDict
 from pathlib import Path
 
-from typing import Dict
+from typing import Dict, Tuple
 from pydantic import Field
 import torch
 import torch.nn as nn
@@ -22,6 +22,7 @@ import loguru
 from .models.barlow_twins import NeuralNetwork
 from ..features import BinfernoFeatureBuilder
 from .base import BaseTrainer
+
 
 class BarlowTwinsTrainer(BaseTrainer):
 
@@ -276,7 +277,7 @@ class BarlowTwinsTrainer(BaseTrainer):
                 return loss, stats
 
             return loss
-    
+
     class modality_BT_loss(nn.Module):
         def __init__(self, lambda_bt=5e-3, alpha=1.0, eps=1e-6):
             super().__init__()
@@ -303,9 +304,7 @@ class BarlowTwinsTrainer(BaseTrainer):
 
             loss_matrix = C.pow(2)
             diag = torch.diagonal(C)
-            invariance_loss = (
-                (diag - 1.0).pow(2).sum()
-            )
+            invariance_loss = (diag - 1.0).pow(2).sum()
 
             redundancy_loss = loss_matrix.sum() - torch.diagonal(loss_matrix).sum()
             loss = self.alpha * invariance_loss + self.lambda_bt * redundancy_loss
@@ -533,8 +532,11 @@ class BarlowTwinsTrainer(BaseTrainer):
         for epoch in epoch_iter:
 
             avg_loss, stats = self.train_an_epoch(
-                model=model, dataloader=dataloader, optimizer=optimizer, 
-                device=device, auxiliary_loss=auxiliary_loss,
+                model=model,
+                dataloader=dataloader,
+                optimizer=optimizer,
+                device=device,
+                auxiliary_loss=auxiliary_loss,
             )
 
             scheduler.step()
@@ -568,10 +570,14 @@ class BarlowTwinsTrainer(BaseTrainer):
 
         return model
 
-    def train_an_epoch(self, model, dataloader, optimizer, device, auxiliary_loss=False):
+    def train_an_epoch(
+        self, model, dataloader, optimizer, device, auxiliary_loss=False
+    ):
         criterion = self.BT_loss(lambda_bt=5e-3, alpha=1.0).to(device)
-        # if using kmer or coverage. 
-        auxiliary_criterion = self.modality_BT_loss(lambda_bt=5e-3, alpha=1.0).to(device)
+        # if using kmer or coverage.
+        auxiliary_criterion = self.modality_BT_loss(lambda_bt=5e-3, alpha=1.0).to(
+            device
+        )
         model.train()
         total_loss = 0.0
         stats = None
@@ -583,11 +589,13 @@ class BarlowTwinsTrainer(BaseTrainer):
 
             optimizer.zero_grad(set_to_none=True)
 
-            output1, output2, kmer_z1, kmer_z2, cov_z1, cov_z2 = model(features1, features2)
+            output1, output2, kmer_z1, kmer_z2, cov_z1, cov_z2 = model(
+                features1, features2
+            )
 
             last_batch = batch_i == len(dataloader) - 1
 
-            # fused_embedding derived loss. 
+            # fused_embedding derived loss.
             if last_batch:
                 fuse_loss, stats = criterion(
                     feature1=output1, feature2=output2, return_stats=True
@@ -918,7 +926,7 @@ class BarlowTwinsTrainer(BaseTrainer):
         output_dir=None,
         view_num=6,
         contig_length=1000,
-    ) -> Dict[str, pd.DataFrame]:
+    ) -> Tuple[Dict[str, pd.DataFrame], list, list]:
         # process input contigs into augmented fragments.
         FragMent_Dict, All_Fragments = self.augment_views(
             contigs=contigs,
