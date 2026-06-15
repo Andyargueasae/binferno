@@ -166,6 +166,7 @@ def _build_bt_projector(in_dim, proj_dim=768, n_layers=3, dropout=0.0):
     layers.append(nn.BatchNorm1d(proj_dim))
     return nn.Sequential(*layers)
 
+
 # Then our model got an attention-based fusion network.
 class AttentionFusion(nn.Module):
     DEFAULT_NUM_HEADS = 4

@@ -41,9 +41,7 @@ class GenomeProfiler:
             sys.exit(1)
 
         cmd = ["checkm", "data", "setRoot", str(database)]
-        self.logger.info(
-            f"Setting up CheckM database with command: {' '.join(cmd)}"
-        )
+        self.logger.info(f"Setting up CheckM database with command: {' '.join(cmd)}")
         subprocess.run(cmd, check=True)
 
     def _run_cmd(self, cmd: List[str], step_name: str) -> None:
@@ -295,9 +293,7 @@ class GenomeProfiler:
         for idx, (method_id, (bin_dir, bin_ext)) in enumerate(
             bin_dirs.items(), start=1
         ):
-            self.logger.info(
-                f"Profiling {method_id} ({idx} of {len(bin_dirs)})."
-            )
+            self.logger.info(f"Profiling {method_id} ({idx} of {len(bin_dirs)}).")
 
             quality_tables = {}
 

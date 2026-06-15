@@ -93,8 +93,10 @@ def binferno(
     logger.info("Binferno pipeline completed successfully.")
     return
 
+
 def main():
     tyro.cli(binferno)
+
 
 if __name__ == "__main__":
     main()

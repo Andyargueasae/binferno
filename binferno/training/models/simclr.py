@@ -96,7 +96,9 @@ class NeuralNetwork(nn.Module):
             attention=attention,
         )
 
-        self.representation_dim = self.fusion_network.out_dim  # this is the output dim of the fusion network, which is the representation dimension. By default it is 256. We can change it later if needed.
+        self.representation_dim = (
+            self.fusion_network.out_dim
+        )  # this is the output dim of the fusion network, which is the representation dimension. By default it is 256. We can change it later if needed.
 
         self.proj_head = nn.Sequential(
             nn.Linear(self.representation_dim, 2048),

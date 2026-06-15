@@ -43,7 +43,9 @@ def _read_fasta_lengths(fasta_f: str):
     return lengths
 
 
-def gethmmmarker(hmm: str, fasta_f: str, min_seq_len: int, out: str, max_effort: int = 0) -> int:
+def gethmmmarker(
+    hmm: str, fasta_f: str, min_seq_len: int, out: str, max_effort: int = 0
+) -> int:
     lenhash = _read_fasta_lengths(fasta_f)
 
     current = ""
@@ -151,7 +153,9 @@ def gethmmmarker(hmm: str, fasta_f: str, min_seq_len: int, out: str, max_effort:
     return 0
 
 
-def countmarker(hmm: str, maxbinout_f: str, maxbinoutname: str, markerhmm_f: str, out: str):
+def countmarker(
+    hmm: str, maxbinout_f: str, maxbinoutname: str, markerhmm_f: str, out: str
+):
     ret = []
     totalmarker = []
     uniquemarker = []
@@ -240,13 +244,17 @@ def countmarker(hmm: str, maxbinout_f: str, maxbinoutname: str, markerhmm_f: str
         for j in range(binnum):
             fout.write(f"{binarr[j]}\t{totalmarker[j]}\t{uniquemarker[j]}")
             for i in range(genenum + 1):
-                fout.write(f"\t{resultarr[i][j]}" if j in resultarr.get(i, {}) else "\t")
+                fout.write(
+                    f"\t{resultarr[i][j]}" if j in resultarr.get(i, {}) else "\t"
+                )
             fout.write("\n")
 
     return ret
 
 
-def listmarker_bybin(hmm: str, maxbinout_f: str, contigfaa_f: str, markerhmm_f: str, out_f: str):
+def listmarker_bybin(
+    hmm: str, maxbinout_f: str, contigfaa_f: str, markerhmm_f: str, out_f: str
+):
     binhash = {}
     markerhash = {}
     resulthash = {}
@@ -262,7 +270,9 @@ def listmarker_bybin(hmm: str, maxbinout_f: str, contigfaa_f: str, markerhmm_f: 
             m2 = re.search(r"([0-9]+)\.fasta$", curr)
             if m2:
                 currbin = m2.group(1)
-                with open(f"{maxbinout_f}.{currbin}.fasta", "r", encoding="utf-8") as ff:
+                with open(
+                    f"{maxbinout_f}.{currbin}.fasta", "r", encoding="utf-8"
+                ) as ff:
                     for fline in ff:
                         if fline.startswith(">"):
                             hdr = trim(fline[1:])
@@ -307,10 +317,14 @@ def listmarker_bybin(hmm: str, maxbinout_f: str, contigfaa_f: str, markerhmm_f: 
             for gene in sorted(markerhash.keys(), key=lambda x: markerhash[x]):
                 contig = resulthash[gene]
                 if binhash[contig] == cls:
-                    fout.write(f">{maxbinout_f}.{binhash[contig]}.{markerhash[gene]}\n{faahash.get(gene, '')}\n")
+                    fout.write(
+                        f">{maxbinout_f}.{binhash[contig]}.{markerhash[gene]}\n{faahash.get(gene, '')}\n"
+                    )
 
 
-def listmarker_bymarker(hmm: str, maxbinout_f: str, contigfaa_f: str, markerhmm_f: str, out_f: str):
+def listmarker_bymarker(
+    hmm: str, maxbinout_f: str, contigfaa_f: str, markerhmm_f: str, out_f: str
+):
     binhash = {}
     markerhash = {}
     resulthash = {}
@@ -371,7 +385,9 @@ def listmarker_bymarker(hmm: str, maxbinout_f: str, contigfaa_f: str, markerhmm_
             for gene in sorted(resulthash.keys()):
                 if markerhash[gene] == cls:
                     contig = resulthash[gene]
-                    fout.write(f">{binhash[contig]}.{markerhash[gene]}\n{faahash.get(gene, '')}\n")
+                    fout.write(
+                        f">{binhash[contig]}.{markerhash[gene]}\n{faahash.get(gene, '')}\n"
+                    )
 
 
 if __name__ == "__main__":

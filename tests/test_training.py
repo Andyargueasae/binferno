@@ -1,5 +1,7 @@
 from pathlib import Path
+import tempfile
 
+import numpy as np
 import torch
 
 from binferno.training.simclr import SimCLRTrainer
@@ -114,6 +116,24 @@ def test_simclr_train_an_epoch():
     # delete the temp contig file after the test.
     temp_contig_file.unlink()
 
+    emb_df = trainer.get_embeddings(
+        model=gated_model,
+        data_df=data_df,
+        output_path=Path(tempfile.gettempdir()) / "temp_gated_embeddings.npy",
+        batch_size=args.get("batch_size", 32),
+        save_individual_embs=False,
+    )
+
+    orig_contigs = len([i for i in data_df.index if i.endswith(".0")])
+
+    assert emb_df is not None, "Embeddings DataFrame should not be None."
+    assert emb_df.shape[0] == orig_contigs, f"Number of embeddings should match number of original contigs. Expected {orig_contigs}, got {emb_df.shape[0]}."
+    assert emb_df.shape[1] == model.fusion_network.out_dim, "Embedding dimension should match model's output dimension."
+    assert np.isfinite(emb_df.values).all(), "All embedding values should be finite numbers."
+    assert not np.isnan(emb_df.values).any(), "Embedding values should not contain NaN."
+    assert not np.isinf(emb_df.values).any(), "Embedding values should not contain Inf."
+    print(f"Finished pytest getting embeddings for {gated_model}.")
+
 
 def test_barlowtwins_train_an_epoch():
     args = dummy_train_barlowtwins_args()
@@ -155,3 +175,21 @@ def test_barlowtwins_train_an_epoch():
         assert stats.get("redundancy_loss", 0), "Redundancy loss should be present in stats."
         
     print(f"Finished pytest training {model} for {n_epoch} epochs.")
+
+    emb_df = trainer.get_embeddings(
+        model=model,
+        data_df=data_df,
+        output_path=Path(tempfile.gettempdir()) / "temp_gated_embeddings.npy",
+        batch_size=args.get("batch_size", 32),
+        save_individual_embs=False,
+    )
+
+    orig_contigs = len([i for i in data_df.index if i.endswith(".original")])
+
+    assert emb_df is not None, "Embeddings DataFrame should not be None."
+    assert emb_df.shape[0] == orig_contigs, f"Number of embeddings should match number of original contigs. Expected {orig_contigs}, got {emb_df.shape[0]}."
+    assert emb_df.shape[1] == model.fusion_network.emb_dim, "Embedding dimension should match model's output dimension."
+    assert np.isfinite(emb_df.values).all(), "All embedding values should be finite numbers."
+    assert not np.isnan(emb_df.values).any(), "Embedding values should not contain NaN."
+    assert not np.isinf(emb_df.values).any(), "Embedding values should not contain Inf."
+    print(f"Finished pytest getting embeddings for {model}.")

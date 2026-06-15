@@ -131,7 +131,7 @@ class BaseTrainer(BaseModel):
         output_path=None,
         batch_size=1024,
         save_individual_embs=False,
-    ):
+    ) -> pd.DataFrame:
 
         if not os.path.exists(os.path.dirname(output_path)):
             raise ValueError(

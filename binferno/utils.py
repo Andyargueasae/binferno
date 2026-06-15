@@ -9,8 +9,6 @@ import sys
 import pyhmmer
 import pyrodigal
 
-from .auxiliary.getmarker_2quarter import gethmmmarker
-
 def run_hmmsearch_pyhmmer(
     hmm_path: Path,
     faa_path: Path,
@@ -26,14 +24,13 @@ def run_hmmsearch_pyhmmer(
         hmms = list(hmm_file)
 
     # E=1e-10 corresponds to the full-sequence reporting threshold
-    all_hits = list(
-        pyhmmer.hmmsearch(hmms, sequences, cpus=threads, E=e_value)
-    )
+    all_hits = list(pyhmmer.hmmsearch(hmms, sequences, cpus=threads, E=e_value))
 
     # Write domain table in the same format hmmsearch --domtblout produces
     with open(domtblout_path, "wb") as f:
         for hits in all_hits:
             hits.write(f, format="domains", header=True)
+
 
 def run_pyrodigal(
     contig_file: Path,
@@ -53,6 +50,7 @@ def run_pyrodigal(
     results = []
     if threads > 1:
         from concurrent.futures import ThreadPoolExecutor
+
         with ThreadPoolExecutor(max_workers=threads) as pool:
             results = list(pool.map(process, records))
     else:
@@ -61,6 +59,7 @@ def run_pyrodigal(
     with open(faa_path, "w") as f:
         for contig_id, genes in results:
             genes.write_translations(f, sequence_id=contig_id)
+
 
 def get_length(fastx_file):
     file_type = mimetypes.guess_type(fastx_file)[1]

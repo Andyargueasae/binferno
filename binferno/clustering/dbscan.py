@@ -158,9 +158,10 @@ class DbscanClustering(BaseClustering):
         with open(output_path / "dbscan_eps_grid.txt", "w") as f:
             for eps in eps_grid:
                 f.write(f"{eps}\n")
-        
+
         with open(output_path / "cluster_result.pkl", "wb") as f:
             import pickle
+
             pickle.dump(result, f)
 
         return result
