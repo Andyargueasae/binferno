@@ -1,55 +1,158 @@
 import tempfile
 from pathlib import Path
 
-import pytest
-import pandas as pd
-import numpy as np
+import torch
 
-from binferno.training import SimCLRTrainer
-
+from binferno.training.simclr import SimCLRTrainer
+from binferno.training.barlowtwins import BarlowTwinsTrainer
+from binferno.training.models.simclr import NeuralNetwork as SimCLRModel
+from binferno.training.models.barlow_twins import NeuralNetwork as BarlowTwinsModel
+from .conftest import (
+    dummy_train_simclr, dummy_train_barlowtwins_args,
+    toy_features
+)
 
 '''
 Mainly tests the SimCLR path: from embeddings to dataloading to training and encoding. 
 Create dummy data to serve testing purposes.  
+
+2026 June 12 to June 14. 
 '''
-def dummy_args_simclr():
-    return {
-        "data_dir": Path("dummy_data"),
-        "output_dir": Path("dummy_output"),
-        "num_epochs": 1,
-        "batch_size": 4,
-        "learning_rate": 1e-3,
-        "num_workers": 0,
-    }
 
-def dummy_args_barlowtwins():
-    return {
-        "data_dir": Path("dummy_data"),
-        "output_dir": Path("dummy_output"),
-        "num_epochs": 1,
-        "batch_size": 4,
-        "learning_rate": 1e-3,
-        "num_workers": 0,
-    }
+N_COV=5
+DEVICE=torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def test_simclr_train_an_epoch():
-    args = dummy_args_simclr()
-    trainer = SimCLRTrainer(args)
-    trainer.train()
+def prep_model_simclr_gated():
+    args = dummy_train_simclr()
+    model = SimCLRModel(tnf_dim=args.get("tnf_dim", 136), 
+        coverage_dim=N_COV*2,
+        gated=args.get("gated", True),
+        corgi_dim=0,
+        ).to(DEVICE)
+    return model
 
-def prep_model_simclr():
-    args = dummy_args_simclr()
-    trainer = SimCLRTrainer(args)
-    trainer.train()
-    return trainer
-
-def test_barlowtwins_train_an_epoch():
-    args = dummy_args_barlowtwins()
-    trainer = SimCLRTrainer(args)
-    trainer.train()
+def prep_model_simclr_attn():
+    args = dummy_train_simclr()
+    model = SimCLRModel(tnf_dim=args.get("tnf_dim", 136), 
+        coverage_dim=N_COV*2,
+        attention=args.get("attention", True),
+        corgi_dim=0,
+        ).to(DEVICE)
+    return model
 
 def prep_model_barlowtwins():
-    args = dummy_args_barlowtwins()
-    trainer = SimCLRTrainer(args)
-    trainer.train()
-    return trainer
+    args = dummy_train_barlowtwins_args()
+    model = BarlowTwinsModel(tnf_dim=args.get("tnf_dim", 136),
+        coverage_dim=N_COV*2,
+        corgi_dim=0,
+        proj_head_dim=128*4
+        ).to(DEVICE)
+    return model
+
+def test_simclr_train_an_epoch():
+    args = dummy_train_simclr()
+    trainer = SimCLRTrainer(learning_rate=args.get("learning_rate", 1e-3),
+                            batch_size=args.get("batch_size", 32),
+                            epochs=args.get("epochs", 10),
+                            temperature=args.get("temperature", 0.15),
+                            auxiliary_loss=args.get("auxiliary_loss", False),
+                            seed=args.get("seed", 42),
+                            tnf_dim=args.get("tnf_dim", 136),
+                            attention=args.get("attention", True),
+                            gated=args.get("gated", True),
+                            hard_weighted_nce=args.get("hard_weighted_nce", True),
+                            view_num=args.get("view_num", 6),
+                            contig_length=args.get("contig_length", 1000),
+                            simclrnet=args.get("simclrnet", False),
+    )
+    gated_model = prep_model_simclr_gated()
+    attn_model = prep_model_simclr_attn()
+    data_df = toy_features(n_cov=N_COV, simclr=True) # input features.
+    
+    # tempcontig file, with 5 contigs with length all over 1000.
+    # write to an existing path, so that the trainer can read it. Then delete it after the test.
+    temp_contig_file = Path(__file__).parent / "temp_contigs.fasta"
+    with open(temp_contig_file, "w") as f:
+        for i in range(5):
+            f.write(f">contig_{i}\n")
+            f.write("ATCG" * 1000 + "\n")
+
+        # temp bam file, with 5 contigs with length all over 1000.
+    for model in [gated_model, attn_model]:
+        train_loader, optimizer, scheduler, dataset = trainer.prepare_trainer(
+                data_df=data_df,
+                batch_size=args.get("batch_size", 32),
+                contig_length=args.get("contig_length", 128),
+                model=model,
+                simclrnet=args.get("simclrnet", False),
+                n_views=args.get("view_num", 6),
+                contigs=temp_contig_file,
+                num_workers=1,
+            )
+        
+        n_epoch = args.get("epochs", 5)
+        avg_losses = []
+        for epoch in range(n_epoch):
+            avg_loss, stats = trainer.train_an_epoch(
+                model=model,
+                dataloader=train_loader,
+                optimizer=optimizer,
+                device=DEVICE,
+                n_cov=N_COV,
+                temperature=args.get("temperature", 0.15),
+                auxiliary_loss=args.get("auxiliary_loss", False),
+            )
+            avg_losses.append(avg_loss)
+            print(f"Epoch {epoch+1}/{n_epoch}, Average Loss: {avg_loss}")
+            assert avg_loss >= 0, "Loss should be non-negative."
+            assert not torch.isnan(torch.tensor(avg_loss)), "Loss should not be NaN."
+            assert not torch.isinf(torch.tensor(avg_loss)), "Loss should not be Inf."
+            assert stats.get("top1_acc", 0), "Top-1 accuracy should be present in stats."
+            assert stats.get("loss", 0), "Loss should be present in stats."
+            
+        print(f"Finished pytest training {model} for {n_epoch} epochs.")
+
+    # delete the temp contig file after the test.
+    temp_contig_file.unlink()
+
+
+def test_barlowtwins_train_an_epoch():
+    args = dummy_train_barlowtwins_args()
+    trainer = BarlowTwinsTrainer(
+        learning_rate=args.get("learning_rate", 1e-3),
+        batch_size=args.get("batch_size", 32),
+        epochs=args.get("epochs", 10),
+        auxiliary_loss=args.get("auxiliary_loss", False),
+        seed=args.get("seed", 42),
+        tnf_dim=args.get("tnf_dim", 136),
+    )
+    model = prep_model_barlowtwins()
+    data_df = toy_features(n_cov=N_COV, simclr=False) # input features.
+    dataloader, optimizer, scheduler = trainer.prepare_trainer(
+            model=model,
+            data_df=data_df,
+            batch_size=args.get("batch_size", 32),
+            epochs=args.get("epochs", 10),
+            num_workers=1,
+        )
+    
+    n_epoch = args.get("epochs", 5)
+    avg_losses = []
+    for epoch in range(n_epoch):
+        avg_loss, stats = trainer.train_an_epoch(
+            model=model,
+            dataloader=dataloader,
+            optimizer=optimizer,
+            device=DEVICE,
+            auxiliary_loss=args.get("auxiliary_loss", False),
+        )
+
+        print(f"Epoch {epoch+1}/{n_epoch}, Average Loss: {avg_loss}")
+        avg_losses.append(avg_loss)
+        assert avg_loss >= 0, "Loss should be non-negative."
+        assert not torch.isnan(torch.tensor(avg_loss)), "Loss should not be NaN."
+        assert not torch.isinf(torch.tensor(avg_loss)), "Loss should not be Inf."
+        assert stats.get("invariance_loss", 0), "Invariance loss should be present in stats."
+        assert stats.get("redundancy_loss", 0), "Redundancy loss should be present in stats."
+        
+    print(f"Finished pytest training {model} for {n_epoch} epochs.")

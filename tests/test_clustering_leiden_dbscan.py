@@ -9,6 +9,7 @@ from binferno.clustering.leiden import LeidenClustering
 
 '''
 Mainly tests leiden path from embedding matrix to ClusterResult.
+
 '''
 
 @pytest.fixture
@@ -35,4 +36,5 @@ def test_leiden_clustering(leiden_clustering):
     assert len(df) == distance_matrix.shape[0], "Output file does not have the correct number of rows."
 
 def test_dbscan_clustering():
+    assert True
     return
