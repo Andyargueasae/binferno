@@ -96,7 +96,7 @@ class NeuralNetwork(nn.Module):
             attention=attention,
         )
 
-        self.representation_dim = output_dim
+        self.representation_dim = self.fusion_network.out_dim  # this is the output dim of the fusion network, which is the representation dimension. By default it is 256. We can change it later if needed.
 
         self.proj_head = nn.Sequential(
             nn.Linear(self.representation_dim, 2048),
@@ -137,10 +137,11 @@ def fusion_network(
     attention=False,
 ):
     if gated:
-        return gated_fusion(emb_dim=emb_dim)
+        return gated_fusion(in_dim=emb_dim, fused_dim=256, out_dim=256)
     if attention:
         return AttentionFusion(
             emb_dim=emb_dim,
+            out_dim=256,
             num_heads=4,
             dropout=0.1,
         )
@@ -288,6 +289,7 @@ class AttentionFusion(nn.Module):
         super().__init__()
         self.emb_dim = emb_dim
         self.token_type_emb = nn.Embedding(2, emb_dim)  # 0=kmer, 1=coverage
+        self.out_dim = out_dim
 
         # Attention sublayer (pre-norm)
         self.norm_attn = nn.LayerNorm(emb_dim)
@@ -364,6 +366,7 @@ class gated_fusion(nn.Module):
     def __init__(self, in_dim=128, fused_dim=256, out_dim=256, dropout=0.1):
         super().__init__()
         cat_dim = in_dim * 2  # kmer + cov concatenated
+        self.out_dim = out_dim
 
         # Gates see the full concatenated context, output per-modality gates.
         self.kmer_gate = nn.Sequential(

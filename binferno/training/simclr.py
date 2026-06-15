@@ -41,12 +41,8 @@ class SimCLRTrainer(BaseTrainer):
     batch_size: int = Field(default=1024, description="Batch size for training.")
     epochs: int = Field(default=300, description="Number of epochs for training.")
     weight_decay: float = Field(default=1e-4, description="Weight decay for training.")
-    seed: int = Field(default=42, description="Random seed for training.")
     output_dim: int = Field(
         default=128, description="Output dimension for the embeddings."
-    )
-    n_layers: int = Field(
-        default=2, description="Number of layers for the neural network."
     )
     contig_length: int = Field(
         default=1000, description="Minimum contig length to be included in training."
@@ -70,10 +66,6 @@ class SimCLRTrainer(BaseTrainer):
         description="Temperature parameter for the InfoNCE loss. "
         "By default, it is set based on the N50 of the input contigs. "
         "If the N50 is greater than 10,000, the temperature is set to 0.07; otherwise, it is set to 0.15.",
-    )
-    multisample: bool = Field(
-        default=False,
-        description="Whether to use multisample augmentation. Currently not implemented.",
     )
     embnet: bool = Field(
         default=False,

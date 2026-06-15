@@ -6,7 +6,61 @@ import subprocess
 import pyfastx
 from pathlib import Path
 import sys
+import pyhmmer
+import pyrodigal
 
+from .auxiliary.getmarker_2quarter import gethmmmarker
+
+def run_hmmsearch_pyhmmer(
+    hmm_path: Path,
+    faa_path: Path,
+    domtblout_path: Path,
+    threads: int,
+    e_value: float = 1e-10,
+):
+    # Load sequences and digitize against the HMM alphabet
+    with pyhmmer.easel.SequenceFile(str(faa_path), digital=True) as seq_file:
+        sequences = seq_file.read_block()
+
+    with pyhmmer.plan7.HMMFile(str(hmm_path)) as hmm_file:
+        hmms = list(hmm_file)
+
+    # E=1e-10 corresponds to the full-sequence reporting threshold
+    all_hits = list(
+        pyhmmer.hmmsearch(hmms, sequences, cpus=threads, E=e_value)
+    )
+
+    # Write domain table in the same format hmmsearch --domtblout produces
+    with open(domtblout_path, "wb") as f:
+        for hits in all_hits:
+            hits.write(f, format="domains", header=True)
+
+def run_pyrodigal(
+    contig_file: Path,
+    faa_path: Path,
+    threads: int,
+):
+    # meta=True is the equivalent of FragGeneScan's metagenome mode:
+    # no per-sample training, uses prebuilt metagenomic models.
+    orf_finder = pyrodigal.GeneFinder(meta=True)
+
+    records = list(SeqIO.parse(str(contig_file), "fasta"))
+
+    def process(record):
+        genes = orf_finder.find_genes(bytes(record.seq))
+        return record.id, genes
+
+    results = []
+    if threads > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=threads) as pool:
+            results = list(pool.map(process, records))
+    else:
+        results = [process(r) for r in records]
+
+    with open(faa_path, "w") as f:
+        for contig_id, genes in results:
+            genes.write_translations(f, sequence_id=contig_id)
 
 def get_length(fastx_file):
     file_type = mimetypes.guess_type(fastx_file)[1]
@@ -90,17 +144,14 @@ def gen_seed(
     :return: The number of candidate seeds generated.
     """
     fragScanURL = "run_FragGeneScan.pl"
-
+    fragResult_prefix = output_dir / (Path(contig_file).name + ".frag")
+    # hmmer: try rewriting this cmd-based run to pyhmmer api.
     hmmExeURL = "hmmsearch"
-    # rewrite to Path.
-    # markerExeURL = Path(__file__).parent / "auxiliary" / f"test_getmarker_{quarter}.pl"
     markerExeURL = Path(__file__).parent / "auxiliary" / f"getmarker_{quarter}.py"
     markerURL = Path(__file__).parent / "auxiliary" / f"{marker_name}.hmm"
-
-    fragResult_prefix = output_dir / (contig_file.name + ".frag")
-    hmmResultURL = output_dir / (contig_file.name + "." + marker_name + ".hmmout")
+    hmmResultURL = output_dir / (Path(contig_file).name + "." + marker_name + ".hmmout")
     seedURL = output_dir / (
-        contig_file.name
+        Path(contig_file).name
         + "."
         + marker_name
         + "."
@@ -109,68 +160,68 @@ def gen_seed(
         + str(contig_length_threshold)
         + ".seed"
     )
-    marker_gene_faa = output_dir / (contig_file.name + ".frag.faa")
+    marker_gene_faa = output_dir / (Path(contig_file).name + ".frag.faa")
 
     if not (os.path.exists(marker_gene_faa)):
-        fragCmd = (
-            fragScanURL
-            + " -genome="
-            + str(contig_file)
-            + " -out="
-            + str(fragResult_prefix)
-            + " -complete=0 -train=complete -thread="
-            + str(threads)
-            + " 1>"
-            + str(fragResult_prefix)
-            + ".out 2>"
-            + str(fragResult_prefix)
-            + ".err"
+        # fragCmd = (
+        #     fragScanURL
+        #     + " -genome="
+        #     + str(contig_file)
+        #     + " -out="
+        #     + str(fragResult_prefix)
+        #     + " -complete=0 -train=complete -thread="
+        #     + str(threads)
+        #     + " 1>"
+        #     + str(fragResult_prefix)
+        #     + ".out 2>"
+        #     + str(fragResult_prefix)
+        #     + ".err"
+        # )
+        # logger.info("exec cmd: " + fragCmd)
+        # subprocess.run(fragCmd, shell=True, check=True)
+        run_pyrodigal(
+            contig_file=contig_file,
+            faa_path=marker_gene_faa,
+            threads=threads,
         )
-        logger.info("exec cmd: " + fragCmd)
-        subprocess.run(fragCmd, shell=True, check=True)
+
+        logger.info("FragGeneScan/Pyrodigal Finished. Output: " + str(marker_gene_faa))
 
     if os.path.exists(marker_gene_faa):
         if not (os.path.exists(hmmResultURL)):
-            hmmCmd = (
-                str(hmmExeURL)
-                + " --domtblout "
-                + str(hmmResultURL)
-                + " -E 1e-10 --cpu "
-                + str(threads)
-                + " "
-                + str(markerURL)
-                + " "
-                + str(marker_gene_faa)
-                + " 1>"
-                + str(hmmResultURL)
-                + ".out 2>"
-                + str(hmmResultURL)
-                + ".err"
+            # hmmCmd = (
+            #     str(hmmExeURL)
+            #     + " --domtblout "
+            #     + str(hmmResultURL)
+            #     + " -E 1e-10 --cpu "
+            #     + str(threads)
+            #     + " "
+            #     + str(markerURL)
+            #     + " "
+            #     + str(marker_gene_faa)
+            #     + " 1>"
+            #     + str(hmmResultURL)
+            #     + ".out 2>"
+            #     + str(hmmResultURL)
+            #     + ".err"
+            # )
+            # logger.info("exec cmd: " + hmmCmd)
+            # subprocess.run(hmmCmd, shell=True, check=True)
+            run_hmmsearch_pyhmmer(
+                hmm_path=markerURL,
+                faa_path=marker_gene_faa,
+                domtblout_path=hmmResultURL,
+                threads=threads,
+                e_value=1e-10,
             )
-            if marker_name == "pltd_marker":
-                hmmCmd = (
-                    str(hmmExeURL)
-                    + " --domtblout "
-                    + str(hmmResultURL)
-                    + " -E 1e-10 --cpu "
-                    + str(threads)
-                    + " "
-                    + str(markerURL)
-                    + " "
-                    + str(marker_gene_faa)
-                    + " 1>"
-                    + str(hmmResultURL)
-                    + ".out 2>"
-                    + str(hmmResultURL)
-                    + ".err"
-                )
-            logger.info("exec cmd: " + hmmCmd)
-            subprocess.run(hmmCmd, shell=True, check=True)
+
+            logger.info("Hmmer/Pyhmmer search finished. Output: " + str(hmmResultURL))
 
         if os.path.exists(hmmResultURL):
             if not (os.path.exists(seedURL)):
                 markerCmd = (
-                    str(markerExeURL)
+                    "python "
+                    + str(markerExeURL)
                     + " "
                     + str(hmmResultURL)
                     + " "
@@ -183,10 +234,12 @@ def gen_seed(
                 logger.info("exec cmd: " + markerCmd)
                 subprocess.run(markerCmd, shell=True, check=True)
 
+                logger.info("gethmmmarker finished. Output: " + str(seedURL))
+
             if os.path.exists(seedURL):
                 candK = file_len(seedURL)
             else:
-                logger.info("markerCmd failed! Not exist: " + str(seedURL))
+                logger.info("gethmmmarker failed! Not exist: " + str(seedURL))
                 candK = 0
         else:
             logger.info("Hmmsearch failed! Not exist: " + str(hmmResultURL))

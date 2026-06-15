@@ -37,13 +37,12 @@ class GenomeProfiler:
         Set the active CheckM database root.
         """
         if not os.path.exists(database):
-            self.logger.error("CheckM database %s does not exist.", database)
+            self.logger.error(f"CheckM database {database} does not exist.")
             sys.exit(1)
 
         cmd = ["checkm", "data", "setRoot", str(database)]
         self.logger.info(
-            "Setting up CheckM database with command: %s",
-            " ".join(cmd),
+            f"Setting up CheckM database with command: {' '.join(cmd)}"
         )
         subprocess.run(cmd, check=True)
 
@@ -51,7 +50,7 @@ class GenomeProfiler:
         """
         Run a subprocess command with logging.
         """
-        self.logger.info("[%s] %s", step_name, " ".join(cmd))
+        self.logger.info(f"[{step_name}] {' '.join(cmd)}")
         subprocess.run(cmd, check=True)
 
     def _run_checkm_job(
@@ -297,10 +296,7 @@ class GenomeProfiler:
             bin_dirs.items(), start=1
         ):
             self.logger.info(
-                "Profiling %s (%d of %d).",
-                method_id,
-                idx,
-                len(bin_dirs),
+                f"Profiling {method_id} ({idx} of {len(bin_dirs)})."
             )
 
             quality_tables = {}
@@ -340,7 +336,7 @@ class GenomeProfiler:
                 if not os.path.exists(bac_quality_table) or not os.path.exists(
                     ar_quality_table
                 ):
-                    self.logger.error("Missing Bac/Ar quality table for %s.", method_id)
+                    self.logger.error(f"Missing Bac/Ar quality table for {method_id}.")
                     self.logger.error(
                         "Please verify there were bins in the bin directory specified for this method."
                     )

@@ -32,7 +32,6 @@ class BarlowTwinsTrainer(BaseTrainer):
     batch_size: int = Field(default=1024, description="Batch size for training.")
     epochs: int = Field(default=300, description="Number of epochs for training.")
     weight_decay: float = Field(default=1e-4, description="Weight decay for training.")
-    seed: int = Field(default=42, description="Random seed for training.")
     output_dim: int = Field(
         default=128, description="Output dimension for the embeddings."
     )

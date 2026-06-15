@@ -15,6 +15,8 @@ from .base import BaseClustering, ClusterResult
 from ..utils import gen_seed
 from .cluster_utils import (
     _filter_embeddings_by_length,
+    seed_kmeans_full,
+    _read_seed_count,
 )
 
 
@@ -37,8 +39,8 @@ class DbscanClustering(BaseClustering):
         if plastid:
             n_genome = gen_seed(
                 logger,
-                contig_file=str(contigs),
-                output_dir=str(output_path),
+                contig_file=contigs,
+                output_dir=output_path,
                 threads=threads,
                 contig_length_threshold=1001,
                 marker_name="pltd_marker",
@@ -51,16 +53,16 @@ class DbscanClustering(BaseClustering):
         else:
             n_genome = gen_seed(
                 logger,
-                contig_file=str(contigs),
-                output_dir=str(output_path),
+                contig_file=contigs,
+                output_dir=output_path,
                 threads=threads,
                 contig_length_threshold=1001,
-                marker_name="marker",
+                marker_name="bacar_marker",
                 quarter="2quarter",
             )
             seed_file = os.path.join(
                 output_path,
-                f"{os.path.basename(str(contigs))}.marker.2quarter_lencutoff_1001.seed",
+                f"{os.path.basename(str(contigs))}.bacar_marker.2quarter_lencutoff_1001.seed",
             )
 
         result.n_genome = n_genome
@@ -105,6 +107,27 @@ class DbscanClustering(BaseClustering):
             f"contigs over {n_scgs} SCGs"
         )
 
+        # KMeans extablish the initial run to be used in post processing later.
+        seed_num = _read_seed_count(seed_file)
+        mode = f"weight_seed_kmeans"
+
+        bin_nums = seed_num
+        logger.info(f"Bin_numbers:\t{bin_nums}")
+
+        kmeans_out = seed_kmeans_full(
+            logger=logger,
+            contig_file=contigs,
+            namelist=namelist,
+            out_path=str(output_path) + os.sep,
+            X_mat=norm_embeddings,
+            bin_number=bin_nums,
+            prefix=mode,
+            length_weight=length_weight,
+            seed_file=seed_file,
+        )
+        for key, val in kmeans_out.items():
+            result.clusters[key] = val
+
         # --- DBSCAN sweep, marker-quality-only scoring, with noise rescue ---
         best_bins, best_score, eps_grid = dbscan_marker_sweep(
             latent=norm_embeddings,
@@ -131,6 +154,14 @@ class DbscanClustering(BaseClustering):
                 dbscan_cluster_assignments[namelist[ci]] = bin_label
 
         result.clusters = dbscan_cluster_assignments
+
+        with open(output_path / "dbscan_eps_grid.txt", "w") as f:
+            for eps in eps_grid:
+                f.write(f"{eps}\n")
+        
+        with open(output_path / "cluster_result.pkl", "wb") as f:
+            import pickle
+            pickle.dump(result, f)
 
         return result
 
