@@ -1,11 +1,12 @@
 import gzip
-from Bio import SeqIO
+from pathlib import Path
+import sys
 import mimetypes
 import os
 import subprocess
+
+from Bio import SeqIO
 import pyfastx
-from pathlib import Path
-import sys
 import pyhmmer
 import pyrodigal
 
@@ -162,22 +163,6 @@ def gen_seed(
     marker_gene_faa = output_dir / (Path(contig_file).name + ".frag.faa")
 
     if not (os.path.exists(marker_gene_faa)):
-        # fragCmd = (
-        #     fragScanURL
-        #     + " -genome="
-        #     + str(contig_file)
-        #     + " -out="
-        #     + str(fragResult_prefix)
-        #     + " -complete=0 -train=complete -thread="
-        #     + str(threads)
-        #     + " 1>"
-        #     + str(fragResult_prefix)
-        #     + ".out 2>"
-        #     + str(fragResult_prefix)
-        #     + ".err"
-        # )
-        # logger.info("exec cmd: " + fragCmd)
-        # subprocess.run(fragCmd, shell=True, check=True)
         run_pyrodigal(
             contig_file=contig_file,
             faa_path=marker_gene_faa,
@@ -188,24 +173,6 @@ def gen_seed(
 
     if os.path.exists(marker_gene_faa):
         if not (os.path.exists(hmmResultURL)):
-            # hmmCmd = (
-            #     str(hmmExeURL)
-            #     + " --domtblout "
-            #     + str(hmmResultURL)
-            #     + " -E 1e-10 --cpu "
-            #     + str(threads)
-            #     + " "
-            #     + str(markerURL)
-            #     + " "
-            #     + str(marker_gene_faa)
-            #     + " 1>"
-            #     + str(hmmResultURL)
-            #     + ".out 2>"
-            #     + str(hmmResultURL)
-            #     + ".err"
-            # )
-            # logger.info("exec cmd: " + hmmCmd)
-            # subprocess.run(hmmCmd, shell=True, check=True)
             run_hmmsearch_pyhmmer(
                 hmm_path=markerURL,
                 faa_path=marker_gene_faa,

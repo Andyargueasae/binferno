@@ -7,6 +7,7 @@ from collections import defaultdict
 
 COV_CUTOFF = 0.4
 CONTIG_RE = re.compile(r"^(.+)_\d+_\d+_[+-]$")
+PYRODIGAL_RE = re.compile(r"^(.+)_\d+$")
 
 
 def trim(s: str) -> str:
@@ -27,6 +28,29 @@ def check_marker(marker: str) -> str:
     if marker == "TIGR02386":
         return "TIGR02387"
     return marker
+
+
+def extract_contig_base(target_name: str):
+    m = CONTIG_RE.match(target_name)
+    if m:
+        return m.group(1)
+
+    m = PYRODIGAL_RE.match(target_name)
+    if m:
+        return m.group(1)
+
+    return None
+
+
+def resolve_target_name(target_name: str, known_names):
+    if target_name in known_names:
+        return target_name
+
+    base_name = extract_contig_base(target_name)
+    if base_name is not None and base_name in known_names:
+        return base_name
+
+    return None
 
 
 def _read_fasta_lengths(fasta_f: str):
@@ -66,11 +90,9 @@ def gethmmmarker(
                 continue
 
             inlinehmm = check_marker(arr[3])
-            m = CONTIG_RE.match(arr[0])
-            if not m:
+            contig = resolve_target_name(arr[0], lenhash)
+            if contig is None:
                 continue
-
-            contig = m.group(1)
             if contig not in lenhash or lenhash[contig] < int(min_seq_len):
                 continue
 
@@ -210,10 +232,9 @@ def countmarker(
             if len(arr) <= 16:
                 continue
             inlinehmm = check_marker(arr[3])
-            m = CONTIG_RE.match(arr[0])
-            if not m:
+            contig = resolve_target_name(arr[0], binhash)
+            if contig is None:
                 continue
-            contig = m.group(1)
             if curr != inlinehmm:
                 curr = inlinehmm
                 if curr not in markerhash:
@@ -288,10 +309,9 @@ def listmarker_bybin(
             if len(arr) <= 16:
                 continue
             inlinehmm = check_marker(arr[3])
-            m = CONTIG_RE.match(arr[0])
-            if not m:
+            contig = resolve_target_name(arr[0], binhash)
+            if contig is None:
                 continue
-            contig = m.group(1)
             if curr != inlinehmm:
                 curr = inlinehmm
             j = int(float(arr[16])) - int(float(arr[15]))
@@ -356,10 +376,9 @@ def listmarker_bymarker(
             if len(arr) <= 16:
                 continue
             inlinehmm = check_marker(arr[3])
-            m = CONTIG_RE.match(arr[0])
-            if not m:
+            contig = resolve_target_name(arr[0], binhash)
+            if contig is None:
                 continue
-            contig = m.group(1)
             if curr != inlinehmm:
                 curr = inlinehmm
             j = int(float(arr[16])) - int(float(arr[15]))
@@ -398,7 +417,7 @@ if __name__ == "__main__":
             "Usage: test_getmarker_2quarter.py <hmmout> <fasta> <min_seq_len> <out> [max_effort]",
             file=sys.stderr,
         )
-        sys.exit(1)
+        raise RuntimeError("Not enough arguments provided")
 
     hmm = sys.argv[1]
     fasta = sys.argv[2]
@@ -407,4 +426,6 @@ if __name__ == "__main__":
     max_effort = int(sys.argv[5]) if len(sys.argv) > 5 else 0
 
     rc = gethmmmarker(hmm, fasta, min_seq_len, out, max_effort)
-    sys.exit(0 if rc == 0 else 1)
+    if rc != 0:
+        print("No suitable marker found.", file=sys.stderr)
+        raise RuntimeError("No suitable marker found.")

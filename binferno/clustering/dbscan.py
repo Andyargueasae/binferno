@@ -19,7 +19,6 @@ from .cluster_utils import (
     _read_seed_count,
 )
 
-
 class DbscanClustering(BaseClustering):
     def __call__(
         self,
@@ -148,12 +147,14 @@ class DbscanClustering(BaseClustering):
             f"swept {len(eps_grid)} eps values; gen_seed K={n_genome}"
         )
 
-        dbscan_cluster_assignments = {}
-        for bin_label, bin_indices in enumerate(best_bins):
-            for ci in bin_indices:
-                dbscan_cluster_assignments[namelist[ci]] = bin_label
-
-        result.clusters = dbscan_cluster_assignments
+        # turn best_bins into a dataframe of contig_name -> bin_label, where bin_label is an integer from 0 to len(best_bins)-1.
+        best_bin_df = pd.DataFrame(
+            [(namelist[ci], bin_label) for bin_label, bin_indices in enumerate(best_bins) for ci in bin_indices],
+            columns=["contig_id", "cluster_id"],
+        )
+        # save a copy of this file for later use in post-processing.
+        best_bin_df.to_csv(output_path / "dbscan_clusters.tsv", index=False, sep="\t")
+        result.clusters["dbscan_clusters.tsv"] = best_bin_df
 
         with open(output_path / "dbscan_eps_grid.txt", "w") as f:
             for eps in eps_grid:
@@ -164,17 +165,13 @@ class DbscanClustering(BaseClustering):
 
             pickle.dump(result, f)
 
+        logger.info("Clustering completed. Saved results and epsilon grid to output directory.")
         return result
-
-
-# ---------- marker-based quality ----------
-
 
 def completeness_contamination(counts: np.ndarray, n_scgs: int) -> Tuple[float, float]:
     n_total = counts.sum()
     n_unique = (counts > 0).sum()
     return n_unique / n_scgs, (n_total - n_unique) / n_scgs
-
 
 def count_markers_saturated(
     contig_indices: list, contig_to_markers: dict, namelist: list, n_scgs: int
@@ -192,9 +189,6 @@ def count_markers_saturated(
             if (n_markers - n_unique) > max_dup:
                 return None
     return counts
-
-
-# ---------- two scoring paths ----------
 
 
 def score_count(
