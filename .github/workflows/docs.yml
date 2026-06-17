@@ -34,7 +34,7 @@ jobs:
       - name: Install poetry
         run: pipx install poetry
       - name: Install dependencies for Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
           cache: 'poetry'
@@ -64,4 +64,3 @@ jobs:
         run: |
           ls -la gh-pages
           test -f gh-pages/index.html && echo "index.html exists" || (echo "index.html missing" && exit 1)
-          

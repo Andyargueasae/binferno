@@ -236,3 +236,4 @@ binferno/cluster_res_only.py
 encode.py
 *.svg
 semisupervised_encode.py
+diagonsis_cVAE_barlowtwins.py
