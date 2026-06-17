@@ -1,0 +1,29 @@
+name: publish
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive  # Ensure submodules are checked out
+      - name: Install poetry
+        run: pipx install poetry
+      - name: Install dependencies
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.11
+          cache: 'poetry'
+      - run: |
+          poetry install
+      - name: Build library
+        run: poetry build
+      - name: Publish library
+        env:
+          PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
+        run: |
+          poetry config pypi-token.pypi $PYPI_TOKEN
+          poetry publish

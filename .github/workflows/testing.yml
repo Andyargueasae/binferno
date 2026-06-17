@@ -1,0 +1,65 @@
+name: testing
+
+on: [push]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10"]
+    
+    # The steps start by installing poetry and mamba.
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install poetry
+      run: pipx install poetry
+
+    - name: Cache
+      id: cache
+      uses: actions/cache@v3
+      with:
+        key: ${{ runner.os }}-${{ matrix.python-version }}-mamba
+        path: |
+          /home/runner/mamba-cache
+
+    - name: Install Mamba
+      run: |
+        if [ ! -f /home/runner/mamba-cache/mamba/etc/profile.d/conda.sh ]; then
+          wget "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-$(uname)-$(uname -m).sh"
+          bash Miniforge3-$(uname)-$(uname -m).sh -b -p "/home/runner/mamba-cache/mamba"
+        fi
+        source "/home/runner/mamba-cache/mamba/etc/profile.d/conda.sh"
+        mamba --version
+        which mamba
+
+    - name: Install dependencies for Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+        cache: 'poetry'
+
+    - name: Installation
+      run: |
+        poetry env use "${{ matrix.python-version }}"
+        poetry install
+
+    - name: Install FragGeneScan via conda
+      run: |
+        source "/home/runner/mamba-cache/mamba/etc/profile.d/conda.sh"
+        mamba install -y -c bioconda fraggenescan=1.32 hmmer=3.1b2
+
+    - name: Testing binferno
+      run: |
+        export CHLOROSCAN_CONDA_PREFIX=/home/runner/mamba-cache/chloroscan
+        export PATH=/home/runner/mamba-cache/mamba/condabin:$PATH
+
+        conda config --add channels conda-forge
+        conda config --add channels bioconda
+        conda config --add channels defaults
+        conda config --set channel_priority strict
+
+        df -H
+        coverage run -m pytest tests/*
