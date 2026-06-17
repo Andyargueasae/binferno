@@ -233,6 +233,6 @@ note.txt
 *.sh
 *.yaml
 binferno/cluster_res_only.py
-./encode.py
+encode.py
 *.svg
 semisupervised_encode.py
