@@ -717,20 +717,11 @@ class EarlyStoppingManagerSimCLR:
         self._stagnant_epochs = 0
 
     def check_improvement(self, loss, top_acc, model_state):
-        acc_improved = (top_acc > self._top_acc + 0.05) # at least 0.05% gain or accuracy above 99% to consider it an improvement
-        improved = acc_improved
+        acc_over_99 = top_acc > 99.0  # at least 0.5% gain or accuracy above 99% to consider it an improvement
         # improved = loss < self._lowest_loss or top_acc > self._top_acc
 
-        if improved:
-            if loss < self._lowest_loss:
-                self._lowest_loss = loss
-            if top_acc > self._top_acc:
-                self._top_acc = top_acc
-            self._saved_state = model_state
-            self._stagnant_epochs = 0
-            return
-
-        self._stagnant_epochs += 1
+        if acc_over_99:
+            self._stagnant_epochs += 1
 
     def should_stop(self):
         return self._stagnant_epochs >= self.patience

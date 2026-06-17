@@ -62,4 +62,4 @@ jobs:
         conda config --set channel_priority strict
 
         df -H
-        coverage run -m pytest tests/*
+        poetry run coverage run -m pytest tests/*
