@@ -1,10 +1,8 @@
-from os import name
-from re import sub
-
 import pytest
 import random
 import numpy as np
 import pandas as pd
+import pyfastx
 from pathlib import Path
 
 CONTIG=Path(__file__).parent / "data" / "tiny.fasta"
@@ -40,12 +38,14 @@ def bam_dir(tmp_path: Path) -> Path:
     (bam_path / "sample1.bam").write_text("")
     return bam_path
 
-@pytest.fixture
-def toy_embeddings() -> pd.DataFrame: # this is after the encoding step, for clustering.
-    x = rng().normal(size=(30, 128)).astype("float32")
+def toy_embeddings(contig: Path) -> pd.DataFrame: # this is after the encoding step, for clustering.
+    seq = pyfastx.Fasta(str(contig), build_index=False)
+    n_contigs = len([s for s in seq])
+    namelist = [s for s,_ in seq]
+    x = rng().normal(size=(n_contigs, 128)).astype("float32")
     x /= np.linalg.norm(x, axis=1, keepdims=True)
     # assume we have 16 contigs, and each contig is represented by a 128-dim embedding vector.
-    return pd.DataFrame(x, index=[f"contig_{i}" for i in range(16)])
+    return pd.DataFrame(x, index=namelist)
 
 def toy_features(n_cov: int, view_num: int = 6,
                 simclr: bool = False, 
@@ -116,3 +116,13 @@ def dummy_train_barlowtwins_args():
         "tnf_dim": 136,
         "view_num": 6
     }
+
+def sim_cluster_fasta(n_contigs: int = 30) -> Path:
+    path = Path("sim_cluster_contigs.fna")
+    with open(path, "w") as f:
+        for i in range(n_contigs):
+            f.write(f">contig_{i}\n")
+            length_multiplier = rng().integers(240, 2500) # to get lengths between 1000 and 1 million, we can multiply 4 (the length of "ATGC") by a random integer between 250 and 250000.
+            # there will be contigs < 1000 bp, but that's fine for testing.
+            f.write("ATGC" * length_multiplier + "\n")
+    return path

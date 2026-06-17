@@ -79,6 +79,10 @@ class CorgiFeatureBuilder(BaseFeatureBuilder):
         default=True,
         description="Whether to normalize the Corgi embeddings. If True, the embeddings will be L2 normalized. If False, the raw embeddings will be returned.",
     )
+    reduce_dim: bool = Field(
+        default=False,
+        description="Whether to reduce the dimensionality of the Corgi embeddings. If True, the dimensionality will be reduced to 128 using PCA. If False, the original dimensionality will be returned.",
+    )
 
     def __call__(
         self,
@@ -171,4 +175,12 @@ class CorgiFeatureBuilder(BaseFeatureBuilder):
             corgi_df = corgi_df.apply(
                 lambda x: x / np.linalg.norm(x), axis=1
             )  # L2 normalization by row.
+
+        if self.reduce_dim:
+            from sklearn.decomposition import PCA
+
+            pca = PCA(n_components=128)
+            corgi_df = pd.DataFrame(
+                pca.fit_transform(corgi_df), index=corgi_df.index
+            )  # keep the same index for later merging with other features.
         return corgi_df

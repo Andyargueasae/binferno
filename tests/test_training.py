@@ -23,20 +23,10 @@ Create dummy data to serve testing purposes.
 N_COV=5
 DEVICE=torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def prep_model_simclr_gated():
+def prep_model_simclr():
     args = dummy_train_simclr()
     model = SimCLRModel(tnf_dim=args.get("tnf_dim", 136), 
         coverage_dim=N_COV*2,
-        gated=args.get("gated", True),
-        corgi_dim=0,
-        ).to(DEVICE)
-    return model
-
-def prep_model_simclr_attn():
-    args = dummy_train_simclr()
-    model = SimCLRModel(tnf_dim=args.get("tnf_dim", 136), 
-        coverage_dim=N_COV*2,
-        attention=args.get("attention", True),
         corgi_dim=0,
         ).to(DEVICE)
     return model
@@ -66,8 +56,7 @@ def test_simclr_train_an_epoch():
                             contig_length=args.get("contig_length", 1000),
                             simclrnet=args.get("simclrnet", False),
     )
-    gated_model = prep_model_simclr_gated()
-    attn_model = prep_model_simclr_attn()
+    model = prep_model_simclr()
     data_df = toy_features(n_cov=N_COV, simclr=True) # input features.
     
     # tempcontig file, with 5 contigs with length all over 1000.
@@ -79,7 +68,7 @@ def test_simclr_train_an_epoch():
             f.write("ATCG" * 1000 + "\n")
 
         # temp bam file, with 5 contigs with length all over 1000.
-    for model in [gated_model, attn_model]:
+    for model in [model]:
         train_loader, optimizer, scheduler, dataset = trainer.prepare_trainer(
                 data_df=data_df,
                 batch_size=args.get("batch_size", 32),
@@ -117,7 +106,7 @@ def test_simclr_train_an_epoch():
     temp_contig_file.unlink()
 
     emb_df = trainer.get_embeddings(
-        model=gated_model,
+        model=model,
         data_df=data_df,
         output_path=Path(tempfile.gettempdir()) / "temp_gated_embeddings.npy",
         batch_size=args.get("batch_size", 32),
@@ -128,11 +117,11 @@ def test_simclr_train_an_epoch():
 
     assert emb_df is not None, "Embeddings DataFrame should not be None."
     assert emb_df.shape[0] == orig_contigs, f"Number of embeddings should match number of original contigs. Expected {orig_contigs}, got {emb_df.shape[0]}."
-    assert emb_df.shape[1] == model.fusion_network.out_dim, "Embedding dimension should match model's output dimension."
+    assert emb_df.shape[1] == model.output_dim, "Embedding dimension should match model's output dimension."
     assert np.isfinite(emb_df.values).all(), "All embedding values should be finite numbers."
     assert not np.isnan(emb_df.values).any(), "Embedding values should not contain NaN."
     assert not np.isinf(emb_df.values).any(), "Embedding values should not contain Inf."
-    print(f"Finished pytest getting embeddings for {gated_model}.")
+    print(f"Finished pytest getting embeddings for {model}.")
 
 
 def test_barlowtwins_train_an_epoch():

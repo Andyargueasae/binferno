@@ -225,7 +225,7 @@ COMEBin/__pycache__/*
 COMEBin/*/__pycache__/*
 checkm_db/
 binferno/__pycache__/
-binferno/*/__pycache__
+binferno/*/__pycache__/
 dist
 prodigal_markers
 ./__pycache__/*
@@ -233,3 +233,6 @@ note.txt
 *.sh
 *.yaml
 binferno/cluster_res_only.py
+./encode.py
+*.svg
+semisupervised_encode.py

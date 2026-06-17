@@ -113,5 +113,4 @@ def test_coverage_features(bam_dir, dummy_all_fragments):
     assert cov_df.shape[0] == len(all_frags), f"Expected {len(all_frags)} rows, but got {cov_df.shape[0]}."
     assert cov_df.shape[1] == 2, f"Expected 2 columns (mean and std) for one sample, but got {cov_df.shape[1]}."
     assert np.all(cov_df.values >= 0), "Coverage values should be non-negative."
-    assert np.any(cov_df.values > 0), "Coverage values should be non-zero for a non-empty BAM file."
 

@@ -177,6 +177,7 @@ class BaseTrainer(BaseModel):
         embeddings_df = pd.DataFrame.from_dict(embeddings, orient="index")
         embeddings_df.to_csv(str(embeddings_path), sep="\t")
 
+        # note: if architecture changes, this save_individual_embs may no longer be compatible.
         if save_individual_embs:
             kmer_embeddings = os.path.join(
                 os.path.dirname(output_path), "tnf_embeddings.tsv"
