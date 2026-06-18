@@ -2,7 +2,6 @@ import glob
 from pathlib import Path
 from .base import BaseFeatureBuilder
 import pandas as pd
-from corgi import Corgi
 import numpy as np
 from typing import Union, Optional, Tuple, List
 import os
@@ -59,6 +58,8 @@ def run_corgi(
     model_path: str = None,
     embedding: str = None,
 ):
+    from corgi import Corgi
+
     corgi = Corgi()
     _ = corgi.predict(
         input=input_fasta,

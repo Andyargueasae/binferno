@@ -1,6 +1,6 @@
 from enum import Enum
 from pathlib import Path
-from pydantic import Field
+from pydantic import ConfigDict, Field
 import pandas as pd
 
 from .base import BaseClustering, ClusterResult
@@ -27,8 +27,7 @@ class BinfernoClustering(BaseClustering):
         description="Whether to use plastid-specific seed generation and minimum bin size.",
     )
 
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def __call__(
         self,

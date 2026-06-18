@@ -14,7 +14,6 @@ import pandas as pd
 from typing import Dict, List, Tuple, Iterator, TextIO, Optional
 
 from ..clustering.base import ClusterResult
-from .scripts.unitem_markers import Markers, PltdMarkers
 from .scripts.unitem_defaults import *
 
 BinDict = Dict[str, Dict[str, set]]
@@ -572,6 +571,10 @@ def estimate_bins_quality_nobins(
     """
     Estimate bin quality using bacterial/archaeal marker information.
     """
+    # Importing CheckM emits an upstream pkg_resources deprecation warning.
+    # Keep that import out of normal startup paths such as `binferno --help`.
+    from .scripts.unitem_markers import Markers
+
     markers = Markers()
 
     # Keep these calls only if required for internal marker setup / side effects.
@@ -593,6 +596,10 @@ def estimate_bins_quality_nobins_pltd(
     """
     Estimate bin quality using plastid marker information.
     """
+    # Importing CheckM emits an upstream pkg_resources deprecation warning.
+    # Keep that import out of normal startup paths such as `binferno --help`.
+    from .scripts.unitem_markers import PltdMarkers
+
     markers = PltdMarkers()
 
     # Keep this call only if required for internal marker setup / side effects.

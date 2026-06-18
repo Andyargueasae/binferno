@@ -1,11 +1,10 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 import pandas as pd
 from pathlib import Path
 
 
 class BaseFeatureBuilder(BaseModel):
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def __call__(self, contigs: Path, bam: Path, output_dir: Path = None, **kwargs):
         raise NotImplementedError(

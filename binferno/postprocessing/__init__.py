@@ -4,28 +4,23 @@ from pathlib import Path
 import shutil
 
 import loguru
-from pydantic import Field
+from pydantic import ConfigDict, Field
 from typing import Tuple, Dict
 
 from .base import BasePostprocessor
 from ..clustering.base import ClusterResult
-from .writer_utils import (
-    estimate_bins_quality_nobins,
-    estimate_bins_quality_nobins_pltd,
-    filter_small_bins,
-    GenomeProfiler,
-)
 
 
 class BinfernoPostprocessor(BasePostprocessor):
-    checkm_database: Path = Field(default="", description="Path to CheckM database")
+    checkm_database: Path = Field(
+        description="Path to CheckM database",
+    )
     minbin_size: int = Field(
         default=200_000,
         description="Minimum bin size for filtering contigs before clustering.",
     )
 
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def __call__(
         self,
@@ -36,6 +31,12 @@ class BinfernoPostprocessor(BasePostprocessor):
         logger: loguru._logger.Logger = None,
         plastid: bool = False,
     ) -> None:
+        from .writer_utils import (
+            GenomeProfiler,
+            estimate_bins_quality_nobins,
+            estimate_bins_quality_nobins_pltd,
+            filter_small_bins,
+        )
 
         checkm_database = self.checkm_database
 

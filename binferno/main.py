@@ -2,7 +2,6 @@ from pathlib import Path
 
 import tyro
 from typing_extensions import Annotated
-from loguru import logger
 
 from binferno.training import BinfernoTrainer
 from binferno.clustering import BinfernoClustering
@@ -38,6 +37,8 @@ def binferno(
         ),
     ] = False,
 ) -> None:
+    from loguru import logger
+
     output_dir.mkdir(parents=True, exist_ok=True)
     logger.add(f"{output_dir}/binferno.log", rotation="1 MB", retention="10 days")
 
