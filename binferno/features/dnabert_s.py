@@ -5,6 +5,8 @@ import numpy as np
 import pandas as pd
 from transformers import AutoTokenizer, AutoModel, AutoConfig
 import pyfastx
+import rich.progress as progress
+import time
 from pydantic import Field
 
 from .base import BaseFeatureBuilder
@@ -16,8 +18,9 @@ class DnaBertSFeatureBuilder(BaseFeatureBuilder):
     def __call__(self, contigs: Path,
                 # fragments: list = [],
                 output_dir: Path = None) -> pd.DataFrame:
+        start_time = time.time()
         model_path = "zhihan1996/DNABERT-S"
-        max_len = 512
+        max_len = 768 # < 1000 bp recommended.
         stride = 512
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -25,7 +28,11 @@ class DnaBertSFeatureBuilder(BaseFeatureBuilder):
         seqs = [(name, str(seq)) for name, seq in seqs if len(seq) > 1000]
 
 
-        config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+        # the configuration is now changed completely.
+        config = AutoConfig.from_pretrained(
+            "yuhtong/DNABERT-S-binferno",
+            trust_remote_code=True,
+        )
         config.use_flash_attn = False
         config.use_flash_attention = False
         config.flash_attn = False
@@ -43,7 +50,7 @@ class DnaBertSFeatureBuilder(BaseFeatureBuilder):
 
         features = []
         names = []
-        for name, seq in seqs:
+        for name, seq in progress.track(seqs, description="Embedding sequences"):
             names.append(name)
             emb_mean = self.embed_sequence(
                 seq=seq,
@@ -60,20 +67,35 @@ class DnaBertSFeatureBuilder(BaseFeatureBuilder):
             features.append(emb_mean)
 
         # form a ndarray first.
-        features = np.array(features, dtype=np.float32) # shape (num_contigs, 768)
-        breakpoint()
-        if self.pca:
+        features = np.asarray(features)
+
+
+        n_components = min(self.n_components, features.shape[0], features.shape[1])
+
+        if n_components < 2:
+            # too few contigs for meaningful PCA
+            pass
+        else:
             from sklearn.decomposition import PCA
-            pca = PCA(n_components=self.n_components)
+            pca = PCA(n_components=n_components)
             features = pca.fit_transform(features)
 
+        if features.shape[1] < self.n_components:
+            features = np.pad(
+                features,
+                ((0, 0), (0, self.n_components - features.shape[1])),
+                mode="constant",
+            )
+
         df = pd.DataFrame(features, index=names)
+        end_time = time.time()
+        print(f"Feature extraction completed in {end_time - start_time:.2f} seconds.")
         return df
 
     def embed_sequence(self, seq, tokenizer, model, device, max_len=512, stride=256):
         chunk_embs = []
 
-        for start in range(0, len(seq), stride):
+        for start in progress.track(range(0, len(seq), stride), description="Embedding chunks"):
             sub_seq = seq[start:start + max_len]
 
             if len(sub_seq) < 50:
