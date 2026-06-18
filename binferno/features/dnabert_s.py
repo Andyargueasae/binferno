@@ -15,18 +15,16 @@ class DnaBertSFeatureBuilder(BaseFeatureBuilder):
     pca: bool = Field(False, description="Whether to apply PCA to reduce dimensionality of features.")
     n_components: int = Field(128, description="Number of PCA components to retain if PCA is applied.")
 
-    def __call__(self, contigs: Path,
-                # fragments: list = [],
-                output_dir: Path = None) -> pd.DataFrame:
+    def __call__(self,
+                fragments: list = [],
+        ) -> pd.DataFrame:
         start_time = time.time()
         model_path = "zhihan1996/DNABERT-S"
         max_len = 768 # < 1000 bp recommended.
         stride = 512
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        seqs = pyfastx.Fastx(str(contigs))
-        seqs = [(name, str(seq)) for name, seq in seqs if len(seq) > 1000]
-
+        seqs = [(name, str(seq)) for name, seq in fragments if len(seq) > 1000]
 
         # the configuration is now changed completely.
         config = AutoConfig.from_pretrained(
@@ -68,8 +66,8 @@ class DnaBertSFeatureBuilder(BaseFeatureBuilder):
 
         # form a ndarray first.
         features = np.asarray(features)
-
-
+        assert self.n_components < features.shape[1], f"n_components ({self.n_components}) must be less than feature dimension ({features.shape[1]})."
+        
         n_components = min(self.n_components, features.shape[0], features.shape[1])
 
         if n_components < 2:

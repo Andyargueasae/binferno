@@ -3,7 +3,6 @@ from pathlib import Path
 from pydantic import Field
 import networkx as nx
 import pandas as pd
-import numpy as np
 
 from .base import BaseFeatureBuilder
 
@@ -27,20 +26,17 @@ class TaxonomyFeatureBuilder(BaseFeatureBuilder):
         Returns:
         - A DataFrame representing the taxonomy graph.
         """
-        # Load the taxonomy CSV file
-        taxonomy_df = pd.read_csv(taxonomy)
+        raise NotImplementedError("TaxonomyFeatureBuilder is not implemented yet. This is a placeholder for future development.")
+    
+    def _construct_taxonomy_graph(self, taxonomy_df: pd.DataFrame) -> nx.Graph:
+        """
+        Constructs a taxonomy graph from a DataFrame containing taxonomic classifications.
 
-        # Merge contigs with taxonomy information
-        merged_df = pd.merge(contigs, taxonomy_df, on='contig_id', how='left')
+        Parameters:
+        - taxonomy_df: A DataFrame with columns 'parent_taxon' and 'child_taxon' representing taxonomic relationships.
 
-        # Create a graph from the merged DataFrame
-        G = nx.from_pandas_edgelist(merged_df, source='parent_taxon', target='child_taxon')
-
-        # Convert the graph to a DataFrame
-        graph_df = pd.DataFrame(G.edges(), columns=['parent_taxon', 'child_taxon'])
-
-        # Optionally save the graph to the output directory
-        if output_dir is not None:
-            graph_df.to_csv(output_dir / 'taxonomy_graph.csv', index=False)
-
-        return graph_df
+        Returns:
+        - A NetworkX graph representing the taxonomy.
+        """
+        G = nx.from_pandas_edgelist(taxonomy_df, source='parent_taxon', target='child_taxon')
+        return G
