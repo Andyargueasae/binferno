@@ -88,5 +88,5 @@ For more details, please refer to the documentation: https://andyargueasae.githu
 Credits
 =====
 
-Binferno is developed by Yuhao Tong and Robert Turnbull. 
+Binferno is developed by Yuhao Tong and `Robert Turnbull <https://robturnbull.com>`_. 
 
