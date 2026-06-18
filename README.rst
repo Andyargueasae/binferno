@@ -1,4 +1,7 @@
 
+.. image:: docs/binferno-banner.jpg
+    :alt: Binferno Banner
+
 =====================================================
 Binferno: Contrastive Barlow-Twins metagenomic binning
 =====================================================
@@ -40,7 +43,7 @@ Check the installation by running:
 
 .. code-block:: bash
 
-    Binferno --help
+    binferno --help
 
 Input features
 ================
