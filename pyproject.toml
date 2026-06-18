@@ -69,3 +69,9 @@ Sphinx = ">=5.0.0"
 
 [tool.poetry.scripts]
 binferno = "binferno.main:main"
+
+[tool.coverage.run]
+source = ["binferno"]
+
+[tool.coverage.report]
+include = ["binferno/*"]
