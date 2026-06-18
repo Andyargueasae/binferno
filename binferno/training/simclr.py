@@ -11,7 +11,7 @@ from tqdm import tqdm
 from torch.backends import cudnn
 from pydantic import Field
 import pyfastx
-from torch.amp import GradScaler
+from torch.cuda.amp import GradScaler
 import loguru
 import pandas as pd
 from typing import Dict, List, Tuple

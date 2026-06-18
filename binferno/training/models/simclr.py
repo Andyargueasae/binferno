@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from .vae import VAE
+from .cr_vae import VAE
 
 # Try for one thing: contrastive multimodal vae for using tnf and coverage, 
 # then you can also carry on Corgi features (PCAed). 
@@ -106,7 +106,8 @@ class NeuralNetwork(nn.Module):
         self.hidden_dim = hidden_dim
 
         self.coverage_encoder = _build_coverage_encoder(
-            coverage_dim=coverage_dim, output_dim=output_dim, dropout=dropout
+            coverage_dim=coverage_dim, output_dim=output_dim, dropout=dropout,
+            hidden_dim = hidden_dim, n_hidden_layers=3
         )
 
         self.final_cov_dim = output_dim
@@ -315,7 +316,7 @@ def fusion_network(
 
 
 def _build_coverage_encoder(
-    coverage_dim: int, output_dim: int, dropout: float
+    coverage_dim: int, output_dim: int, dropout: float, hidden_dim: int = 512, n_hidden_layers: int = 3
 ):
     """
     Adaptive coverage encoder that scales capacity with input information content.
@@ -323,17 +324,15 @@ def _build_coverage_encoder(
     coverage_dim is always 2 * n_samples (mean + std per sample).
     n_samples drives capacity, not coverage_dim directly.
     """
-    hidden = 512
-    n_hidden_layers = 3
     encoder = []
     input_dim = coverage_dim
     for _ in range(n_hidden_layers):
-        encoder.append(nn.Linear(input_dim, hidden))
-        encoder.append(nn.LayerNorm(hidden))
+        encoder.append(nn.Linear(input_dim, hidden_dim))
+        encoder.append(nn.LayerNorm(hidden_dim))
         encoder.append(nn.LeakyReLU())
         encoder.append(nn.Dropout(dropout))
-        input_dim = hidden
-    encoder.append(nn.Linear(hidden, output_dim))
+        input_dim = hidden_dim
+    encoder.append(nn.Linear(hidden_dim, output_dim))
     encoder.append(nn.LayerNorm(output_dim))
     encoder.append(nn.LeakyReLU())
     return nn.Sequential(*encoder)
