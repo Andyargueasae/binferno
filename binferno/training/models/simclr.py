@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from .cr_vae import VAE
-from .taxonomy import TaxonomyEncoder
+from .taxonomy import HierarchicalTaxonomyEncoder, _build_tax_emb_encoder
 
 
 # The neuralnetwork orthologous to comebin's MLP, but we have to gain further modules for the third-modality encoding. 
@@ -15,10 +15,11 @@ class NeuralNetwork(nn.Module):
         dropout: float = 0.05,
         output_dim: int = 128,
         kmer_dim: int = 136,
-        tax_emb_dim: int = 0,
         proj_head_dim: int = 2048,
         proj: bool = False,
         hidden_dim: int = 1024,
+        tax_emb_dim: int = 0,
+        hierarchical_taxonomy: bool = False,
     ):
         super(NeuralNetwork, self).__init__()
         self.coverage_dim = coverage_dim  # by default we ask users to provide coverage.
@@ -30,6 +31,7 @@ class NeuralNetwork(nn.Module):
         self.tnf_enc_dim = kmer_dim
         self.tax_emb_dim = tax_emb_dim # corgi or dnabert_s embedding dimension.
         self.hidden_dim = hidden_dim
+        self.hierarchical_taxonomy = hierarchical_taxonomy # used to determine later in the forward: whether to feed hierarchical taxonomy logits into the fusion network or an embedding
 
         self.coverage_encoder = _build_coverage_encoder(
             coverage_dim=coverage_dim, output_dim=output_dim, dropout=dropout,
@@ -40,16 +42,22 @@ class NeuralNetwork(nn.Module):
 
         # taxonomy string feature prediction, requires hierarchical loss.
         if tax_emb_dim > 0:
-            self.tnf_enc_dim += tax_emb_dim
-            self.taxonomy_encoder = nn.Sequential(
-                nn.Linear(tax_emb_dim, hidden_dim),
-                nn.BatchNorm1d(hidden_dim),
-                nn.LeakyReLU(),
-                nn.Dropout(0.1),
-                nn.Linear(hidden_dim, tax_emb_dim),
-                nn.BatchNorm1d(tax_emb_dim),
-                nn.LeakyReLU(),
-            )
+            if not hierarchical_taxonomy:
+                self.tnf_enc_dim += output_dim
+                self.taxonomy_encoder = _build_tax_emb_encoder(
+                    tax_emb_dim=tax_emb_dim,
+                    hidden_dim=tax_emb_dim,
+                    output_dim=output_dim,
+                    dropout=dropout,
+                )
+            else:
+                # hierarchical taxonomy.
+                self.taxonomy_encoder = HierarchicalTaxonomyEncoder(
+                    input_dim=tax_emb_dim,
+                    hidden_dim=tax_emb_dim,
+                    output_dim=output_dim,
+                    dropout=dropout,
+                )
 
         # embedding-based prediction, no hierarchical loss.
         elif self.tax_emb_dim > 0:
@@ -96,7 +104,7 @@ class NeuralNetwork(nn.Module):
             nn.BatchNorm1d(proj_head_dim)
         )
 
-    def _encode(self, x):
+    def _encode(self, x, tax_emb: torch.Tensor = None):
         # encode tnf and coverage features separately, then fuse them together.
         tnf_features = x[:, : self.kmer_dim]
         cov_features = x[:, self.kmer_dim : self.kmer_dim + self.coverage_dim]
@@ -104,11 +112,11 @@ class NeuralNetwork(nn.Module):
         fused_encode = self.tnf_encoder(torch.cat([tnf_features, F.normalize(cov_encode, dim=-1)], dim=-1))  # fuse tnf and coverage features together by concatenating them and feeding them into the tnf encoder. This is a bit hacky but it allows us to keep the fusion network simple. We can also try other ways to fuse them together later, but for now we just concatenate them and feed them into the fusion network.
         return fused_encode, cov_encode
 
-    def get_embedding(self, x):
-        return self._encode(x)[0]
+    def get_embedding(self, x: torch.Tensor, tax_emb: torch.Tensor = None):
+        return self._encode(x, tax_emb)[0]
 
-    def forward(self, x):
-        fused_emb, cov_emb = self._encode(x)
+    def forward(self, x: torch.Tensor, tax_emb: torch.Tensor = None): # When doing a forward, we need an optional taxonomy embedding input.
+        fused_emb, cov_emb = self._encode(x, tax_emb)
         if self.proj:
             proj_emb = self.proj_head(fused_emb)
             return proj_emb, cov_emb
@@ -116,7 +124,7 @@ class NeuralNetwork(nn.Module):
 
 def _build_coverage_encoder(
     coverage_dim: int, output_dim: int, dropout: float, hidden_dim: int = 512, n_hidden_layers: int = 3
-):
+) -> nn.Sequential:
     """
     Adaptive coverage encoder that scales capacity with input information content.
 
