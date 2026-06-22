@@ -1,3 +1,5 @@
+from esm_models.hub.facebookresearch_esm_main.esm.data import BatchConverter
+from esm_models.hub.facebookresearch_esm_main.esm.esmfold.v1.misc import Dropout
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -16,9 +18,8 @@ class NeuralNetwork(nn.Module):
         output_dim: int = 128,
         kmer_dim: int = 136,
         tax_emb_dim: int = 128,
-        proj_head_dim: int = 128,
+        proj_head_dim: int = 2048,
         proj: bool = False,
-        dense_mode: bool = False,
         hidden_dim: int = 1024,
         taxonomy_dim: int = 0,
     ):
@@ -91,8 +92,13 @@ class NeuralNetwork(nn.Module):
             nn.Linear(self.representation_dim, 2048),
             nn.BatchNorm1d(2048),
             nn.ReLU(),
+            nn.Dropout(0.1),
             nn.Linear(2048, 2048),
             nn.BatchNorm1d(2048),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(2048, proj_head_dim),
+            nn.BatchNorm1d(proj_head_dim)
         )
 
     def _encode(self, x):
