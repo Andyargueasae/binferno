@@ -11,8 +11,9 @@ from .kmer import KmerFeatureBuilder, generate_feature_mapping
 from .dnabert_s import DnaBertSFeatureBuilder
 from .taxonomy import TaxonomyFeatureBuilder
 
+
 class BinfernoFeatureBuilder(BaseFeatureBuilder):
-    
+
     use_corgi: bool = Field(
         default=False,
         description="Whether to use Corgi to generate features for training.",
@@ -59,11 +60,13 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
         max_norm_stacked: bool = False,  # whether to normalize the coverage features before feeding into the model. we found that normalizing the coverage features before feeding into the model can lead to better performance, so we set std_first to True for simclr training.
     ) -> pd.DataFrame:
 
-        if (not self.use_kmer) and \
-            (not self.use_corgi) and \
-            (not self.use_coverage) and \
-            (not self.use_dnabert_s) and \
-            (not self.use_taxonomy):
+        if (
+            (not self.use_kmer)
+            and (not self.use_corgi)
+            and (not self.use_coverage)
+            and (not self.use_dnabert_s)
+            and (not self.use_taxonomy)
+        ):
             raise ValueError(
                 "At least one feature type must be selected for training. \
                 Please set at least one of use_kmer, use_corgi, use_coverage, \
@@ -87,26 +90,28 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
             else:
                 logger.info("Generating k-mer features...")
                 kmer_df = self.kmer(All_Fragments)
-                
-            resulting_features = pd.concat(
-                [resulting_features, kmer_df], axis=1
-            )
-        
+
+            resulting_features = pd.concat([resulting_features, kmer_df], axis=1)
+
         # the taxonomy-related feature
         if self.use_taxonomy:
             logger.info("Generating taxonomy features...")
-            tax_nodes, tax_node_indices, parental_array, contig_taxonomy_df = self.taxonomy(
-                contigs=contigs,
-                taxonomy=contigs,  # assuming the taxonomy information is provided in the contigs file for now, can be changed to a separate file in the future.
-                output_dir=output_dir,
-                logger=logger,
+            tax_nodes, tax_node_indices, parental_array, contig_taxonomy_df = (
+                self.taxonomy(
+                    contigs=contigs,
+                    taxonomy=contigs,  # assuming the taxonomy information is provided in the contigs file for now, can be changed to a separate file in the future.
+                    output_dir=output_dir,
+                    logger=logger,
+                )
             )
-            contig_taxonomy_df = contig_taxonomy_df.set_index('contig_id')
+            contig_taxonomy_df = contig_taxonomy_df.set_index("contig_id")
             resulting_features = pd.concat(
                 [resulting_features, contig_taxonomy_df], axis=1
             )
 
-            logger.info(f"Taxonomy of the data contains {len(tax_node_indices)} unique taxa.")
+            logger.info(
+                f"Taxonomy of the data contains {len(tax_node_indices)} unique taxa."
+            )
         elif self.use_corgi:
             logger.info("Generating Corgi features...")
             corgi_data = output_dir / "corgi_features.tsv"
@@ -117,24 +122,22 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
                 corgi_df = self.corgi(
                     output_dir, contigs=contigs, min_length=contig_length
                 )
-            resulting_features = pd.concat(
-                [resulting_features, corgi_df], axis=1
-            )
+            resulting_features = pd.concat([resulting_features, corgi_df], axis=1)
         elif self.use_dnabert_s:
             logger.info("Generating DNABERT-S features...")
             dnabert_s_data = output_dir / "dnabert_s_features.tsv"
             if dnabert_s_data.exists():
                 logger.info("Loading existing DNABERT-S features...")
-                dnabert_s_df = pd.read_csv(dnabert_s_data, sep="\t", index_col=0, header=0)
+                dnabert_s_df = pd.read_csv(
+                    dnabert_s_data, sep="\t", index_col=0, header=0
+                )
             else:
                 dnabert_s_df = self.dnabert_s(
                     fragments=All_Fragments,
                 )
-            resulting_features = pd.concat(
-                [resulting_features, dnabert_s_df], axis=1
-            )  
+            resulting_features = pd.concat([resulting_features, dnabert_s_df], axis=1)
 
-        # Finally, coverages are loaded. 
+        # Finally, coverages are loaded.
         if self.use_coverage:
             logger.info("Generating coverage features...")
             coverage_data = output_dir / "coverage_features.tsv"
@@ -171,21 +174,21 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
         del (
             FragMent_Dict,
             All_Fragments,
-        )  
+        )
         del (
             kmer_df,
             coverage_df,
-        )  
+        )
 
         if self.use_corgi:
             del corgi_df
         if self.use_dnabert_s:
             del dnabert_s_df
-        
+
         # Final feature looks like:
         # [kmer, (corgi), (dnabert_s), coverage]
         resulting_features.to_csv(
             output_dir / "features.tsv", index=True, header=True, sep="\t"
         )
-        
+
         return resulting_features, kmer_dim

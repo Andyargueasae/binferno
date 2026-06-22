@@ -11,16 +11,22 @@ from pydantic import Field
 
 from .base import BaseFeatureBuilder
 
-class DnaBertSFeatureBuilder(BaseFeatureBuilder):
-    pca: bool = Field(False, description="Whether to apply PCA to reduce dimensionality of features.")
-    n_components: int = Field(128, description="Number of PCA components to retain if PCA is applied.")
 
-    def __call__(self,
-                fragments: list = [],
-        ) -> pd.DataFrame:
+class DnaBertSFeatureBuilder(BaseFeatureBuilder):
+    pca: bool = Field(
+        False, description="Whether to apply PCA to reduce dimensionality of features."
+    )
+    n_components: int = Field(
+        128, description="Number of PCA components to retain if PCA is applied."
+    )
+
+    def __call__(
+        self,
+        fragments: list = [],
+    ) -> pd.DataFrame:
         start_time = time.time()
         model_path = "zhihan1996/DNABERT-S"
-        max_len = 768 # < 1000 bp recommended.
+        max_len = 768  # < 1000 bp recommended.
         stride = 512
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -66,8 +72,10 @@ class DnaBertSFeatureBuilder(BaseFeatureBuilder):
 
         # form a ndarray first.
         features = np.asarray(features)
-        assert self.n_components < features.shape[1], f"n_components ({self.n_components}) must be less than feature dimension ({features.shape[1]})."
-        
+        assert (
+            self.n_components < features.shape[1]
+        ), f"n_components ({self.n_components}) must be less than feature dimension ({features.shape[1]})."
+
         n_components = min(self.n_components, features.shape[0], features.shape[1])
 
         if n_components < 2:
@@ -75,6 +83,7 @@ class DnaBertSFeatureBuilder(BaseFeatureBuilder):
             pass
         else:
             from sklearn.decomposition import PCA
+
             pca = PCA(n_components=n_components)
             features = pca.fit_transform(features)
 
@@ -93,8 +102,10 @@ class DnaBertSFeatureBuilder(BaseFeatureBuilder):
     def embed_sequence(self, seq, tokenizer, model, device, max_len=512, stride=256):
         chunk_embs = []
 
-        for start in progress.track(range(0, len(seq), stride), description="Embedding chunks"):
-            sub_seq = seq[start:start + max_len]
+        for start in progress.track(
+            range(0, len(seq), stride), description="Embedding chunks"
+        ):
+            sub_seq = seq[start : start + max_len]
 
             if len(sub_seq) < 50:
                 continue

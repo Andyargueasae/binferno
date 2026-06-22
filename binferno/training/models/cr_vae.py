@@ -4,25 +4,27 @@ import torch.nn.functional as F
 
 # Reference for contrastive vae: https://arxiv.org/abs/1902.04601.
 
+
 class VAE(nn.Module):
-    '''
+    """
     Building blocks of contrastive-variational autoencoder (CR-VAE) model.
      - Encoder: encodes input data into a latent representation (mean and log variance).
      - Reparameterization: samples from the latent space using the reparameterization trick.
      - Decoder: reconstructs the input data from the sampled latent representation.
      - Contrastive Loss: encourages the model to learn discriminative features by contrasting positive and negative pairs.
      - KL Divergence Loss: regularizes the latent space to follow a standard normal distribution.
-    '''
+    """
 
-    def __init__(self,
-            coverage_dim: int,
-            tnf_dim: int = 103, # or maybe, 136.
-            hidden_dim: int = 512,
-            latent_dim: int = 128,
-            beta: int = 200,
-            dropout: float = 0.2,
-            seed: int = 42      
-        ):
+    def __init__(
+        self,
+        coverage_dim: int,
+        tnf_dim: int = 103,  # or maybe, 136.
+        hidden_dim: int = 512,
+        latent_dim: int = 128,
+        beta: int = 200,
+        dropout: float = 0.2,
+        seed: int = 42,
+    ):
         super(VAE, self).__init__()
         torch.manual_seed(seed)
         self.coverage_dim = coverage_dim
@@ -41,34 +43,36 @@ class VAE(nn.Module):
 
     def _encode():
         raise NotImplementedError("Subclasses should implement this method.")
-    
+
     def _decode():
         raise NotImplementedError("Subclasses should implement this method.")
-    
+
     def reparameterize(self, mu, logvar):
         raise NotImplementedError("Subclasses should implement this method.")
-    
+
     def forward(self, x):
         raise NotImplementedError("Subclasses should implement this method.")
-    
+
     def get_embeddings(self, x):
         raise NotImplementedError("Subclasses should implement this method.")
-    
+
 
 class taxVAE(nn.Module):
-    '''
-    taxVAE is a specific implementation of the VAE architecture designed for taxonomic data. 
+    """
+    taxVAE is a specific implementation of the VAE architecture designed for taxonomic data.
     It inherits from the base VAE class and implements the encoding, decoding, reparameterization, and forward pass methods.
-    '''
-    def __init__(self,
-            coverage_dim: int,
-            tnf_dim: int = 103, # or maybe, 136.
-            hidden_dim: int = 512,
-            latent_dim: int = 128,
-            beta: int = 200,
-            dropout: float = 0.2,
-            seed: int = 42      
-        ):
+    """
+
+    def __init__(
+        self,
+        coverage_dim: int,
+        tnf_dim: int = 103,  # or maybe, 136.
+        hidden_dim: int = 512,
+        latent_dim: int = 128,
+        beta: int = 200,
+        dropout: float = 0.2,
+        seed: int = 42,
+    ):
         super(taxVAE, self).__init__(
             coverage_dim=coverage_dim,
             tnf_dim=tnf_dim,
@@ -76,7 +80,7 @@ class taxVAE(nn.Module):
             latent_dim=latent_dim,
             beta=beta,
             dropout=dropout,
-            seed=seed
+            seed=seed,
         )
         # Define encoder layers
         self.encoder.append(nn.Linear(coverage_dim + tnf_dim, hidden_dim))
@@ -84,7 +88,7 @@ class taxVAE(nn.Module):
         self.encoder.append(nn.Dropout(dropout))
         self.mu.append(nn.Linear(hidden_dim, latent_dim))
         self.logvar = nn.Linear(hidden_dim, latent_dim)
-        
+
         # Define decoder layers
         self.decoder.append(nn.Linear(latent_dim, hidden_dim))
         self.decoder.append(nn.ReLU())

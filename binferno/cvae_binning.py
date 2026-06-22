@@ -51,21 +51,21 @@ from torch import Tensor
 # --------------------------------------------------------------------------- #
 @dataclass
 class CVAEConfig:
-    tnf_dim: int = 103              # tetranucleotide-frequency feature width (canonical 4-mers)
-    cov_dim: int = 1               # number of coverage samples (abundance across N samples)
+    tnf_dim: int = 103  # tetranucleotide-frequency feature width (canonical 4-mers)
+    cov_dim: int = 1  # number of coverage samples (abundance across N samples)
     hidden: int = 512
-    s_dim: int = 32                # salient latent (what you cluster on)
-    z_dim: int = 32                # irrelevant latent (nuisance)
-    proj_dim: int = 256            # InfoNCE projection head output (kept off the latent itself)
+    s_dim: int = 32  # salient latent (what you cluster on)
+    z_dim: int = 32  # irrelevant latent (nuisance)
+    proj_dim: int = 256  # InfoNCE projection head output (kept off the latent itself)
     proj_hidden: int = 512
     dropout: float = 0.1
-    zero_bias: bool = False        # set True for clean s=0 / z=0 ablation (paper Sec. 3)
+    zero_bias: bool = False  # set True for clean s=0 / z=0 ablation (paper Sec. 3)
     # loss weights
-    beta_s: float = 1.0            # KL weight on salient
-    beta_z: float = 1.0            # KL weight on irrelevant
-    gamma_tc: float = 1.0          # total-correlation weight
-    lambda_nce: float = 1.0        # InfoNCE weight
-    nce_temperature: float = 0.1   # NT-Xent temperature (your sweep range 0.07-0.2)
+    beta_s: float = 1.0  # KL weight on salient
+    beta_z: float = 1.0  # KL weight on irrelevant
+    gamma_tc: float = 1.0  # total-correlation weight
+    lambda_nce: float = 1.0  # InfoNCE weight
+    nce_temperature: float = 0.1  # NT-Xent temperature (your sweep range 0.07-0.2)
 
 
 # --------------------------------------------------------------------------- #
@@ -83,13 +83,14 @@ class MLPEncoder(nn.Module):
     spirit: each maps the full feature vector -> its own latent block.
     """
 
-    def __init__(self, in_dim: int, hidden: int, latent_dim: int,
-                 dropout: float, zero_bias: bool):
+    def __init__(
+        self, in_dim: int, hidden: int, latent_dim: int, dropout: float, zero_bias: bool
+    ):
         super().__init__()
         bias = not zero_bias
         self.net = nn.Sequential(
             _linear(in_dim, hidden, bias),
-            nn.LayerNorm(hidden),          # LayerNorm over BatchNorm1d (binferno convention)
+            nn.LayerNorm(hidden),  # LayerNorm over BatchNorm1d (binferno convention)
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
             _linear(hidden, hidden, bias),
@@ -111,8 +112,15 @@ class Decoder(nn.Module):
     (paper eq. 2 / Fig. 3a). Reconstructs concatenated [TNF | coverage].
     """
 
-    def __init__(self, s_dim: int, z_dim: int, hidden: int, out_dim: int,
-                 dropout: float, zero_bias: bool):
+    def __init__(
+        self,
+        s_dim: int,
+        z_dim: int,
+        hidden: int,
+        out_dim: int,
+        dropout: float,
+        zero_bias: bool,
+    ):
         super().__init__()
         bias = not zero_bias
         self.net = nn.Sequential(
@@ -164,7 +172,7 @@ class TCDiscriminator(nn.Module):
             nn.LeakyReLU(0.2, inplace=True),
             nn.Linear(hidden, hidden),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Linear(hidden, 2),          # logits: [joint, product]
+            nn.Linear(hidden, 2),  # logits: [joint, product]
         )
 
     def forward(self, s: Tensor, z: Tensor) -> Tensor:
@@ -181,12 +189,17 @@ class ContrastiveVAE(nn.Module):
         in_dim = cfg.tnf_dim + cfg.cov_dim
 
         # Two shared encoders: one for salient s, one for irrelevant z.
-        self.enc_s = MLPEncoder(in_dim, cfg.hidden, cfg.s_dim, cfg.dropout, cfg.zero_bias)
-        self.enc_z = MLPEncoder(in_dim, cfg.hidden, cfg.z_dim, cfg.dropout, cfg.zero_bias)
+        self.enc_s = MLPEncoder(
+            in_dim, cfg.hidden, cfg.s_dim, cfg.dropout, cfg.zero_bias
+        )
+        self.enc_z = MLPEncoder(
+            in_dim, cfg.hidden, cfg.z_dim, cfg.dropout, cfg.zero_bias
+        )
 
         # Single shared decoder.
-        self.decoder = Decoder(cfg.s_dim, cfg.z_dim, cfg.hidden, in_dim,
-                               cfg.dropout, cfg.zero_bias)
+        self.decoder = Decoder(
+            cfg.s_dim, cfg.z_dim, cfg.hidden, in_dim, cfg.dropout, cfg.zero_bias
+        )
 
         # InfoNCE projection head on the salient embedding.
         self.proj = ProjectionHead(cfg.s_dim, cfg.proj_hidden, cfg.proj_dim)
@@ -205,8 +218,9 @@ class ContrastiveVAE(nn.Module):
         z_mu, z_logvar = self.enc_z(x)
         s = self.reparameterize(s_mu, s_logvar)
         z = self.reparameterize(z_mu, z_logvar)
-        return dict(s=s, z=z, s_mu=s_mu, s_logvar=s_logvar,
-                    z_mu=z_mu, z_logvar=z_logvar)
+        return dict(
+            s=s, z=z, s_mu=s_mu, s_logvar=s_logvar, z_mu=z_mu, z_logvar=z_logvar
+        )
 
     def encode_salient(self, x: Tensor) -> Tensor:
         """Inference path: the embedding you hand to the clusterer (uses s_mu)."""
@@ -263,8 +277,9 @@ def total_correlation_loss(disc: TCDiscriminator, s: Tensor, z: Tensor):
     logits_joint_d = disc(s.detach(), z.detach())
     ones = torch.ones(s.size(0), dtype=torch.long, device=s.device)
     zeros = torch.zeros(s.size(0), dtype=torch.long, device=s.device)
-    disc_loss = 0.5 * (F.cross_entropy(logits_joint_d, zeros)
-                       + F.cross_entropy(logits_prod, ones))
+    disc_loss = 0.5 * (
+        F.cross_entropy(logits_joint_d, zeros) + F.cross_entropy(logits_prod, ones)
+    )
     return tc_penalty, disc_loss
 
 
@@ -278,8 +293,8 @@ def info_nce_loss(z_i: Tensor, z_j: Tensor, temperature: float) -> Tensor:
     B = z_i.size(0)
     z_i = F.normalize(z_i, dim=1)
     z_j = F.normalize(z_j, dim=1)
-    reps = torch.cat([z_i, z_j], dim=0)                 # (2B, D)
-    sim = reps @ reps.t() / temperature                 # (2B, 2B)
+    reps = torch.cat([z_i, z_j], dim=0)  # (2B, D)
+    sim = reps @ reps.t() / temperature  # (2B, 2B)
 
     # Mask self-similarity.
     self_mask = torch.eye(2 * B, dtype=torch.bool, device=reps.device)
@@ -293,11 +308,13 @@ def info_nce_loss(z_i: Tensor, z_j: Tensor, temperature: float) -> Tensor:
 # --------------------------------------------------------------------------- #
 # Combined objective
 # --------------------------------------------------------------------------- #
-def cvae_loss(model: ContrastiveVAE,
-              x_target: Tensor,
-              x_background: Tensor,
-              x_target_view2: Optional[Tensor] = None,
-              cfg: Optional[CVAEConfig] = None) -> dict[str, Tensor]:
+def cvae_loss(
+    model: ContrastiveVAE,
+    x_target: Tensor,
+    x_background: Tensor,
+    x_target_view2: Optional[Tensor] = None,
+    cfg: Optional[CVAEConfig] = None,
+) -> dict[str, Tensor]:
     """Compute the full binferno-cVAE objective.
 
     x_target        : (B, F) features of the contig batch
@@ -325,8 +342,8 @@ def cvae_loss(model: ContrastiveVAE,
 
     # --- InfoNCE on salient projection ------------------------------------ #
     if x_target_view2 is not None and cfg.lambda_nce > 0:
-        s1 = model.encode_salient(x_target)            # view 1 salient mean
-        s2 = model.encode_salient(x_target_view2)      # view 2 salient mean
+        s1 = model.encode_salient(x_target)  # view 1 salient mean
+        s2 = model.encode_salient(x_target_view2)  # view 2 salient mean
         p1, p2 = model.proj(s1), model.proj(s2)
         nce = info_nce_loss(p1, p2, cfg.nce_temperature)
     else:
@@ -361,9 +378,9 @@ def augment_contig(x: Tensor, cfg: CVAEConfig, noise_std: float = 0.05) -> Tenso
     x = x + noise_std * torch.randn_like(x)
     # Coverage dropout (last cov_dim columns).
     if cfg.cov_dim > 0:
-        cov = x[:, cfg.tnf_dim:]
+        cov = x[:, cfg.tnf_dim :]
         drop = (torch.rand_like(cov) > 0.1).float()
-        x[:, cfg.tnf_dim:] = cov * drop
+        x[:, cfg.tnf_dim :] = cov * drop
     return x
 
 
@@ -385,15 +402,17 @@ def make_background(x_target: Tensor, cfg: CVAEConfig) -> Tensor:
 # --------------------------------------------------------------------------- #
 # Minimal training step
 # --------------------------------------------------------------------------- #
-def train_step(model: ContrastiveVAE,
-               x_target: Tensor,
-               opt_model: torch.optim.Optimizer,
-               opt_disc: torch.optim.Optimizer,
-               cfg: CVAEConfig) -> dict[str, float]:
+def train_step(
+    model: ContrastiveVAE,
+    x_target: Tensor,
+    opt_model: torch.optim.Optimizer,
+    opt_disc: torch.optim.Optimizer,
+    cfg: CVAEConfig,
+) -> dict[str, float]:
     model.train()
     x_bg = make_background(x_target, cfg)
     x_v2 = augment_contig(x_target, cfg)
-    x_v1 = augment_contig(x_target, cfg)   # augment the "anchor" view too
+    x_v1 = augment_contig(x_target, cfg)  # augment the "anchor" view too
 
     losses = cvae_loss(model, x_v1, x_bg, x_target_view2=x_v2, cfg=cfg)
 

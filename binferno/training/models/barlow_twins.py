@@ -12,7 +12,7 @@ class NeuralNetwork(nn.Module):
         output_dim=128,
         kmer_dim=136,
         proj_head_dim=512,
-        tax_emb_dim: int = 0, # corgi or dnabert_s
+        tax_emb_dim: int = 0,  # corgi or dnabert_s
         hierarchical_taxonomy: bool = False,
     ):
         super(NeuralNetwork, self).__init__()
@@ -23,9 +23,9 @@ class NeuralNetwork(nn.Module):
         self.tnf_dim = tnf_dim
         self.tnf_enc_dim = kmer_dim
         self.tax_emb_dim = tax_emb_dim
-        self.hierarchical_taxonomy = hierarchical_taxonomy # used to determine later in the forward: whether to feed hierarchical taxonomy logits into the fusion network or an embedding
+        self.hierarchical_taxonomy = hierarchical_taxonomy  # used to determine later in the forward: whether to feed hierarchical taxonomy logits into the fusion network or an embedding
 
-        # handle taxonomy data. 
+        # handle taxonomy data.
         if self.tax_emb_dim > 0:
             if not hierarchical_taxonomy:
                 self.tnf_enc_dim += output_dim
@@ -71,9 +71,9 @@ class NeuralNetwork(nn.Module):
 
         self.fusion_network = AttentionFusion(
             emb_dim=output_dim,
-            kmer_enc_dim=output_dim, # modality 1
-            coverage_dim=self.final_cov_dim, # modality 2
-            tax_emb_dim=tax_emb_dim, # modality 3, if we include taxonomy embeddings as a separate modality. If we directly concatenate taxonomy embeddings with kmer features and feed into the same encoder, then we don't need this separate modality dimension for taxonomy.
+            kmer_enc_dim=output_dim,  # modality 1
+            coverage_dim=self.final_cov_dim,  # modality 2
+            tax_emb_dim=tax_emb_dim,  # modality 3, if we include taxonomy embeddings as a separate modality. If we directly concatenate taxonomy embeddings with kmer features and feed into the same encoder, then we don't need this separate modality dimension for taxonomy.
         )
 
         self.representation_dim = output_dim
@@ -85,10 +85,7 @@ class NeuralNetwork(nn.Module):
             dropout=0.0,
         )
 
-    def _encode(self, 
-        x: torch.Tensor, 
-        tax_emb: torch.Tensor = None
-    ):
+    def _encode(self, x: torch.Tensor, tax_emb: torch.Tensor = None):
         # encode tnf and coverage features separately, then fuse them together.
         tnf_features = x[:, : self.tnf_enc_dim]
         tnf_encode = self.tnf_encoder(tnf_features)
@@ -97,38 +94,27 @@ class NeuralNetwork(nn.Module):
         fused_encode = self.fusion_network(tnf_encode, cov_encode)  # 128
         return fused_encode, tnf_encode, cov_encode
 
-    def get_embedding(self, 
-        x: torch.Tensor, 
-        tax_emb: torch.Tensor = None
-    ):
+    def get_embedding(self, x: torch.Tensor, tax_emb: torch.Tensor = None):
         return self._encode(x, tax_emb)[0]
 
-    def get_separate_modality_embs(
-        self, 
-        x: torch.Tensor, 
-        tax_emb: torch.Tensor = None
-    ):
+    def get_separate_modality_embs(self, x: torch.Tensor, tax_emb: torch.Tensor = None):
         kmer_features = x[:, : self.tnf_enc_dim]
         kmer_encoded = self.tnf_encoder(kmer_features)
         coverage_features = x[:, self.tnf_enc_dim :]
         coverage_encoded = self.coverage_encoder(coverage_features)
         return kmer_encoded, coverage_encoded
 
-    def forward_one(
-        self, 
-        x: torch.Tensor, 
-        tax_emb: torch.Tensor = None
-    ):
+    def forward_one(self, x: torch.Tensor, tax_emb: torch.Tensor = None):
         fused_emb, tnf_emb, cov_emb = self._encode(x, tax_emb)
         proj_emb = self.proj_head(fused_emb)  # 512
         return proj_emb, tnf_emb, cov_emb
 
     def forward(
         self,
-        x1: torch.Tensor, 
-        x2: torch.Tensor, 
-        tax_emb1: torch.Tensor = None, 
-        tax_emb2: torch.Tensor = None
+        x1: torch.Tensor,
+        x2: torch.Tensor,
+        tax_emb1: torch.Tensor = None,
+        tax_emb2: torch.Tensor = None,
     ):
         z1, kmer_z1, cov_z1 = self.forward_one(x1, tax_emb1)
         z2, kmer_z2, cov_z2 = self.forward_one(x2, tax_emb2)

@@ -19,6 +19,7 @@ from .cluster_utils import (
     _read_seed_count,
 )
 
+
 class DbscanClustering(BaseClustering):
     def __call__(
         self,
@@ -149,7 +150,11 @@ class DbscanClustering(BaseClustering):
 
         # turn best_bins into a dataframe of contig_name -> bin_label, where bin_label is an integer from 0 to len(best_bins)-1.
         best_bin_df = pd.DataFrame(
-            [(namelist[ci], bin_label) for bin_label, bin_indices in enumerate(best_bins) for ci in bin_indices],
+            [
+                (namelist[ci], bin_label)
+                for bin_label, bin_indices in enumerate(best_bins)
+                for ci in bin_indices
+            ],
             columns=["contig_id", "cluster_id"],
         )
         # save a copy of this file for later use in post-processing.
@@ -165,13 +170,17 @@ class DbscanClustering(BaseClustering):
 
             pickle.dump(result, f)
 
-        logger.info("Clustering completed. Saved results and epsilon grid to output directory.")
+        logger.info(
+            "Clustering completed. Saved results and epsilon grid to output directory."
+        )
         return result
+
 
 def completeness_contamination(counts: np.ndarray, n_scgs: int) -> Tuple[float, float]:
     n_total = counts.sum()
     n_unique = (counts > 0).sum()
     return n_unique / n_scgs, (n_total - n_unique) / n_scgs
+
 
 def count_markers_saturated(
     contig_indices: list, contig_to_markers: dict, namelist: list, n_scgs: int

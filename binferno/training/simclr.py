@@ -27,10 +27,6 @@ KMER_DIM = 136
 
 
 class SimCLRTrainer(BaseTrainer):
-    simclrnet: bool = Field(
-        default=False,
-        description="Whether to use SimCLRNet architecture for training. If False, use a simpler MLP architecture.",
-    )
     proj: bool = Field(
         default=False,
         description="Whether to use a projection head in the NeuralNetwork architecture.",
@@ -53,23 +49,11 @@ class SimCLRTrainer(BaseTrainer):
     seed: int = Field(
         default=42, description="Random seed for training and augmentation."
     )
-    gated: bool = Field(
-        default=False,
-        description="Whether to use gated fusion in the Fusion module instead of attention fusion.",
-    )
-    attention: bool = Field(
-        default=False,
-        description="Whether to use attention fusion in the Fusion module instead of gated fusion.",
-    )
     temperature: float | None = Field(
         default=None,
         description="Temperature parameter for the InfoNCE loss. "
         "By default, it is set based on the N50 of the input contigs. "
         "If the N50 is greater than 10,000, the temperature is set to 0.07; otherwise, it is set to 0.15.",
-    )
-    embnet: bool = Field(
-        default=False,
-        description="Whether to use the EmbNet2 architecture for training instead of SimCLRNet or NeuralNetwork.",
     )
     max_lr_epochs: int = Field(
         default=10,
@@ -183,7 +167,7 @@ class SimCLRTrainer(BaseTrainer):
         composition_dim = feature_df.shape[1] - cov_dim
         kmer_dim = kmer_dim if kmer_dim != KMER_DIM else KMER_DIM
         taxonomy_dim = composition_dim - kmer_dim
-        
+
         model = NeuralNetwork(
             tnf_dim=composition_dim,
             coverage_dim=cov_dim,
@@ -202,7 +186,7 @@ class SimCLRTrainer(BaseTrainer):
             contig_length=self.contig_length,
             model=model,
             n_views=self.view_num,
-            simclrnet=self.simclrnet,
+            simclrnet=False,
             contigs=contigs,
             num_workers=threads,
         )
@@ -689,7 +673,9 @@ class EarlyStoppingManagerSimCLR:
         self._stagnant_epochs = 0
 
     def check_improvement(self, loss, top_acc, model_state):
-        acc_over_99 = top_acc > 99.0  # at least 0.5% gain or accuracy above 99% to consider it an improvement
+        acc_over_99 = (
+            top_acc > 99.0
+        )  # at least 0.5% gain or accuracy above 99% to consider it an improvement
         # improved = loss < self._lowest_loss or top_acc > self._top_acc
 
         if acc_over_99:

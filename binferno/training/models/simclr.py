@@ -6,7 +6,7 @@ from .cr_vae import VAE
 from .taxonomy import HierarchicalTaxonomyEncoder, _build_tax_emb_encoder
 
 
-# The neuralnetwork orthologous to comebin's MLP, but we have to gain further modules for the third-modality encoding. 
+# The neuralnetwork orthologous to comebin's MLP, but we have to gain further modules for the third-modality encoding.
 class NeuralNetwork(nn.Module):
     def __init__(
         self,
@@ -29,13 +29,16 @@ class NeuralNetwork(nn.Module):
         self.proj = proj
         self.tnf_dim = tnf_dim
         self.tnf_enc_dim = kmer_dim
-        self.tax_emb_dim = tax_emb_dim # corgi or dnabert_s embedding dimension.
+        self.tax_emb_dim = tax_emb_dim  # corgi or dnabert_s embedding dimension.
         self.hidden_dim = hidden_dim
-        self.hierarchical_taxonomy = hierarchical_taxonomy # used to determine later in the forward: whether to feed hierarchical taxonomy logits into the fusion network or an embedding
+        self.hierarchical_taxonomy = hierarchical_taxonomy  # used to determine later in the forward: whether to feed hierarchical taxonomy logits into the fusion network or an embedding
 
         self.coverage_encoder = _build_coverage_encoder(
-            coverage_dim=coverage_dim, output_dim=output_dim, dropout=dropout,
-            hidden_dim = hidden_dim, n_hidden_layers=3
+            coverage_dim=coverage_dim,
+            output_dim=output_dim,
+            dropout=dropout,
+            hidden_dim=hidden_dim,
+            n_hidden_layers=3,
         )
 
         self.final_cov_dim = output_dim
@@ -61,13 +64,13 @@ class NeuralNetwork(nn.Module):
 
         # embedding-based prediction, no hierarchical loss.
         elif self.tax_emb_dim > 0:
-            self.tnf_enc_dim += self.output_dim 
+            self.tnf_enc_dim += self.output_dim
             self.taxemb_encoder = nn.Sequential(
                 nn.Linear(self.tax_emb_dim, hidden_dim),
                 nn.BatchNorm1d(hidden_dim),
                 nn.LeakyReLU(),
                 nn.Dropout(0.1),
-                nn.Linear(hidden_dim, self.output_dim), 
+                nn.Linear(hidden_dim, self.output_dim),
                 nn.BatchNorm1d(self.output_dim),
                 nn.LeakyReLU(),
             )
@@ -86,10 +89,8 @@ class NeuralNetwork(nn.Module):
         modules.append(nn.BatchNorm1d(output_dim))
         modules.append(nn.LeakyReLU())
         self.tnf_encoder = nn.Sequential(*modules)
-            
-        self.representation_dim = (
-            self.output_dim
-        )
+
+        self.representation_dim = self.output_dim
 
         self.proj_head = nn.Sequential(
             nn.Linear(self.representation_dim, 2048),
@@ -101,7 +102,7 @@ class NeuralNetwork(nn.Module):
             nn.ReLU(),
             nn.Dropout(0.1),
             nn.Linear(2048, proj_head_dim),
-            nn.BatchNorm1d(proj_head_dim)
+            nn.BatchNorm1d(proj_head_dim),
         )
 
     def _encode(self, x, tax_emb: torch.Tensor = None):
@@ -109,21 +110,30 @@ class NeuralNetwork(nn.Module):
         tnf_features = x[:, : self.kmer_dim]
         cov_features = x[:, self.kmer_dim : self.kmer_dim + self.coverage_dim]
         cov_encode = self.coverage_encoder(cov_features)  # not normalized anymore.
-        fused_encode = self.tnf_encoder(torch.cat([tnf_features, F.normalize(cov_encode, dim=-1)], dim=-1))  # fuse tnf and coverage features together by concatenating them and feeding them into the tnf encoder. This is a bit hacky but it allows us to keep the fusion network simple. We can also try other ways to fuse them together later, but for now we just concatenate them and feed them into the fusion network.
+        fused_encode = self.tnf_encoder(
+            torch.cat([tnf_features, F.normalize(cov_encode, dim=-1)], dim=-1)
+        )  # fuse tnf and coverage features together by concatenating them and feeding them into the tnf encoder. This is a bit hacky but it allows us to keep the fusion network simple. We can also try other ways to fuse them together later, but for now we just concatenate them and feed them into the fusion network.
         return fused_encode, cov_encode
 
     def get_embedding(self, x: torch.Tensor, tax_emb: torch.Tensor = None):
         return self._encode(x, tax_emb)[0]
 
-    def forward(self, x: torch.Tensor, tax_emb: torch.Tensor = None): # When doing a forward, we need an optional taxonomy embedding input.
+    def forward(
+        self, x: torch.Tensor, tax_emb: torch.Tensor = None
+    ):  # When doing a forward, we need an optional taxonomy embedding input.
         fused_emb, cov_emb = self._encode(x, tax_emb)
         if self.proj:
             proj_emb = self.proj_head(fused_emb)
             return proj_emb, cov_emb
         return fused_emb, cov_emb
 
+
 def _build_coverage_encoder(
-    coverage_dim: int, output_dim: int, dropout: float, hidden_dim: int = 512, n_hidden_layers: int = 3
+    coverage_dim: int,
+    output_dim: int,
+    dropout: float,
+    hidden_dim: int = 512,
+    n_hidden_layers: int = 3,
 ) -> nn.Sequential:
     """
     Adaptive coverage encoder that scales capacity with input information content.
