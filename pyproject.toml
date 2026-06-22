@@ -50,6 +50,8 @@ dependencies = [
     "pyrodigal (>=3.6.3,<=3.7.1)",
     "pyhmmer (>=0.10.15,<=0.12.0)",
     "loguru (>=0.7.3,<0.8.0)",
+    "transformers==4.40.2",
+    "accelerate==1.1.1"
 ]
 
 # external dependencies from conda (install separately):
