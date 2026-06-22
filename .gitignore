@@ -237,3 +237,5 @@ encode.py
 *.svg
 semisupervised_encode.py
 diagonsis_cVAE_barlowtwins.py
+
+conda_env.txt
