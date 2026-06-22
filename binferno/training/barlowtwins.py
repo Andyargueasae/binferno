@@ -44,10 +44,6 @@ class BarlowTwinsTrainer(BaseTrainer):
     seed: int = Field(
         default=42, description="Random seed for training and augmentation."
     )
-    dense_mode: bool = Field(
-        default=False,
-        description="Whether to use dense layers in the model architecture. If False, the model will use a more lightweight architecture without dense layers.",
-    )
     warmup_epochs: int = Field(
         default=10,
         description="Number of epochs to linearly increase the learning rate from a small value to the initial learning rate at the start of training.",
@@ -142,14 +138,13 @@ class BarlowTwinsTrainer(BaseTrainer):
         cov_dim = sum([1 for col in feature_df.columns if "cov" in col])
         composition_dim = feature_df.shape[1] - cov_dim
 
-        corgi_dim = composition_dim - kmer_dim
+        tax_emb_dim = composition_dim - kmer_dim
         model = NeuralNetwork(
             tnf_dim=composition_dim,
             coverage_dim=cov_dim,
             kmer_dim=kmer_dim,
             proj_head_dim=self.proj_head_dim,
-            corgi_dim=corgi_dim,
-            dense_mode=self.dense_mode,
+            tax_emb_dim=tax_emb_dim,
             output_dim=self.output_dim,
         ).to(device)
 
@@ -902,20 +897,6 @@ class BarlowTwinsTrainer(BaseTrainer):
             num_views=view_num,
             length_threshold=contig_length,
         )
-
-        for view in range(view_num):
-            output_fasta = os.path.join(
-                output_dir, f"augmented_fragments_view{view}.fasta"
-            )
-            view_fragments = [
-                (header, seq)
-                for header, seq in All_Fragments
-                if header.endswith(f".{view}")
-            ]
-            with open(output_fasta, "w") as f:
-                for fragment_header, fragment_seq in view_fragments:
-                    f.write(f">{fragment_header}\n")
-                    f.write(f"{fragment_seq}\n")
 
         return FragMent_Dict, All_Fragments
 

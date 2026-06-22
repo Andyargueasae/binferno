@@ -15,11 +15,10 @@ class NeuralNetwork(nn.Module):
         dropout: float = 0.05,
         output_dim: int = 128,
         kmer_dim: int = 136,
-        tax_emb_dim: int = 128,
+        tax_emb_dim: int = 0,
         proj_head_dim: int = 2048,
         proj: bool = False,
         hidden_dim: int = 1024,
-        taxonomy_dim: int = 0,
     ):
         super(NeuralNetwork, self).__init__()
         self.coverage_dim = coverage_dim  # by default we ask users to provide coverage.
@@ -29,7 +28,6 @@ class NeuralNetwork(nn.Module):
         self.proj = proj
         self.tnf_dim = tnf_dim
         self.tnf_enc_dim = kmer_dim
-        self.taxonomy_dim = taxonomy_dim # the taxonomy signatures in terms of taxometer/mmseqs2 equivalent to that of taxvamb.
         self.tax_emb_dim = tax_emb_dim # corgi or dnabert_s embedding dimension.
         self.hidden_dim = hidden_dim
 
@@ -41,15 +39,15 @@ class NeuralNetwork(nn.Module):
         self.final_cov_dim = output_dim
 
         # taxonomy string feature prediction, requires hierarchical loss.
-        if taxonomy_dim > 0:
-            self.tnf_enc_dim += taxonomy_dim
+        if tax_emb_dim > 0:
+            self.tnf_enc_dim += tax_emb_dim
             self.taxonomy_encoder = nn.Sequential(
-                nn.Linear(taxonomy_dim, hidden_dim),
+                nn.Linear(tax_emb_dim, hidden_dim),
                 nn.BatchNorm1d(hidden_dim),
                 nn.LeakyReLU(),
                 nn.Dropout(0.1),
-                nn.Linear(hidden_dim, taxonomy_dim),
-                nn.BatchNorm1d(taxonomy_dim),
+                nn.Linear(hidden_dim, tax_emb_dim),
+                nn.BatchNorm1d(tax_emb_dim),
                 nn.LeakyReLU(),
             )
 
@@ -65,7 +63,6 @@ class NeuralNetwork(nn.Module):
                 nn.BatchNorm1d(self.output_dim),
                 nn.LeakyReLU(),
             )
-        
         tnf_hidden = self.hidden_dim
 
         modules = []

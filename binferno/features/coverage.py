@@ -662,15 +662,7 @@ def max_normalize_stacked_coverage(
 
 
 class CoverageFeatureBuilder(BaseFeatureBuilder):
-    rpkm_normalize: bool = Field(
-        default=True,
-        description=("Whether to apply RPKM normalization for non-SimCLR paths."),
-    )
-    max_normalize: bool = Field(
-        default=False,
-        description=("Whether to apply max normalization."),
-    )
-
+    # we will lock in rpkm normalization and discard max normalization.
     def __call__(
         self,
         fragment_dict: dict,
@@ -688,8 +680,8 @@ class CoverageFeatureBuilder(BaseFeatureBuilder):
             bam_batch=bam_batch,
             fragments_dict=fragment_dict,
             threads=threads,
-            rpkm_normalize=self.rpkm_normalize,
-            max_normalize=self.max_normalize,
+            rpkm_normalize=True,
+            max_normalize=False,
             max_norm_stacked=max_norm_stacked,
         )
         if max_norm_stacked:

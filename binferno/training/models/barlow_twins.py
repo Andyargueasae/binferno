@@ -10,11 +10,8 @@ class NeuralNetwork(nn.Module):
         coverage_dim,
         dropout=0.05,
         output_dim=128,
-        corgi_dim=0,
-        dense_mode=False,
         kmer_dim=136,
         proj_head_dim=512,
-        taxonomy_dim: int = 0, # taxonomy hierarchical embeddings
         tax_emb_dim: int = 0, # corgi or dnabert_s
     ):
         super(NeuralNetwork, self).__init__()
@@ -26,9 +23,10 @@ class NeuralNetwork(nn.Module):
         self.tnf_enc_dim = kmer_dim
         self.tax_emb_dim = tax_emb_dim
 
-        if self.tax_emb_dim > 0:  # concat kmer with taxonomy embeddings and run single encoder.
-            self.taxemb_encoder = TaxonomyEncoder(
-                input_dim=taxonomy_dim,
+        # handle taxonomy data. 
+        if self.tax_emb_dim > 0:
+            self.taxonomy_encoder = TaxonomyEncoder(
+                input_dim=tax_emb_dim,
                 hidden_dim=tax_emb_dim,
                 output_dim=tax_emb_dim,
                 dropout=dropout,
@@ -37,63 +35,24 @@ class NeuralNetwork(nn.Module):
                 corgi=False,
             )
 
-        if self.taxonomy_dim > 0:
-            self.taxonomy_encoder = TaxonomyEncoder(
-                input_dim=taxonomy_dim,
-                hidden_dim=tax_emb_dim,
-                output_dim=taxonomy_dim,
-                dropout=dropout,
-                taxonomy=True,
-                dnabert_s=False,
-                corgi=False,
-            )
-
         # may add more layers.
-        if not dense_mode:
-            tnf_hidden1 = 512
-            tnf_hidden2 = 256
-            tnf_hidden3 = output_dim
-            self.tnf_encoder = nn.Sequential(
-                nn.Linear(self.tnf_enc_dim, tnf_hidden1),
-                nn.BatchNorm1d(tnf_hidden1),
-                nn.LeakyReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(tnf_hidden1, tnf_hidden2),
-                nn.BatchNorm1d(tnf_hidden2),
-                nn.LeakyReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(tnf_hidden2, tnf_hidden3),
-                nn.BatchNorm1d(tnf_hidden3),
-                nn.LeakyReLU(),
-            )
-        else:  # dense mode, tnf->1024->512->256->128
-            tnf_hidden1 = 1024
-            tnf_hidden2 = 512
-            tnf_hidden3 = 256
-            tnf_hidden4 = output_dim
-            self.tnf_encoder = nn.Sequential(
-                nn.Linear(self.tnf_enc_dim, tnf_hidden1),
-                nn.BatchNorm1d(tnf_hidden1),
-                nn.LeakyReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(tnf_hidden1, tnf_hidden2),
-                nn.BatchNorm1d(tnf_hidden2),
-                nn.LeakyReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(tnf_hidden2, tnf_hidden3),
-                nn.BatchNorm1d(tnf_hidden3),
-                nn.LeakyReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(tnf_hidden3, tnf_hidden4),
-                nn.BatchNorm1d(tnf_hidden4),
-                nn.LeakyReLU(),
-            )
-        # dense mode cannot improve the performance...
-        # As Barlow twins will reward embeddings more than encoder capacity.
-        # So what really matters won't be the kmer encoder and coverage encoder capacity,
-        # but the fusion network and projection head capacity,
-        # which will directly determine the quality of the embeddings
-        # and the Barlow Twins loss optimization.
+
+        tnf_hidden1 = 512
+        tnf_hidden2 = 256
+        tnf_hidden3 = output_dim
+        self.tnf_encoder = nn.Sequential(
+            nn.Linear(self.tnf_enc_dim, tnf_hidden1),
+            nn.BatchNorm1d(tnf_hidden1),
+            nn.LeakyReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(tnf_hidden1, tnf_hidden2),
+            nn.BatchNorm1d(tnf_hidden2),
+            nn.LeakyReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(tnf_hidden2, tnf_hidden3),
+            nn.BatchNorm1d(tnf_hidden3),
+            nn.LeakyReLU(),
+        )
 
         # determined by coverage dim.
         self.coverage_encoder = _build_coverage_encoder(
@@ -107,7 +66,6 @@ class NeuralNetwork(nn.Module):
             kmer_enc_dim=output_dim, # modality 1
             coverage_dim=self.final_cov_dim, # modality 2
             tax_emb_dim=tax_emb_dim, # modality 3, if we include taxonomy embeddings as a separate modality. If we directly concatenate taxonomy embeddings with kmer features and feed into the same encoder, then we don't need this separate modality dimension for taxonomy.
-            taxonomy_dim=taxonomy_dim, # modality 3, if we include taxonomy embeddings as a separate modality. If we directly concatenate taxonomy embeddings with kmer features and feed into the same encoder, then we don't need this separate modality dimension for taxonomy.
         )
 
         self.representation_dim = output_dim

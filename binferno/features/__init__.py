@@ -90,8 +90,24 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
                 
             resulting_features = pd.concat(
                 [resulting_features, kmer_df], axis=1
-            )  
-        if self.use_corgi:
+            )
+        
+        # the taxonomy-related feature
+        if self.use_taxonomy:
+            logger.info("Generating taxonomy features...")
+            tax_nodes, tax_node_indices, parental_array, contig_taxonomy_df = self.taxonomy(
+                contigs=contigs,
+                taxonomy=contigs,  # assuming the taxonomy information is provided in the contigs file for now, can be changed to a separate file in the future.
+                output_dir=output_dir,
+                logger=logger,
+            )
+            contig_taxonomy_df = contig_taxonomy_df.set_index('contig_id')
+            resulting_features = pd.concat(
+                [resulting_features, contig_taxonomy_df], axis=1
+            )
+
+            logger.info(f"Taxonomy of the data contains {len(tax_node_indices)} unique taxa.")
+        elif self.use_corgi:
             logger.info("Generating Corgi features...")
             corgi_data = output_dir / "corgi_features.tsv"
             if corgi_data.exists():
@@ -104,7 +120,7 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
             resulting_features = pd.concat(
                 [resulting_features, corgi_df], axis=1
             )
-        if self.use_dnabert_s:
+        elif self.use_dnabert_s:
             logger.info("Generating DNABERT-S features...")
             dnabert_s_data = output_dir / "dnabert_s_features.tsv"
             if dnabert_s_data.exists():
@@ -117,8 +133,8 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
             resulting_features = pd.concat(
                 [resulting_features, dnabert_s_df], axis=1
             )  
-        if self.use_taxonomy:
-            raise NotImplementedError("Taxonomy features are not implemented yet. This is a placeholder for future development.")
+
+        # Finally, coverages are loaded. 
         if self.use_coverage:
             logger.info("Generating coverage features...")
             coverage_data = output_dir / "coverage_features.tsv"
@@ -143,12 +159,13 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
 
         kmer_dim = self._get_kmer_dim()
         corgi_dim = corgi_df.shape[1] if self.use_corgi else 0
+        taxonomy_dim = 0  # Placeholder for future taxonomy feature dimension
         coverage_dim = coverage_df.shape[1] if self.use_coverage else 0
         dnabert_s_dim = dnabert_s_df.shape[1] if self.use_dnabert_s else 0
         logger.info(
             f"Generated features with dimensions - \
-            k-mer: {kmer_dim}, Corgi: {corgi_dim}, \
-            Coverage: {coverage_dim}, DNABERT-S: {dnabert_s_dim}."
+            Canonical features: k-mer: {kmer_dim}, Coverage: {coverage_dim},  \
+            The third modality: Corgi: {corgi_dim} | Taxonomy: {taxonomy_dim} | DNABERT-S: {dnabert_s_dim}."
         )
 
         del (
@@ -167,8 +184,8 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
         
         # Final feature looks like:
         # [kmer, (corgi), (dnabert_s), coverage]
-
         resulting_features.to_csv(
             output_dir / "features.tsv", index=True, header=True, sep="\t"
         )
+        
         return resulting_features, kmer_dim

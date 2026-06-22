@@ -183,14 +183,13 @@ class SimCLRTrainer(BaseTrainer):
         composition_dim = feature_df.shape[1] - cov_dim
         kmer_dim = kmer_dim if kmer_dim != KMER_DIM else KMER_DIM
         taxonomy_dim = composition_dim - kmer_dim
-        # prepare model.
         
         model = NeuralNetwork(
             tnf_dim=composition_dim,
             coverage_dim=cov_dim,
             output_dim=self.output_dim,
             kmer_dim=kmer_dim,
-            taxonomy_dim=taxonomy_dim,
+            tax_emb_dim=taxonomy_dim,
             proj=self.proj,
             hidden_dim=self.hidden_dim,
         ).to(device)
@@ -678,28 +677,6 @@ class SimCLRTrainer(BaseTrainer):
             num_views=view_num,
             length_threshold=contig_length,
         )
-
-        # save the fragments to file for potential reuse in the future stages, to save time for augmentation in the future.
-
-        for view in range(view_num):
-            output_fasta = os.path.join(
-                output_dir, f"augmented_fragments_view{view}.fasta"
-            )
-            view_fragments = [
-                (header, seq)
-                for header, seq in All_Fragments
-                if header.endswith(f".{view}")
-            ]
-            with open(output_fasta, "w") as f:
-                for fragment_header, fragment_seq in view_fragments:
-                    f.write(f">{fragment_header}\n")
-                    f.write(f"{fragment_seq}\n")
-
-        # copy raw fasta file to augmented_fragments_view0.fasta.
-        # raw_fasta = os.path.join(output_dir, f"augmented_fragments_view0.fasta")
-        # if not os.path.exists(raw_fasta):
-        #     os.symlink(os.path.abspath(contigs), raw_fasta) # create a symbolic link to the original contigs fasta file for view 0, which is the unaugmented view.
-
         return FragMent_Dict, All_Fragments
 
 
