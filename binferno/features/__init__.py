@@ -158,9 +158,14 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
         del (
             kmer_df,
             coverage_df,
-            dnabert_s_df if self.use_dnabert_s else None,
-            corgi_df if self.use_corgi else None,
         )  
+
+        if self.use_corgi:
+            del corgi_df
+        if self.use_dnabert_s:
+            del dnabert_s_df
+        
+        # Final feature looks like:
         # [kmer, (corgi), (dnabert_s), coverage]
 
         resulting_features.to_csv(

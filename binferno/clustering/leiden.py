@@ -123,7 +123,7 @@ class LeidenClustering(BaseClustering):
 
         num_workers = max(1, int(threads or 1))
 
-        parameter_list = [0.5, 1, 10]
+        parameter_list = [0.5, 1, 5, 10]
         bandwidth_list = [0.05, 0.1, 0.2, 0.3]
         partgraph_ratio_list = [50, 80, 100]
         max_edges_list = [15, 100]

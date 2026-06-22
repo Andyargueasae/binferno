@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from .taxonomy import TaxonomyEncoder
 
 
 class NeuralNetwork(nn.Module):
@@ -13,6 +14,8 @@ class NeuralNetwork(nn.Module):
         dense_mode=False,
         kmer_dim=136,
         proj_head_dim=512,
+        taxonomy_dim: int = 0, # taxonomy hierarchical embeddings
+        tax_emb_dim: int = 0, # corgi or dnabert_s
     ):
         super(NeuralNetwork, self).__init__()
         self.coverage_dim = coverage_dim  # by default we ask users to provide coverage.
@@ -21,10 +24,29 @@ class NeuralNetwork(nn.Module):
         self.proj_head_dim = proj_head_dim
         self.tnf_dim = tnf_dim
         self.tnf_enc_dim = kmer_dim
-        self.corgi_dim = corgi_dim
+        self.tax_emb_dim = tax_emb_dim
 
-        if corgi_dim > 0:  # concat kmer with corgi and run single encoder.
-            self.tnf_enc_dim += corgi_dim
+        if self.tax_emb_dim > 0:  # concat kmer with taxonomy embeddings and run single encoder.
+            self.taxemb_encoder = TaxonomyEncoder(
+                input_dim=taxonomy_dim,
+                hidden_dim=tax_emb_dim,
+                output_dim=tax_emb_dim,
+                dropout=dropout,
+                taxonomy=True,
+                dnabert_s=False,
+                corgi=False,
+            )
+
+        if self.taxonomy_dim > 0:
+            self.taxonomy_encoder = TaxonomyEncoder(
+                input_dim=taxonomy_dim,
+                hidden_dim=tax_emb_dim,
+                output_dim=taxonomy_dim,
+                dropout=dropout,
+                taxonomy=True,
+                dnabert_s=False,
+                corgi=False,
+            )
 
         # may add more layers.
         if not dense_mode:
@@ -82,21 +104,13 @@ class NeuralNetwork(nn.Module):
 
         self.fusion_network = AttentionFusion(
             emb_dim=output_dim,
-            kmer_enc_dim=output_dim,
-            coverage_dim=self.final_cov_dim,
+            kmer_enc_dim=output_dim, # modality 1
+            coverage_dim=self.final_cov_dim, # modality 2
+            tax_emb_dim=tax_emb_dim, # modality 3, if we include taxonomy embeddings as a separate modality. If we directly concatenate taxonomy embeddings with kmer features and feed into the same encoder, then we don't need this separate modality dimension for taxonomy.
+            taxonomy_dim=taxonomy_dim, # modality 3, if we include taxonomy embeddings as a separate modality. If we directly concatenate taxonomy embeddings with kmer features and feed into the same encoder, then we don't need this separate modality dimension for taxonomy.
         )
 
         self.representation_dim = output_dim
-
-        # self.proj_head = nn.Sequential(
-        #     nn.Linear(self.representation_dim, self.proj_head_dim),
-        #     nn.BatchNorm1d(self.proj_head_dim),
-        #     nn.LeakyReLU(),
-        #     nn.Linear(
-        #         self.proj_head_dim, self.proj_head_dim
-        #     ),  # here we projects to a higher dimension to make the Barlow Twins loss work better, since the original paper shows that using a higher dimension for the projection head can improve the performance. We can also add a non-linear activation function here to make the projection head more powerful.
-        #     nn.BatchNorm1d(self.proj_head_dim),
-        # )
 
         self.proj_head = _build_bt_projector(
             in_dim=self.representation_dim,
