@@ -1,5 +1,3 @@
-from esm_models.hub.facebookresearch_esm_main.esm.data import BatchConverter
-from esm_models.hub.facebookresearch_esm_main.esm.esmfold.v1.misc import Dropout
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

@@ -87,10 +87,6 @@ class SimCLRTrainer(BaseTrainer):
         default=False,
         description="Whether to include an auxiliary loss on the individual view embeddings in addition to the main InfoNCE loss on the fused embeddings. This can help encourage the model to learn useful representations in each view before fusion.",
     )
-    dense_mode: bool = Field(
-        default=False,
-        description="Whether to use dense mode in the NeuralNetwork architecture, which adds additional fully connected layers after concatenating the kmer and coverage embeddings. If False, the model will directly output the final embedding after fusion without additional layers.",
-    )
     hidden_dim: int = Field(
         default=1024,
         description="Hidden dimension for the dense layers in the NeuralNetwork architecture when dense_mode is True. This parameter is ignored if dense_mode is False.",
@@ -186,7 +182,7 @@ class SimCLRTrainer(BaseTrainer):
 
         composition_dim = feature_df.shape[1] - cov_dim
         kmer_dim = kmer_dim if kmer_dim != KMER_DIM else KMER_DIM
-        corgi_dim = composition_dim - kmer_dim
+        taxonomy_dim = composition_dim - kmer_dim
         # prepare model.
         
         model = NeuralNetwork(
@@ -194,9 +190,8 @@ class SimCLRTrainer(BaseTrainer):
             coverage_dim=cov_dim,
             output_dim=self.output_dim,
             kmer_dim=kmer_dim,
-            corgi_dim=corgi_dim,
+            taxonomy_dim=taxonomy_dim,
             proj=self.proj,
-            dense_mode=self.dense_mode,
             hidden_dim=self.hidden_dim,
         ).to(device)
 
