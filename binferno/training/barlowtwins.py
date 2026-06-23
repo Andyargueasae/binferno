@@ -56,10 +56,6 @@ class BarlowTwinsTrainer(BaseTrainer):
         default=False,
         description="Whether to save individual embeddings for each view separately. If False, only the final embeddings after fusion are saved.",
     )
-    auxiliary_loss: bool = Field(
-        default=False,
-        description="Whether to include an auxiliary loss term that encourages the model to produce similar embeddings for the original and augmented views of the same contig. This can help improve the quality of the learned embeddings by providing an additional training signal that reinforces the relationship between the original and augmented data.",
-    )
     proj_head_dim: int = Field(
         default=512,
         description="Dimension of the projection head used in the Barlow Twins architecture. The projection head is a small neural network that maps the output of the main encoder to a space where the Barlow Twins loss is applied. A larger proj_head_dim can allow for more complex transformations and potentially better performance, but it also increases the number of parameters and computational cost of the model.",
@@ -150,6 +146,7 @@ class BarlowTwinsTrainer(BaseTrainer):
 
         logger.info(f"Model architecture:\n{model}")
 
+        # TODO: prepare trainer with taxonomy, June 23, 2026.
         dataloader, optimizer, scheduler = self.prepare_trainer(
             model=model,
             data_df=feature_df,
@@ -170,7 +167,6 @@ class BarlowTwinsTrainer(BaseTrainer):
                 model=model,
                 output_dir=output_train_dir,
                 logger=logger,
-                auxiliary_loss=self.auxiliary_loss,
             )
         else:
             logger.info(
@@ -188,6 +184,7 @@ class BarlowTwinsTrainer(BaseTrainer):
                 batch_size=self.batch_size,
                 save_individual_embs=self.get_individual_embs,
             )
+        # TODO: retrieve embeddings with taxonomy, June 23, 2026.
 
         embeddings = pd.DataFrame(
             F.normalize(torch.from_numpy(embeddings.values).float(), dim=1).numpy(),
@@ -271,39 +268,7 @@ class BarlowTwinsTrainer(BaseTrainer):
                 return loss, stats
 
             return loss
-
-    class modality_BT_loss(nn.Module):
-        def __init__(self, lambda_bt=5e-3, alpha=1.0, eps=1e-6):
-            super().__init__()
-            self.lambda_bt = lambda_bt  # lambda barlow twins tunes the importance of the redundancy reduction term relative to the invariance term. A higher lambda_bt encourages the model to produce more decorrelated features, while a lower lambda_bt allows for more redundancy in the features.
-            self.alpha = alpha  # alpha tunes the importance of the invariance loss relative to the redundancy loss. A higher alpha emphasizes the importance of making the diagonal elements of the correlation matrix close to 1, while a lower alpha allows for more flexibility in the diagonal elements.
-            self.eps = eps
-            self._cache = {}
-
-        def forward(self, feature1, feature2):
-            N, D = feature1.size()
-            device = feature1.device
-            cache_key = (D, str(device))
-            if cache_key not in self._cache:
-                self._cache[cache_key] = torch.eye(D, device=device)
-
-            z1 = (feature1 - feature1.mean(dim=0)) / (
-                feature1.std(dim=0, unbiased=False) + self.eps
-            )
-            z2 = (feature2 - feature2.mean(dim=0)) / (
-                feature2.std(dim=0, unbiased=False) + self.eps
-            )
-
-            C = torch.mm(z1.T, z2) / N
-
-            loss_matrix = C.pow(2)
-            diag = torch.diagonal(C)
-            invariance_loss = (diag - 1.0).pow(2).sum()
-
-            redundancy_loss = loss_matrix.sum() - torch.diagonal(loss_matrix).sum()
-            loss = self.alpha * invariance_loss + self.lambda_bt * redundancy_loss
-            return loss
-
+            
     class BuildDataset:
         def __init__(self, data_df, max_positive_pairs=700000):
             self.data_df = data_df

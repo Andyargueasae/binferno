@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
-from .taxonomy import HierarchicalTaxonomyEncoder, _build_tax_emb_encoder
 
+from .taxonomy import HierarchicalTaxonomyEncoder, _build_tax_emb_encoder
 
 class NeuralNetwork(nn.Module):
     def __init__(
@@ -25,7 +25,6 @@ class NeuralNetwork(nn.Module):
         self.tax_emb_dim = tax_emb_dim
         self.hierarchical_taxonomy = hierarchical_taxonomy  # used to determine later in the forward: whether to feed hierarchical taxonomy logits into the fusion network or an embedding
 
-        # handle taxonomy data.
         if self.tax_emb_dim > 0:
             if not hierarchical_taxonomy:
                 self.tnf_enc_dim += output_dim
@@ -42,8 +41,6 @@ class NeuralNetwork(nn.Module):
                     output_dim=output_dim,
                     dropout=dropout,
                 )
-
-        # may add more layers.
 
         tnf_hidden1 = 512
         tnf_hidden2 = 256
@@ -66,7 +63,6 @@ class NeuralNetwork(nn.Module):
         self.coverage_encoder = _build_coverage_encoder(
             coverage_dim=coverage_dim, output_dim=output_dim, dropout=dropout
         )
-
         self.final_cov_dim = output_dim
 
         self.fusion_network = AttentionFusion(
@@ -85,29 +81,38 @@ class NeuralNetwork(nn.Module):
             dropout=0.0,
         )
 
+    # TODO: embed the taxonomy features in model June 23 2026.
     def _encode(self, x: torch.Tensor, tax_emb: torch.Tensor = None):
         # encode tnf and coverage features separately, then fuse them together.
         tnf_features = x[:, : self.tnf_enc_dim]
         tnf_encode = self.tnf_encoder(tnf_features)
         cov_features = x[:, self.tnf_enc_dim :]
         cov_encode = self.coverage_encoder(cov_features)
-        fused_encode = self.fusion_network(tnf_encode, cov_encode)  # 128
-        return fused_encode, tnf_encode, cov_encode
+        if not tax_emb is None:
+            tax_encode = self.taxonomy_encoder(tax_emb)
+            # here two diverged choices: merge with tnf or used alone. 
+            fused_encode = self.fusion_network(tnf_encode, cov_encode, tax_encode=tax_encode)  # 128
+        else:
+            fused_encode = self.fusion_network(tnf_encode, cov_encode)  # 128
+        return fused_encode
 
     def get_embedding(self, x: torch.Tensor, tax_emb: torch.Tensor = None):
-        return self._encode(x, tax_emb)[0]
+        return self._encode(x, tax_emb)
 
     def get_separate_modality_embs(self, x: torch.Tensor, tax_emb: torch.Tensor = None):
         kmer_features = x[:, : self.tnf_enc_dim]
         kmer_encoded = self.tnf_encoder(kmer_features)
         coverage_features = x[:, self.tnf_enc_dim :]
         coverage_encoded = self.coverage_encoder(coverage_features)
+        if not tax_emb is None:
+            tax_encoded = self.taxonomy_encoder(tax_emb)
+            return kmer_encoded, coverage_encoded, tax_encoded
         return kmer_encoded, coverage_encoded
 
     def forward_one(self, x: torch.Tensor, tax_emb: torch.Tensor = None):
-        fused_emb, tnf_emb, cov_emb = self._encode(x, tax_emb)
-        proj_emb = self.proj_head(fused_emb)  # 512
-        return proj_emb, tnf_emb, cov_emb
+        fused_emb = self._encode(x, tax_emb)
+        proj_emb = self.proj_head(fused_emb)
+        return proj_emb
 
     def forward(
         self,
@@ -116,12 +121,10 @@ class NeuralNetwork(nn.Module):
         tax_emb1: torch.Tensor = None,
         tax_emb2: torch.Tensor = None,
     ):
-        z1, kmer_z1, cov_z1 = self.forward_one(x1, tax_emb1)
-        z2, kmer_z2, cov_z2 = self.forward_one(x2, tax_emb2)
-        return z1, z2, kmer_z1, kmer_z2, cov_z1, cov_z2
+        z1 = self.forward_one(x1, tax_emb1)
+        z2 = self.forward_one(x2, tax_emb2)
+        return z1, z2
 
-
-# The projection head: which directly gives barlow twin loss the projected embeddings, should be looked with careful caution.
 def _build_bt_projector(in_dim, proj_dim=768, n_layers=3, dropout=0.0):
     """
     Barlow Twins projection head.
@@ -152,18 +155,17 @@ def _build_bt_projector(in_dim, proj_dim=768, n_layers=3, dropout=0.0):
     layers.append(nn.BatchNorm1d(proj_dim))
     return nn.Sequential(*layers)
 
-
 # Then our model got an attention-based fusion network.
 class AttentionFusion(nn.Module):
     DEFAULT_NUM_HEADS = 4
     DEFAULT_DROPOUT = 0.1
-    GATE_INPUT_MULTIPLIER = 2  # For concatenated features in gates
-    MULTI_SCALE_CONCAT_MULTIPLIER = 6  # 3 scales * 2 (kmer+coverage (+corgi)) features each, so could be 9 if we include corgi as well. But for now we will keep it at 6 for kmer and coverage only.
+    GATE_INPUT_MULTIPLIER = 2
+    MULTI_SCALE_CONCAT_MULTIPLIER = 6 
     COMPRESSOR_HIDDEN_MULTIPLIER = 4
     COMPRESSOR_OUTPUT_MULTIPLIER = 2
     INTERACTION_HIDDEN_MULTIPLIER = 3
     INTERACTION_INTERMEDIATE_MULTIPLIER = 2
-    FINAL_FUSION_INPUT_MULTIPLIER = 4  # gated_kmer + gated_coverage + interaction + alignment / / if we include corgi, then it will be gated_kmer + gated_coverage + gated_corgi + interaction + alignment, so the multiplier will be 5.
+    FINAL_FUSION_INPUT_MULTIPLIER = 4
     FINAL_FUSION_HIDDEN_MULTIPLIER = 2
     RESIDUAL_WEIGHT_INIT = 0.5
     ADAPTIVE_DROPOUT_MAX_MULTIPLIER = 2.0
@@ -173,35 +175,24 @@ class AttentionFusion(nn.Module):
         kmer_enc_dim,
         emb_dim,
         coverage_dim,
+        tax_emb_dim=0,
     ):
         super(AttentionFusion, self).__init__()
-        # we will implement the attention fusion later, for now we can simply concatenate the features.
         self.kmer_enc_dim = kmer_enc_dim
         self.emb_dim = emb_dim
-        self.NUM_HEADS = self.DEFAULT_NUM_HEADS
-        self.DROPOUT = self.DEFAULT_DROPOUT
+        self.tax_emb_dim = tax_emb_dim
         self.coverage_dim = coverage_dim
-        self.RESIDUAL_WEIGHT_INIT = self.RESIDUAL_WEIGHT_INIT
-        self.MULTI_SCALE_CONCAT_MULTIPLIER = (
-            self.MULTI_SCALE_CONCAT_MULTIPLIER
-        )  # add 3 more for corgi features at different scales.
-
-        self.GATE_INPUT_MULTIPLIER = 2
-        self.FUSE_INPUT_MULTIPLIER = self.FINAL_FUSION_INPUT_MULTIPLIER
-        self.HIDDEN_MULTIPLIER = 2
-
+        
         self.kmer_proj = nn.Linear(self.kmer_enc_dim, self.emb_dim)
         self.coverage_proj = nn.Linear(self.coverage_dim, self.emb_dim)
-        self.fusion_dropout = nn.Dropout(self.DROPOUT)
-        self.batch_norm1 = nn.BatchNorm1d(self.emb_dim)
-        self.batch_norm2 = nn.BatchNorm1d(self.emb_dim)
-
+        self.fusion_dropout = nn.Dropout(self.DEFAULT_DROPOUT)
+        self.batch_norm = nn.BatchNorm1d(self.emb_dim)
         self.residual_weight = nn.Parameter(torch.tensor(self.RESIDUAL_WEIGHT_INIT))
 
         self.self_attn = nn.MultiheadAttention(
             embed_dim=self.emb_dim,
-            num_heads=self.NUM_HEADS,
-            dropout=self.DROPOUT,
+            num_heads=self.DEFAULT_NUM_HEADS,
+            dropout=self.DEFAULT_DROPOUT,
             batch_first=True,
         )
         # corgi was once treated as a separate modality and entered attention, but gave poor results.
@@ -214,21 +205,28 @@ class AttentionFusion(nn.Module):
             nn.Linear(self.emb_dim * self.GATE_INPUT_MULTIPLIER, self.emb_dim),
             nn.Sigmoid(),
         )
+        if self.tax_emb_dim > 0:
+            self.tax_emb_proj = nn.Linear(self.tax_emb_dim, self.emb_dim)
+            self.taxonomy_gate = nn.Sequential(
+                nn.Linear(self.emb_dim * self.GATE_INPUT_MULTIPLIER, self.emb_dim),
+                nn.Sigmoid(),
+            )
+            self.FINAL_FUSION_INPUT_MULTIPLIER += 1  # add one more for taxonomy features in the final fusion.
+            self.MULTI_SCALE_CONCAT_MULTIPLIER += 3 # add three more for taxonomy features in the multi-scale fusion (three scales).
 
         self.fused_proj = nn.Sequential(
             nn.Linear(
-                self.emb_dim * self.FUSE_INPUT_MULTIPLIER,
-                self.emb_dim * self.HIDDEN_MULTIPLIER,
+                self.emb_dim * self.FINAL_FUSION_INPUT_MULTIPLIER,
+                self.emb_dim * self.FINAL_FUSION_HIDDEN_MULTIPLIER,
             ),
-            nn.BatchNorm1d(self.emb_dim * self.HIDDEN_MULTIPLIER),
+            nn.BatchNorm1d(self.emb_dim * self.FINAL_FUSION_HIDDEN_MULTIPLIER),
             nn.LeakyReLU(),
-            nn.Dropout(self.DROPOUT),
-            nn.Linear(self.emb_dim * self.HIDDEN_MULTIPLIER, self.emb_dim),
+            nn.Dropout(self.DEFAULT_DROPOUT),
+            nn.Linear(self.emb_dim * self.FINAL_FUSION_HIDDEN_MULTIPLIER, self.emb_dim),
             nn.BatchNorm1d(self.emb_dim),
             nn.LeakyReLU(),
         )
 
-        # apply multi-scale transformation.
         self.multiscale_fusion = nn.ModuleList(
             [
                 nn.Sequential(
@@ -251,7 +249,7 @@ class AttentionFusion(nn.Module):
             ),
             nn.BatchNorm1d(emb_dim * self.COMPRESSOR_HIDDEN_MULTIPLIER),
             nn.ReLU(),
-            nn.Dropout(self.DROPOUT),
+            nn.Dropout(self.DEFAULT_DROPOUT),
             nn.Linear(
                 emb_dim * self.COMPRESSOR_HIDDEN_MULTIPLIER,
                 emb_dim * self.COMPRESSOR_OUTPUT_MULTIPLIER,
@@ -264,7 +262,7 @@ class AttentionFusion(nn.Module):
                 emb_dim * self.INTERACTION_HIDDEN_MULTIPLIER,
             ),
             nn.ReLU(),
-            nn.Dropout(self.DROPOUT),
+            nn.Dropout(self.DEFAULT_DROPOUT),
             nn.Linear(
                 emb_dim * self.INTERACTION_HIDDEN_MULTIPLIER,
                 emb_dim * self.INTERACTION_INTERMEDIATE_MULTIPLIER,
@@ -274,29 +272,46 @@ class AttentionFusion(nn.Module):
         )
         self.token_type_emb = nn.Embedding(2, emb_dim)  # 0=kmer, 1=coverage
 
-    def forward(self, tnf_feature, coverage_feature):
-        kmer_emb = self.kmer_proj(tnf_feature).unsqueeze(1)  # ( batch_size, 1, emb_dim)
-        cov_emb = self.coverage_proj(coverage_feature).unsqueeze(
-            1
-        )  # ( batch_size, 1, emb_dim)
+    def forward(self, 
+        tnf_feature: torch.Tensor, 
+        coverage_feature: torch.Tensor, 
+        tax_feature: torch.Tensor = None
+    ):
+        kmer_emb = self.kmer_proj(tnf_feature).unsqueeze(1)
+        cov_emb = self.coverage_proj(coverage_feature).unsqueeze(1)
+        
+        if tax_feature is not None and self.tax_emb_dim > 0:
+            tax_emb = self.tax_emb_proj(tax_feature).unsqueeze(1)
+            type_ides = torch.tensor([0, 1, 2], device=kmer_emb.device)
+            token_type = self.token_type_emb(type_ides).unsqueeze(0)  # (1, 3, emb_dim)
+            tokens = torch.cat([kmer_emb, cov_emb, tax_emb], dim=1) + token_type # add the third token.
+        else:
+            type_ids = torch.tensor([0, 1], device=kmer_emb.device)
+            token_type = self.token_type_emb(type_ids).unsqueeze(0)  # (1, 2, emb_dim)
+            tokens = torch.cat([kmer_emb, cov_emb], dim=1) + token_type
 
-        type_ids = torch.tensor([0, 1], device=kmer_emb.device)
-        token_type = self.token_type_emb(type_ids).unsqueeze(0)  # (1, 2, emb_dim)
-        tokens = torch.cat([kmer_emb, cov_emb], dim=1) + token_type
         attended, _ = self.self_attn(tokens, tokens, tokens)
 
         kmer_attended = attended[:, 0, :]  # ( batch_size, emb_dim)
         cov_attended = attended[:, 1, :]  # ( batch_size, emb_dim)
+        if tax_feature is not None:
+            tax_attended = attended[:, 2, :]  # ( batch_size, emb_dim)
 
         attended_feature = kmer_attended + cov_attended  # ( batch_size, emb_dim)
+        if tax_feature is not None:
+            attended_feature += tax_attended # ( batch_size, emb_dim)
 
         kmer_emb = kmer_emb.squeeze(1)
         cov_emb = cov_emb.squeeze(1)
-        kmer_gate_weight = self.kmer_gate(torch.cat([kmer_emb, cov_emb], dim=1))
-        coverage_gate_weight = self.coverage_gate(torch.cat([kmer_emb, cov_emb], dim=1))
+        gated_features = [kmer_emb, cov_emb]
+        if tax_feature is not None and self.tax_emb_dim > 0:
+            gated_features.append(tax_emb.squeeze(1))
 
+        kmer_gate_weight = self.kmer_gate(torch.cat(gated_features, dim=1))
+        coverage_gate_weight = self.coverage_gate(torch.cat(gated_features, dim=1))
         kmer_attended = kmer_attended.squeeze(1)
         cov_attended = cov_attended.squeeze(1)
+
         gated_kmer = (
             kmer_gate_weight * kmer_emb + (1 - kmer_gate_weight) * kmer_attended
         )
@@ -307,40 +322,51 @@ class AttentionFusion(nn.Module):
         residual_weight_clamped = torch.clamp(self.residual_weight, min=0.1, max=0.9)
 
         gated_kmer = self.fusion_dropout(
-            self.batch_norm1(
+            self.batch_norm(
                 (1 - residual_weight_clamped) * gated_kmer
                 + residual_weight_clamped * kmer_emb
             )
         )
         gated_coverage = self.fusion_dropout(
-            self.batch_norm2(
+            self.batch_norm(
                 (1 - residual_weight_clamped) * gated_coverage
                 + residual_weight_clamped * cov_emb
             )
         )
+        if tax_feature is not None and self.tax_emb_dim > 0:
+            tax_gate_weight = self.taxonomy_gate(torch.cat(gated_features, dim=1))
+            tax_attended = tax_attended.squeeze(1)
+            gated_tax = (
+                tax_gate_weight * tax_emb + (1 - tax_gate_weight) * tax_attended
+            )
+            gated_tax = self.fusion_dropout(
+                self.batch_norm(
+                    (1 - residual_weight_clamped) * gated_tax
+                    + residual_weight_clamped * tax_emb
+                )
+            )
 
         scale_features = []
         for scale_layer in self.multiscale_fusion:
             scale_kmer = scale_layer(gated_kmer)
             scale_coverage = scale_layer(gated_coverage)
-            scale_features.append(torch.cat([scale_kmer, scale_coverage], dim=1))
+            if tax_feature is not None and self.tax_emb_dim > 0:
+                scale_tax = scale_layer(gated_tax)
+                scale_features.append(torch.cat([scale_kmer, scale_coverage, scale_tax], dim=1)) # if (batch_size, emb_dim) -> (batch_size, emb_dim * 3) after concatenation.
+            else:
+                scale_features.append(torch.cat([scale_kmer, scale_coverage], dim=1)) # if (batch_size, emb_dim) -> (batch_size, emb_dim * 2) after concatenation.
 
-        multi_scale_concat = torch.cat(scale_features, dim=1)
+        multi_scale_concat = torch.cat(scale_features, dim=1) # if we have 3 scales and no taxonomy, this will be (batch_size, emb_dim * 2 * 3); if we have taxonomy, this will be (batch_size, emb_dim * 3 * 3)
         multi_scale_compressed = self.multi_scale_compressor(multi_scale_concat)
         interaction_features = self.interaction_module(multi_scale_compressed)
-        final_fused_features = torch.cat(
-            [
-                gated_kmer,
-                gated_coverage,
-                interaction_features,
-                attended_feature,  # Cross-modal alignment signal
-            ],
-            dim=1,
-        )
 
+        # The last split if taxonomy is included. 
+        final_features_to_fuse = [gated_kmer, gated_coverage, interaction_features, attended_feature]
+        if tax_feature is not None and self.tax_emb_dim > 0:
+            final_features_to_fuse.append(gated_tax)
+        final_fused_features = torch.cat(final_features_to_fuse, dim=1)
         output = self.fused_proj(final_fused_features)
         return output
-
 
 def _build_coverage_encoder(coverage_dim: int, output_dim: int, dropout: float):
     """
@@ -352,8 +378,6 @@ def _build_coverage_encoder(coverage_dim: int, output_dim: int, dropout: float):
     n_samples = max(1, coverage_dim // 2)
 
     if n_samples == 1:
-        # Single-sample: 2D input, low complexity.
-        # Small network with LayerNorm (BatchNorm is unstable for near-2D manifolds).
         return nn.Sequential(
             nn.Linear(coverage_dim, 64),
             nn.LayerNorm(64),
@@ -369,8 +393,6 @@ def _build_coverage_encoder(coverage_dim: int, output_dim: int, dropout: float):
         )
 
     elif n_samples <= 5:
-        # Few samples: coverage starts carrying differential signal.
-        # Transition to BatchNorm — enough input dimensions to be stable.
         hidden = 128
         return nn.Sequential(
             nn.Linear(coverage_dim, hidden),
@@ -387,7 +409,6 @@ def _build_coverage_encoder(coverage_dim: int, output_dim: int, dropout: float):
         )
 
     elif n_samples <= 20:
-        # Medium samples: genuine multi-dimensional coverage signal.
         hidden = 256
         return nn.Sequential(
             nn.Linear(coverage_dim, hidden),
@@ -404,7 +425,6 @@ def _build_coverage_encoder(coverage_dim: int, output_dim: int, dropout: float):
         )
 
     else:
-        # Many samples: full COMEBin-style wide encoder justified.
         hidden = 512
         return nn.Sequential(
             nn.Linear(coverage_dim, hidden),

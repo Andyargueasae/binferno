@@ -180,6 +180,7 @@ class SimCLRTrainer(BaseTrainer):
 
         logger.info(f"Model architecture:\n{model}")
         # prepare training.
+        # TODO: prepare trainer with taxonomy, June 23, 2026.
         train_loader, optimizer, scheduler, dataset = self.prepare_trainer(
             data_df=feature_df,
             batch_size=self.batch_size,
@@ -212,24 +213,6 @@ class SimCLRTrainer(BaseTrainer):
                 temperature=temperature,
             )
 
-        if self.gated:
-            with torch.no_grad():
-                sample_batch = next(iter(train_loader))
-                x = sample_batch[0][:32].to(device)
-                tnf = x[:, : model.tnf_enc_dim]
-                cov = x[:, model.tnf_enc_dim :]
-                kmer_emb = model.tnf_encoder(tnf)
-                cov_emb = model.coverage_encoder(cov)
-                cat = torch.cat([kmer_emb, cov_emb], dim=1)
-                kg = model.fusion_network.kmer_gate(cat)
-                cg = model.fusion_network.coverage_gate(cat)
-                logger.info(
-                    f"kmer_gate mean: {kg.mean():.3f}, coverage_gate mean: {cg.mean():.3f}"
-                )
-                logger.info(
-                    f"kmer_emb norm: {kmer_emb.norm(dim=1).mean():.3f}, cov_emb norm: {cov_emb.norm(dim=1).mean():.3f}"
-                )
-
         # in case embeddings isn't exist, get embeddings from the trained model and save to file.
         embeddings = self.get_embeddings(
             model=model,
@@ -238,6 +221,7 @@ class SimCLRTrainer(BaseTrainer):
             batch_size=self.batch_size,
             save_individual_embs=self.get_individual_embs,
         )
+        # TODO: retrieve embeddings with taxonomy, June 23, 2026.
 
         # normalize embeddings, but here the embedding is pd.dataframe, so we can use F.normalize from torch after converting the dataframe to tensor, then convert back to dataframe.
         embeddings = pd.DataFrame(

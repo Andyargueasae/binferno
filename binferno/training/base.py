@@ -1,11 +1,13 @@
 import math
 import os
 import random
+from pathlib import Path
+
 import numpy as np
 from pydantic import BaseModel
 import pandas as pd
-from pathlib import Path
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from loguru._logger import Logger
 
@@ -237,3 +239,28 @@ class BaseTrainer(BaseModel):
             # for each view, make sure to sort the features by index.
             features_df = sorted_features_df.drop(columns=["view"])
             return features_df
+        
+    class taxonomy_hloss(nn.Module):
+        def __init__(self, lambda_tax=1.0):
+            super().__init__()
+            self.lambda_tax = lambda_tax
+
+        def forward(self, tax_logits, base_ids):
+            # tax_logits: (batch_size, num_taxa)
+            # base_ids: (batch_size,) with values in [0, num_base_contigs-1]
+            batch_size = tax_logits.size(0)
+            device = tax_logits.device
+
+            # Create a mask for pairs of samples that come from the same base contig
+            mask = torch.eq(base_ids.unsqueeze(1), base_ids.unsqueeze(0)).float().to(device)
+
+            # Compute pairwise distances between taxonomic logits
+            diff = tax_logits.unsqueeze(1) - tax_logits.unsqueeze(0)  # (batch_size, batch_size, num_taxa)
+            dist_squared = (diff ** 2).sum(dim=-1)  # (batch_size, batch_size)
+
+            # We want to minimize distances for pairs from the same contig and maximize for different contigs
+            loss_same = (mask * dist_squared).sum() / (mask.sum() + 1e-8)  # Avoid division by zero
+            loss_diff = ((1 - mask) * F.relu(1.0 - dist_squared.sqrt())).sum() / ((1 - mask).sum() + 1e-8)
+
+            loss = self.lambda_tax * (loss_same + loss_diff)
+            return loss
