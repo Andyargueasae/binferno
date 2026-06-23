@@ -14,8 +14,7 @@ import pyfastx
 from torch.cuda.amp import GradScaler
 import loguru
 import pandas as pd
-from typing import Dict, List, Tuple
-
+from typing import Dict, List, Optional, Tuple
 
 from ..utils import calc_n50
 from .base import BaseTrainer
@@ -24,7 +23,7 @@ from .models.simclr import NeuralNetwork
 from .InfoNCEloss import info_nce_loss, info_nce_loss_hard_weight
 
 KMER_DIM = 136
-
+TAXONOMY_DF="contig_taxonomy_df"
 
 class SimCLRTrainer(BaseTrainer):
     proj: bool = Field(
@@ -125,7 +124,6 @@ class SimCLRTrainer(BaseTrainer):
             contig_length=self.contig_length,
         )
 
-        # after getting the augmented views, pass to binfernofeatures to get the features pooled.
         feature_result = features(
             FragMent_Dict=fragment_dict,
             All_Fragments=all_fragments,
@@ -134,21 +132,13 @@ class SimCLRTrainer(BaseTrainer):
             threads=threads,
             logger=logger,
             output_dir=output_aug_dir,
-            max_norm_stacked=True,  # for simclr, we found that normalizing the coverage features before feeding into the model can lead to better performance, so we set std_first to True.
+            max_norm_stacked=True,
         )
 
-        if isinstance(feature_result, tuple):
-            feature_df, kmer_dim = feature_result
-        else:
-            feature_df = feature_result
-            if hasattr(features, "_get_kmer_dim"):
-                kmer_dim = features._get_kmer_dim()
-            else:
-                kmer_dim = 0
-
-        # after getting the features, sort the features by method to ensure integrity before training.
+        features, kmer_dim = feature_result
+        canonical_feature_df, taxonomy_features = features
         feature_df = self.sort_features_by_method(
-            feature_df,
+            canonical_feature_df,
             contig_ids=namelist,
             simclr=True,
         )
@@ -163,19 +153,29 @@ class SimCLRTrainer(BaseTrainer):
         logger.info(f"Using device: {device}")
 
         cov_dim = sum([1 for col in feature_df.columns if "cov" in col])
-
-        composition_dim = feature_df.shape[1] - cov_dim
         kmer_dim = kmer_dim if kmer_dim != KMER_DIM else KMER_DIM
-        taxonomy_dim = composition_dim - kmer_dim
+        
+        if taxonomy_features is None:
+            taxonomy_dim = 0
+        elif isinstance(taxonomy_features, pd.DataFrame):
+            taxonomy_dim = taxonomy_features.shape[1]
+            hierarchical_taxonomy = False
+        elif isinstance(taxonomy_features, dict):
+            taxonomy_dim = 1 # one integer for each contig representing label.
+            hierarchical_taxonomy = True
+        else:
+            raise ValueError(
+                "taxonomy_features must be either a pandas DataFrame or a dictionary. Please check the output of the features function for taxonomy features."
+            )
 
         model = NeuralNetwork(
-            tnf_dim=composition_dim,
+            tnf_dim=kmer_dim,
             coverage_dim=cov_dim,
             output_dim=self.output_dim,
-            kmer_dim=kmer_dim,
             tax_emb_dim=taxonomy_dim,
             proj=self.proj,
             hidden_dim=self.hidden_dim,
+            hierarchical_taxonomy=hierarchical_taxonomy,
         ).to(device)
 
         logger.info(f"Model architecture:\n{model}")
@@ -190,6 +190,7 @@ class SimCLRTrainer(BaseTrainer):
             simclrnet=False,
             contigs=contigs,
             num_workers=threads,
+            taxonomy_features=taxonomy_features,
         )
 
         model_path = output_train_dir / "best_model.pt"
@@ -280,14 +281,14 @@ class SimCLRTrainer(BaseTrainer):
     def prepare_trainer(
         self,
         data_df,
-        batch_size: int = 1024,
-        contig_length: int = 1000,
         model=None,
         n_views=6,
         simclrnet=False,
         contigs=None,
-        num_workers=4,
-        **kwargs,
+        num_workers: int = 4,
+        batch_size: int = 1024,
+        contig_length: int = 1000,
+        taxonomy_features: Optional[Dict|pd.DataFrame|None]=None,
     ):
         # determine the namelist for the dataset.
         orig_df = data_df[data_df.index.str.endswith("0")]
@@ -296,7 +297,7 @@ class SimCLRTrainer(BaseTrainer):
         dataset = list(
             torch.split(torch.from_numpy(data_df.values).float(), len(namelist))
         )
-        epochs = kwargs.get("epochs", 300)
+        epochs = self.epochs 
         assert (
             len(dataset) == n_views
         ), f"Number of views in the dataset ({len(dataset)}) does not match the expected number of views ({n_views}). \
@@ -308,8 +309,48 @@ class SimCLRTrainer(BaseTrainer):
                 "Length weight is empty. Please check the contigs input and the length_weight function."
             )
 
-        # breakpoint()
-        train_dataset = torch.utils.data.TensorDataset(
+        # taxonomy.
+        if taxonomy_features is not None:
+            if isinstance(taxonomy_features, pd.DataFrame):
+                tax_tensor = torch.from_numpy(taxonomy_features.values).float()
+                tax_dataset = torch.utils.data.TensorDataset(tax_tensor)
+                train_dataset = torch.utils.data.TensorDataset(
+                    *[
+                        dataset[i][
+                            np.array([length_weight[name] for name in namelist])
+                            >= contig_length
+                        ]
+                        for i in range(n_views)
+                    ],
+                    tax_tensor[
+                        np.array(
+                            [length_weight[name] for name in namelist]
+                        )
+                        >= contig_length
+                    ],
+                )
+            elif isinstance(taxonomy_features, dict):
+                # if the dict is given.
+                tax_tensor = torch.from_numpy(taxonomy_features[TAXONOMY_DF].values).long()
+                tax_dataset = torch.utils.data.TensorDataset(tax_tensor)
+                train_dataset = torch.utils.data.TensorDataset(
+                    *[
+                        dataset[i][
+                            np.array([length_weight[name] for name in namelist])
+                            >= contig_length
+                        ]
+                        for i in range(n_views)
+                    ],
+                    tax_tensor[
+                        np.array(
+                            [length_weight[name] for name in namelist]
+                        )
+                        >= contig_length
+                    ],
+                )
+        else:
+            # If it is None, do nothing to add taxonomy features.
+            train_dataset = torch.utils.data.TensorDataset(
             *[
                 dataset[i][
                     np.array([length_weight[name] for name in namelist])
@@ -319,8 +360,7 @@ class SimCLRTrainer(BaseTrainer):
             ]
         )
 
-        # Keep multiprocessing options conservative to avoid native worker crashes
-        # on some PyTorch/HPC stacks (fork + pinned memory + persistent workers).
+
         requested_workers = num_workers
         if requested_workers < 0:
             requested_workers = 0

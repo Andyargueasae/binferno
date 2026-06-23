@@ -10,7 +10,6 @@ class NeuralNetwork(nn.Module):
         coverage_dim,
         dropout=0.05,
         output_dim=128,
-        kmer_dim=136,
         proj_head_dim=512,
         tax_emb_dim: int = 0,  # corgi or dnabert_s
         hierarchical_taxonomy: bool = False,
@@ -18,16 +17,13 @@ class NeuralNetwork(nn.Module):
         super(NeuralNetwork, self).__init__()
         self.coverage_dim = coverage_dim  # by default we ask users to provide coverage.
         self.output_dim = output_dim
-        self.kmer_dim = kmer_dim
         self.proj_head_dim = proj_head_dim
         self.tnf_dim = tnf_dim
-        self.tnf_enc_dim = kmer_dim
         self.tax_emb_dim = tax_emb_dim
         self.hierarchical_taxonomy = hierarchical_taxonomy  # used to determine later in the forward: whether to feed hierarchical taxonomy logits into the fusion network or an embedding
 
         if self.tax_emb_dim > 0:
             if not hierarchical_taxonomy:
-                self.tnf_enc_dim += output_dim
                 self.taxonomy_encoder = _build_tax_emb_encoder(
                     tax_emb_dim=tax_emb_dim,
                     hidden_dim=tax_emb_dim,
@@ -46,7 +42,7 @@ class NeuralNetwork(nn.Module):
         tnf_hidden2 = 256
         tnf_hidden3 = output_dim
         self.tnf_encoder = nn.Sequential(
-            nn.Linear(self.tnf_enc_dim, tnf_hidden1),
+            nn.Linear(self.tnf_dim, tnf_hidden1),
             nn.BatchNorm1d(tnf_hidden1),
             nn.LeakyReLU(),
             nn.Dropout(dropout),
@@ -84,9 +80,9 @@ class NeuralNetwork(nn.Module):
     # TODO: embed the taxonomy features in model June 23 2026.
     def _encode(self, x: torch.Tensor, tax_emb: torch.Tensor = None):
         # encode tnf and coverage features separately, then fuse them together.
-        tnf_features = x[:, : self.tnf_enc_dim]
+        tnf_features = x[:, : self.tnf_dim]
         tnf_encode = self.tnf_encoder(tnf_features)
-        cov_features = x[:, self.tnf_enc_dim :]
+        cov_features = x[:, self.tnf_dim :]
         cov_encode = self.coverage_encoder(cov_features)
         if not tax_emb is None:
             tax_encode = self.taxonomy_encoder(tax_emb)
@@ -100,9 +96,9 @@ class NeuralNetwork(nn.Module):
         return self._encode(x, tax_emb)
 
     def get_separate_modality_embs(self, x: torch.Tensor, tax_emb: torch.Tensor = None):
-        kmer_features = x[:, : self.tnf_enc_dim]
+        kmer_features = x[:, : self.tnf_dim]
         kmer_encoded = self.tnf_encoder(kmer_features)
-        coverage_features = x[:, self.tnf_enc_dim :]
+        coverage_features = x[:, self.tnf_dim :]
         coverage_encoded = self.coverage_encoder(coverage_features)
         if not tax_emb is None:
             tax_encoded = self.taxonomy_encoder(tax_emb)

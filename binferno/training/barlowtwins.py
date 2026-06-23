@@ -107,17 +107,19 @@ class BarlowTwinsTrainer(BaseTrainer):
             output_dir=output_aug_dir,
         )
 
-        if isinstance(feature_result, tuple):
-            feature_df, kmer_dim = feature_result
-        else:
-            feature_df = feature_result
-            if hasattr(features, "_get_kmer_dim"):
-                kmer_dim = features._get_kmer_dim()
-            else:
-                kmer_dim = 0
+        features, kmer_dim = feature_result
+        canonical_feature_df, taxonomy_features = features
+        if taxonomy_features is None:
+            taxonomy_dim = 0
+        elif isinstance(taxonomy_features, pd.DataFrame):
+            taxonomy_dim = taxonomy_features.shape[1]
+            hierarchical_taxonomy = False
+        elif isinstance(taxonomy_features, dict):
+            taxonomy_dim = 1
+            hierarchical_taxonomy = True
 
         feature_df = self.sort_features_by_method(
-            feature_df,
+            canonical_feature_df,
             contig_ids=namelist,
             simclr=False,
         )
@@ -132,15 +134,13 @@ class BarlowTwinsTrainer(BaseTrainer):
         logger.info(f"Using device: {device}")
 
         cov_dim = sum([1 for col in feature_df.columns if "cov" in col])
-        composition_dim = feature_df.shape[1] - cov_dim
 
-        tax_emb_dim = composition_dim - kmer_dim
         model = NeuralNetwork(
-            tnf_dim=composition_dim,
+            tnf_dim=kmer_dim,
             coverage_dim=cov_dim,
-            kmer_dim=kmer_dim,
             proj_head_dim=self.proj_head_dim,
-            tax_emb_dim=tax_emb_dim,
+            tax_emb_dim=taxonomy_dim,
+            hierarchical_taxonomy=hierarchical_taxonomy,
             output_dim=self.output_dim,
         ).to(device)
 

@@ -14,7 +14,6 @@ class NeuralNetwork(nn.Module):
         coverage_dim: int,
         dropout: float = 0.05,
         output_dim: int = 128,
-        kmer_dim: int = 136,
         proj_head_dim: int = 2048,
         proj: bool = False,
         hidden_dim: int = 1024,
@@ -24,14 +23,14 @@ class NeuralNetwork(nn.Module):
         super(NeuralNetwork, self).__init__()
         self.coverage_dim = coverage_dim  # by default we ask users to provide coverage.
         self.output_dim = output_dim
-        self.kmer_dim = kmer_dim
+        self.tnf_dim = tnf_dim
         self.proj_head_dim = proj_head_dim
         self.proj = proj
-        self.tnf_dim = tnf_dim
-        self.tnf_enc_dim = kmer_dim
         self.tax_emb_dim = tax_emb_dim  # corgi or dnabert_s embedding dimension. Paired with tax_emb in forward pass.
         self.hidden_dim = hidden_dim
         self.hierarchical_taxonomy = hierarchical_taxonomy  # used to determine later in the forward: whether to feed hierarchical taxonomy logits into the fusion network or an embedding
+
+        self.tnf_enc_dim = tnf_dim
 
         self.coverage_encoder = _build_coverage_encoder(
             coverage_dim=coverage_dim,
@@ -41,12 +40,14 @@ class NeuralNetwork(nn.Module):
             n_hidden_layers=3,
         )
 
+        self.tnf_enc_dim += output_dim  # after encoding coverage, we will concatenate with tnf features and feed into the fusion network, so we need to update the tnf_enc_dim accordingly.
+
         self.final_cov_dim = output_dim
 
         # taxonomy string feature prediction, requires hierarchical loss.
         if tax_emb_dim > 0:
             if not hierarchical_taxonomy:
-                self.tnf_enc_dim += output_dim
+                self.tnf_enc_dim += output_dim # if taxonomy is not hierarchical, add another emb_dim.
                 self.taxonomy_encoder = _build_tax_emb_encoder(
                     tax_emb_dim=tax_emb_dim,
                     hidden_dim=tax_emb_dim,
@@ -94,8 +95,8 @@ class NeuralNetwork(nn.Module):
         )
 
     def _encode(self, x, tax_emb: torch.Tensor = None):
-        tnf_features = x[:, : self.kmer_dim]
-        cov_features = x[:, self.kmer_dim : self.kmer_dim + self.coverage_dim]
+        tnf_features = x[:, : self.tnf_dim]
+        cov_features = x[:, self.tnf_dim : self.tnf_dim + self.coverage_dim]
         cov_encode = self.coverage_encoder(cov_features)  # not normalized anymore.
 
         # taxonomy embedding encoding if provided. 
@@ -105,7 +106,7 @@ class NeuralNetwork(nn.Module):
 
         fused_encode = self.tnf_encoder(
             torch.cat([tnf_features, F.normalize(cov_encode, dim=-1)], dim=-1)
-        )
+        ) # 392 if tax_emb isn't none, or 264-dim.
         return fused_encode, cov_encode, tax_encode if not tax_emb is None else None
 
     def get_embedding(self, x: torch.Tensor, tax_emb: torch.Tensor = None):
