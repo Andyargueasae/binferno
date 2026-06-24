@@ -1,4 +1,3 @@
-# features/coverage.py
 import os
 from multiprocessing import Pool
 from typing import Dict, List, Set, Tuple, Union, Any
@@ -8,7 +7,6 @@ from .base import BaseFeatureBuilder
 import numpy as np
 import pysam
 from tqdm import tqdm
-from pydantic import Field
 
 FragmentDict = Dict[str, Dict[str, Union[str, List[str]]]]
 CoverageDict = Dict[str, float]
@@ -689,8 +687,3 @@ class CoverageFeatureBuilder(BaseFeatureBuilder):
 
         return cov_df
 
-
-# ======= Multisample coverage features. =======
-# class CoverageMultiFeatureBuilder(CoverageFeatureBuilder):
-# def __call__():
-# pass

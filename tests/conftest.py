@@ -6,6 +6,7 @@ import pyfastx
 from pathlib import Path
 
 CONTIG = Path(__file__).parent / "data" / "tiny.fasta"
+MARKER = Path(__file__).parent / "data" / "marker.fna"
 BAM = Path(__file__).parent / "data" / "bam"  # a directory.
 KMER_FEATURE_DIM = 136
 
