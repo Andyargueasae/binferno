@@ -29,6 +29,14 @@ def test_cli():
     assert (
         "--train-only" in result.stdout.decode()
     ), "binferno --help did not mention --train-only option"
+
+    assert (
+        "--training.use-simclr" in result.stdout.decode()    ), "binferno --help did not mention --training.use-simclr option"
+    assert (
+        "--training.use-barlowtwins" in result.stdout.decode()    ), "binferno --help did not mention --training.use-barlowtwins option"
+    assert (
+        "--postprocessor.checkm-database" in result.stdout.decode()    ), "binferno --help did not mention --postprocessor.checkm-database option"
+    
     return
 
 
