@@ -37,6 +37,8 @@ class NeuralNetwork(nn.Module):
             else:
                 self.taxonomy_encoder = TaxonomyHead(
                     in_dim=tax_emb_dim,
+                    tax_nodes=tax_nodes,
+                    node_indices=node_indices,
                     table_parent=parental_array,
                     hidden=tax_emb_dim,
                     dropout=dropout,
@@ -86,7 +88,7 @@ class NeuralNetwork(nn.Module):
         tnf_encode = self.tnf_encoder(tnf_features)
         cov_features = x[:, self.tnf_dim :]
         cov_encode = self.coverage_encoder(cov_features)
-        if (not tax_emb is None ) and (not self.hierarchical_taxonomy):
+        if (tax_emb is not None) and (not self.hierarchical_taxonomy):
             tax_encode = self.taxonomy_encoder(tax_emb)
             fused_encode = self.fusion_network(tnf_encode, cov_encode, tax_encode=tax_encode)  # 128
         else:
@@ -101,7 +103,7 @@ class NeuralNetwork(nn.Module):
         kmer_encoded = self.tnf_encoder(kmer_features)
         coverage_features = x[:, self.tnf_dim :]
         coverage_encoded = self.coverage_encoder(coverage_features)
-        if not tax_emb is None:
+        if tax_emb is not None and not self.hierarchical_taxonomy:
             if not self.hierarchical_taxonomy:
                 tax_encoded = self.taxonomy_encoder(tax_emb)
                 return kmer_encoded, coverage_encoded, tax_encoded
@@ -110,7 +112,7 @@ class NeuralNetwork(nn.Module):
                 return kmer_encoded, coverage_encoded, tax_logits # how does logits offer embeddings?
         return kmer_encoded, coverage_encoded
 
-    def forward_one(self, x: torch.Tensor, tax_emb: torch.Tensor = None):
+    def forward_one(self, x: torch.Tensor, tax_emb: torch.Tensor = torch.empty(0, dtype=torch.int32)):
         fused_emb = self._encode(x, tax_emb)
         proj_emb = self.proj_head(fused_emb)
         return proj_emb
@@ -119,8 +121,8 @@ class NeuralNetwork(nn.Module):
         self,
         x1: torch.Tensor,
         x2: torch.Tensor,
-        tax_emb1: torch.Tensor = None,
-        tax_emb2: torch.Tensor = None,
+        tax_emb1: torch.Tensor = torch.empty(0, dtype=torch.int32),
+        tax_emb2: torch.Tensor = torch.empty(0, dtype=torch.int32),
     ):
         z1 = self.forward_one(x1, tax_emb1)
         z2 = self.forward_one(x2, tax_emb2)

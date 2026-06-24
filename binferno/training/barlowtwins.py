@@ -9,6 +9,7 @@ from pydantic import Field
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch import Tensor as _Tensor
 from torch.utils.data import DataLoader, TensorDataset
 from torch.backends import cudnn
 import torch.nn.functional as F
@@ -155,7 +156,6 @@ class BarlowTwinsTrainer(BaseTrainer):
 
         logger.info(f"Model architecture:\n{model}")
 
-        # TODO: prepare trainer with taxonomy, June 23, 2026.
         dataloader, optimizer, scheduler = self.prepare_trainer(
             model=model,
             data_df=feature_df,
@@ -402,7 +402,7 @@ class BarlowTwinsTrainer(BaseTrainer):
                 tax_features2 = torch.from_numpy(tax_X[idx2].copy())
                 return TensorDataset(features1, features2, tax_features1, tax_features2, base_ids)
             else:
-                return TensorDataset(features1, features2, None, None, base_ids)
+                return TensorDataset(features1, features2, base_ids)
 
     def prepare_trainer(
         self,
@@ -459,7 +459,6 @@ class BarlowTwinsTrainer(BaseTrainer):
             warmup=True,
             max_lr_hold_epochs=self.max_lr_epochs,
         )
-        breakpoint()
         return dataloader, optimizer, scheduler
 
     def train(
@@ -492,9 +491,6 @@ class BarlowTwinsTrainer(BaseTrainer):
                 dataloader=dataloader,
                 optimizer=optimizer,
                 device=device,
-                tax_nodes=tax_nodes if tax_nodes is not None else None,
-                node_indices=node_indices if node_indices is not None else None,
-                parental_array=parental_array if parental_array is not None else None,
             )
 
             scheduler.step()
@@ -541,16 +537,27 @@ class BarlowTwinsTrainer(BaseTrainer):
         stats = None
 
         for batch_i, batch_data in enumerate(dataloader): # here it determines taxonomy data to be yes or no.
-            features1, features2, tax_1, tax_2, base_ids = batch_data
-            # another question comes: two positive pairs should have same taxonomy. 
-            features1 = features1.to(device, non_blocking=True)
-            features2 = features2.to(device, non_blocking=True)
+            try:
+                features1, features2, tax_1, tax_2, base_ids = batch_data # tax_1 and tax_2 will be empty tensors if taxonomy features are not provided, and the model should be designed to handle that case appropriately (e.g., by ignoring those inputs or using default values). The presence of tax_1 and tax_2 in the batch data allows the training loop to seamlessly support both scenarios (with or without taxonomy features) without needing separate code paths.
+                # another question comes: two positive pairs should have same taxonomy. 
+                features1 = features1.to(device, non_blocking=True)
+                features2 = features2.to(device, non_blocking=True)
 
-            optimizer.zero_grad(set_to_none=True)
+                optimizer.zero_grad(set_to_none=True)
 
-            output1, output2 = model(
-                features1, features2, tax_1, tax_2
-            )
+                output1, output2 = model(
+                    features1, features2, tax_1, tax_2
+                )
+            except ValueError:  # this is for the case when taxonomy features are not provided, and the model is designed to ignore them.
+                features1, features2, base_ids = batch_data
+                features1 = features1.to(device, non_blocking=True)
+                features2 = features2.to(device, non_blocking=True)
+
+                optimizer.zero_grad(set_to_none=True)
+
+                output1, output2 = model(
+                    features1, features2, None, None
+                )
             last_batch = batch_i == len(dataloader) - 1
 
             # fused_embedding derived loss.

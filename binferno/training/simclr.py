@@ -32,7 +32,6 @@ class SimCLRTrainer(BaseTrainer):
     )
     batch_size: int = Field(default=1024, description="Batch size for training.")
     epochs: int = Field(default=300, description="Number of epochs for training.")
-    weight_decay: float = Field(default=1e-4, description="Weight decay for training.")
     output_dim: int = Field(
         default=128, description="Output dimension for the embeddings."
     )
@@ -62,10 +61,6 @@ class SimCLRTrainer(BaseTrainer):
     get_individual_embs: bool = Field(
         default=False,
         description="Whether to save individual embeddings for each view separately. If False, only the final embeddings after fusion are saved.",
-    )
-    auxiliary_loss: bool = Field(
-        default=False,
-        description="Whether to include an auxiliary loss on the individual view embeddings in addition to the main InfoNCE loss on the fused embeddings. This can help encourage the model to learn useful representations in each view before fusion.",
     )
     hidden_dim: int = Field(
         default=1024,
@@ -210,7 +205,6 @@ class SimCLRTrainer(BaseTrainer):
                 logger=logger,
                 n_cov=cov_dim,
                 output_dir=output_train_dir,
-                auxiliary_loss=self.auxiliary_loss,
                 temperature=temperature,
             )
 
@@ -422,7 +416,6 @@ class SimCLRTrainer(BaseTrainer):
                 warmup=False,
                 max_lr_hold_epochs=self.max_lr_epochs,
             )
-        breakpoint()
         return train_loader, optimizer, scheduler
 
     def accuracy(self, output, target, topk=(1,)):
@@ -460,7 +453,6 @@ class SimCLRTrainer(BaseTrainer):
         model=None,
         n_cov: int = 0,
         output_dir: Path = None,
-        auxiliary_loss: bool = False,
         temperature: float = 0.15,
     ):
         self.unify_seeds(
@@ -484,7 +476,6 @@ class SimCLRTrainer(BaseTrainer):
                 device=device,
                 temperature=temperature,
                 n_cov=n_cov,
-                auxiliary_loss=auxiliary_loss,
             )
 
             scheduler.step()
@@ -530,7 +521,6 @@ class SimCLRTrainer(BaseTrainer):
         device,
         temperature=0.15,
         n_cov=0,
-        auxiliary_loss=False,
     ):
         # get the info nce loss, and see if auxiliary loss is needed.
         if not self.hard_weighted_nce:
@@ -551,24 +541,13 @@ class SimCLRTrainer(BaseTrainer):
             contig_features = torch.cat(features, dim=0).to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
             actual_batch_size = contig_features.shape[0] // self.view_num
-            enc_feature, cov_emb = model(contig_features)
+            enc_feature, cov_emb, tax_emb = model(contig_features, tax_emb=None) # tax_emb is not used for simclr.
             loss, batch_acc, _ = info_nceloss_fn(
                 enc_feature,
                 batch_size=actual_batch_size,
                 device=device,
                 n_views=self.view_num,
             )
-
-            if auxiliary_loss:
-                # L_kmer = 1.0
-                L_cov = 1.0
-                cov_loss, _, _ = info_nceloss_fn(
-                    cov_emb,
-                    batch_size=actual_batch_size,
-                    device=device,
-                    n_views=self.view_num,
-                )
-                loss = loss + L_cov * cov_loss
 
             loss.backward()
             optimizer.step()

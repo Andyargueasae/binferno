@@ -5,7 +5,7 @@ import networkx as nx
 import numpy as np
 
 class TaxonomyHead(nn.Module):
-    def __init__(self, in_dim, table_parent, hidden=512, dropout=0.2):
+    def __init__(self, in_dim, table_parent, tax_nodes: list, node_indices: dict, hidden=512, dropout=0.2):
         super().__init__()
         self.tree = self.Hierarchy(np.asarray(table_parent))
         self.n_leaf = int(self.tree.leaf_mask().sum())
