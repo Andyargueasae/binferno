@@ -5,9 +5,9 @@ import numpy as np
 import pandas as pd
 from transformers import AutoTokenizer, AutoModel, AutoConfig
 import pyfastx
-import rich.progress as progress
 import time
 from pydantic import Field
+import loguru
 
 from .base import BaseFeatureBuilder
 
@@ -19,15 +19,26 @@ class DnaBertSFeatureBuilder(BaseFeatureBuilder):
     n_components: int = Field(
         128, description="Number of PCA components to retain if PCA is applied."
     )
+    max_len: int = Field(
+        768,
+        description="Maximum sequence length for DNABERT-S. Sequences longer than this will be chunked.",
+    )
+    stride: int = Field(
+        512,
+        description="Stride for chunking sequences longer than max_len. Determines the overlap between chunks.",
+    )
 
     def __call__(
         self,
+        logger: loguru._logger.Logger,
         fragments: list = [],
     ) -> pd.DataFrame:
         start_time = time.time()
         model_path = "zhihan1996/DNABERT-S"
-        max_len = 768  # < 1000 bp recommended.
-        stride = 512
+        max_len = self.max_len  # < 1000 bp recommended.
+        stride = self.stride
+
+        logger.info(f"Using model checkpoint: {model_path}")
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         seqs = [(name, str(seq)) for name, seq in fragments if len(seq) > 1000]
@@ -54,7 +65,13 @@ class DnaBertSFeatureBuilder(BaseFeatureBuilder):
 
         features = []
         names = []
-        for name, seq in progress.track(seqs, description="Embedding sequences"):
+        total = len(seqs)
+        logger.info(f"Embedding sequences: {total} contigs to process")
+
+        for idx, (name, seq) in enumerate(seqs, start=1):
+            if idx == 1 or idx % 100 == 0 or idx == total:
+                logger.info(f"Embedding progress: {idx}/{total} contigs")
+
             names.append(name)
             emb_mean = self.embed_sequence(
                 seq=seq,
@@ -80,7 +97,7 @@ class DnaBertSFeatureBuilder(BaseFeatureBuilder):
 
         if n_components < 2:
             # too few contigs for meaningful PCA
-            pass
+            logger.warning("Too few contigs for meaningful PCA. Skipping PCA.")
         else:
             from sklearn.decomposition import PCA
 
@@ -96,7 +113,7 @@ class DnaBertSFeatureBuilder(BaseFeatureBuilder):
 
         df = pd.DataFrame(features, index=names)
         end_time = time.time()
-        print(f"Feature extraction completed in {end_time - start_time:.2f} seconds.")
+        logger.info(f"Feature extraction completed in {end_time - start_time:.2f} seconds.")
         return df
 
     def embed_sequence(self, seq, tokenizer, model, device, max_len=512, stride=256):

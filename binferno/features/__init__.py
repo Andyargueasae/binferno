@@ -150,6 +150,7 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
             else:
                 dnabert_s_df = self.dnabert_s(
                     fragments=All_Fragments,
+                    logger=logger,
                 )
             taxonomy_features = dnabert_s_df # pd.DataFrame type.
             

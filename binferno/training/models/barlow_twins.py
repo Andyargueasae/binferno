@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from .taxonomy import TaxonomyHead, _build_tax_emb_encoder
+from .taxonomy import TaxonomyHead
 
 class NeuralNetwork(nn.Module):
     def __init__(
@@ -450,3 +450,23 @@ def _build_coverage_encoder(coverage_dim: int, output_dim: int, dropout: float):
             nn.BatchNorm1d(output_dim),
             nn.LeakyReLU(),
         )
+
+def _build_tax_emb_encoder(
+    tax_emb_dim: int, 
+    hidden_dim: int = 512, 
+    output_dim: int = 128, 
+    dropout: float = 0.1
+):
+    n_layers = 3
+    modules = []
+    input_dim = tax_emb_dim
+    for _ in range(n_layers):
+        modules.append(nn.Linear(input_dim, hidden_dim))
+        modules.append(nn.BatchNorm1d(hidden_dim))
+        modules.append(nn.LeakyReLU())
+        modules.append(nn.Dropout(dropout))
+        input_dim = hidden_dim
+    modules.append(nn.Linear(hidden_dim, output_dim))
+    modules.append(nn.BatchNorm1d(output_dim))
+    modules.append(nn.LeakyReLU())
+    return nn.Sequential(*modules)
