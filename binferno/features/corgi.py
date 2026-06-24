@@ -52,7 +52,7 @@ def read_memmap(path, count, dtype: str = "float16") -> np.memmap:
 
 
 def run_corgi(
-    input_fasta,
+    input_fasta: Path,
     output_csv: str = None,
     min_length: int = 0,
     model_path: str = None,
@@ -62,7 +62,7 @@ def run_corgi(
 
     corgi = Corgi()
     _ = corgi.predict(
-        input=input_fasta,
+        input=str(input_fasta),
         output_csv=output_csv,
         embeddings=embedding,
         min_length=min_length,
