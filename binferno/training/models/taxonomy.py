@@ -4,7 +4,6 @@ from functools import partial
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import networkx as nx
 import numpy as np
 
 class TaxonomyHead(nn.Module):
@@ -116,3 +115,80 @@ class FlatSoftmaxNLL(nn.Module):
         logp_label = torch.logsumexp(logp_allowed, dim=-1)     # log P(subtree) [B]
         loss = -logp_label
         return loss.mean() if self.reduction == "mean" else loss
+
+class TaxonomyFusion(nn.Module):
+    """
+    Wraps a TaxonomyHead and fuses its dense prediction back into the trunk
+    representation to form the clustering latent.
+ 
+        fused ──┬──────────────────────────────► (kept)
+                ├─► tax_head ─► logits ─► loss (labeled subset only)
+                └─► softmax/predict ─► detach ─► tax_proj ─► tax_emb
+        cluster_latent = fuse( fused , tax_emb )         [gated by warmup]
+ 
+    Cluster on `forward(...)['latent']`.
+    """
+    def __init__(self, in_dim, table_parent, tax_nodes=None, node_indices=None,
+                 hidden=512, dropout=0.2,
+                 tax_emb_dim=64, latent_dim=32,
+                 warmup_steps=2000, detach_prediction=True,
+                 use_node_probs=True):
+        super().__init__()
+        self.head = TaxonomyHead(in_dim, table_parent, tax_nodes, node_indices,
+                                 hidden=hidden, dropout=dropout)
+        self.detach_prediction = detach_prediction
+        self.warmup_steps = warmup_steps
+        self.use_node_probs = use_node_probs          # True: [B,n_nodes] probs; False: [B,n_leaf]
+        self.register_buffer("_step", torch.zeros((), dtype=torch.long))
+ 
+        pred_dim = self.head.n_nodes if use_node_probs else self.head.n_leaf
+        # Compress the (large, sparse) prediction vector to a small dense embedding.
+        self.tax_proj = nn.Sequential(
+            nn.Linear(pred_dim, tax_emb_dim),
+            nn.LayerNorm(tax_emb_dim),
+            nn.LeakyReLU(),
+        )
+        latent_dim = latent_dim or in_dim
+        # Fuse trunk + taxonomy embedding -> clustering latent.
+        self.fuse = nn.Sequential(
+            nn.Linear(in_dim + tax_emb_dim, latent_dim),
+            nn.LayerNorm(latent_dim),
+            nn.LeakyReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(latent_dim, latent_dim),
+        )
+        self.latent_dim = latent_dim
+ 
+    def _gate(self) -> float:
+        # 0 during warmup, ramped to 1 over an equal-length window after it.
+        s = int(self._step.item())
+        if s < self.warmup_steps:
+            return 0.0
+        ramp = min(1.0, (s - self.warmup_steps) / max(1, self.warmup_steps))
+        return ramp
+ 
+    def forward(self, fused, advance_step: bool = True):
+        logits = self.head(fused)                      # [B, n_leaf]
+ 
+        if self.use_node_probs:
+            pred = self.head.sum_leaf(F.softmax(logits, dim=-1), dim=-1)  # [B, n_nodes]
+        else:
+            pred = F.softmax(logits, dim=-1)                              # [B, n_leaf]
+ 
+        if self.detach_prediction:
+            pred = pred.detach()
+ 
+        tax_emb = self.tax_proj(pred)                  # [B, tax_emb_dim]
+        gate = self._gate()
+        tax_emb = gate * tax_emb                       # closed during warmup
+ 
+        latent = self.fuse(torch.cat([fused, tax_emb], dim=-1))  # [B, latent_dim]
+ 
+        if self.training and advance_step:
+            self._step += 1
+ 
+        return {"latent": latent, "logits": logits, "gate": gate}
+ 
+    def loss(self, logits, target_idx, mask):
+        # delegate to the head's masked hierarchical loss
+        return self.head.loss(logits, target_idx, mask)
