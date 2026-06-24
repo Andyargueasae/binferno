@@ -1,29 +1,26 @@
 from pathlib import Path
 import random
 from collections import OrderedDict
-import os
 
 import torch
-from torch import nn
 import torch.nn.functional as F
 import numpy as np
 from tqdm import tqdm
 from torch.backends import cudnn
 from pydantic import Field
 import pyfastx
-from torch.cuda.amp import GradScaler
 import loguru
 import pandas as pd
 from typing import Dict, List, Optional, Tuple
+from torch.cuda.amp import GradScaler, autocast
 
 from ..utils import calc_n50
-from .base import BaseTrainer
+from .base import BaseTrainer, TAXONOMY_DF, TAX_NODES, TAX_NODE_INDICES, PARENTAL_ARRAY
 from ..features import BinfernoFeatureBuilder
 from .models.simclr import NeuralNetwork
 from .InfoNCEloss import info_nce_loss, info_nce_loss_hard_weight
 
 KMER_DIM = 136
-TAXONOMY_DF="contig_taxonomy_df"
 
 class SimCLRTrainer(BaseTrainer):
     proj: bool = Field(
@@ -137,7 +134,7 @@ class SimCLRTrainer(BaseTrainer):
 
         features, kmer_dim = feature_result
         canonical_feature_df, taxonomy_features = features
-        feature_df = self.sort_features_by_method(
+        canonical_feature_df = self.sort_features_by_method(
             canonical_feature_df,
             contig_ids=namelist,
             simclr=True,
@@ -152,7 +149,7 @@ class SimCLRTrainer(BaseTrainer):
             torch.set_num_threads(threads)
         logger.info(f"Using device: {device}")
 
-        cov_dim = sum([1 for col in feature_df.columns if "cov" in col])
+        cov_dim = sum([1 for col in canonical_feature_df.columns if "cov" in col])
         kmer_dim = kmer_dim if kmer_dim != KMER_DIM else KMER_DIM
         
         if taxonomy_features is None:
@@ -163,10 +160,11 @@ class SimCLRTrainer(BaseTrainer):
         elif isinstance(taxonomy_features, dict):
             taxonomy_dim = 1 # one integer for each contig representing label.
             hierarchical_taxonomy = True
-        else:
-            raise ValueError(
-                "taxonomy_features must be either a pandas DataFrame or a dictionary. Please check the output of the features function for taxonomy features."
-            )
+        
+        if hierarchical_taxonomy:
+            tax_nodes = taxonomy_features[TAX_NODES]
+            node_indices = taxonomy_features[TAX_NODE_INDICES]
+            parental_array = taxonomy_features[PARENTAL_ARRAY]
 
         model = NeuralNetwork(
             tnf_dim=kmer_dim,
@@ -176,13 +174,15 @@ class SimCLRTrainer(BaseTrainer):
             proj=self.proj,
             hidden_dim=self.hidden_dim,
             hierarchical_taxonomy=hierarchical_taxonomy,
+            tax_nodes=tax_nodes if hierarchical_taxonomy else None,
+            node_indices=node_indices if hierarchical_taxonomy else None,
+            parental_array=parental_array if hierarchical_taxonomy else None,
         ).to(device)
 
         logger.info(f"Model architecture:\n{model}")
         # prepare training.
-        # TODO: prepare trainer with taxonomy, June 23, 2026.
-        train_loader, optimizer, scheduler, dataset = self.prepare_trainer(
-            data_df=feature_df,
+        train_loader, optimizer, scheduler = self.prepare_trainer(
+            data_df=canonical_feature_df,
             batch_size=self.batch_size,
             contig_length=self.contig_length,
             model=model,
@@ -214,17 +214,15 @@ class SimCLRTrainer(BaseTrainer):
                 temperature=temperature,
             )
 
-        # in case embeddings isn't exist, get embeddings from the trained model and save to file.
         embeddings = self.get_embeddings(
             model=model,
-            data_df=feature_df,
+            data_df=canonical_feature_df,
+            taxonomy_features=taxonomy_features,
             output_path=embedding_path,
             batch_size=self.batch_size,
             save_individual_embs=self.get_individual_embs,
         )
-        # TODO: retrieve embeddings with taxonomy, June 23, 2026.
 
-        # normalize embeddings, but here the embedding is pd.dataframe, so we can use F.normalize from torch after converting the dataframe to tensor, then convert back to dataframe.
         embeddings = pd.DataFrame(
             F.normalize(torch.from_numpy(embeddings.values).float(), dim=1).numpy(),
             index=embeddings.index,
@@ -277,6 +275,21 @@ class SimCLRTrainer(BaseTrainer):
             # for each view, make sure to sort the features by index.
             features_df = sorted_features_df.drop(columns=["view"])
             return features_df
+    def label_augmented_views(self, taxonomy_df: pd.DataFrame, augmented_indices: list) -> pd.DataFrame:
+        """
+        This function is to label the augmented views with the same taxonomy label as the original contig.
+        """
+        tax_df = taxonomy_df.copy().set_index(taxonomy_df["contig_id"])
+        contig_to_taxonomy = dict(zip(tax_df.index, tax_df.values))
+        # create a new dataframe to store the taxonomy labels for the augmented views.
+        augmented_taxonomy_df = pd.DataFrame(index=augmented_indices, columns=tax_df.columns)
+        for index in augmented_indices:
+            contig_name = index.rsplit(".", 1)[0]
+            if contig_name in contig_to_taxonomy:
+                augmented_taxonomy_df.loc[index] = contig_to_taxonomy[contig_name]
+            else:
+                raise ValueError(f"Contig name {contig_name} not found in taxonomy dataframe.")
+        return augmented_taxonomy_df # ensure the index order matches the order of the features dataframe after sorting by method.
 
     def prepare_trainer(
         self,
@@ -312,8 +325,10 @@ class SimCLRTrainer(BaseTrainer):
         # taxonomy.
         if taxonomy_features is not None:
             if isinstance(taxonomy_features, pd.DataFrame):
-                tax_tensor = torch.from_numpy(taxonomy_features.values).float()
-                tax_dataset = torch.utils.data.TensorDataset(tax_tensor)
+                taxonomy_features = taxonomy_features.reindex(data_df.index) # make sure the taxonomy features are in the same order as the data_df
+                tax_tensor = list(
+                    torch.split(torch.from_numpy(taxonomy_features.values).float(), len(namelist))
+                ) # should have been the same size at axis=0 as dataset.
                 train_dataset = torch.utils.data.TensorDataset(
                     *[
                         dataset[i][
@@ -322,17 +337,20 @@ class SimCLRTrainer(BaseTrainer):
                         ]
                         for i in range(n_views)
                     ],
-                    tax_tensor[
-                        np.array(
-                            [length_weight[name] for name in namelist]
-                        )
-                        >= contig_length
+                    *[
+                        tax_tensor[i][
+                            np.array([length_weight[name] for name in namelist])
+                            >= contig_length
+                        ]
+                        for i in range(len(tax_tensor))
                     ],
                 )
             elif isinstance(taxonomy_features, dict):
-                # if the dict is given.
-                tax_tensor = torch.from_numpy(taxonomy_features[TAXONOMY_DF].values).long()
-                tax_dataset = torch.utils.data.TensorDataset(tax_tensor)
+                # if the dict is given, the taxonomy is only for the original contigs, and the same taxonomy label is assigned to all augmented views of the same contig.
+                taxonomy_labels = self.label_augmented_views(taxonomy_features[TAXONOMY_DF], data_df.index.tolist())
+                tax_label_dataset = list(
+                    torch.split(torch.from_numpy(taxonomy_labels.values).long(), len(namelist))
+                ) # should also be the same size at axis=0 as dataset.
                 train_dataset = torch.utils.data.TensorDataset(
                     *[
                         dataset[i][
@@ -341,15 +359,16 @@ class SimCLRTrainer(BaseTrainer):
                         ]
                         for i in range(n_views)
                     ],
-                    tax_tensor[
-                        np.array(
-                            [length_weight[name] for name in namelist]
-                        )
-                        >= contig_length
-                    ],
-                )
+                    *[
+                        tax_label_dataset[i][
+                            np.array([length_weight[name] for name in namelist])
+                            >= contig_length
+                        ]
+                        for i in range(len(tax_label_dataset))
+                    ]
+                ) # match tax label to exact view's exact features. 
+                
         else:
-            # If it is None, do nothing to add taxonomy features.
             train_dataset = torch.utils.data.TensorDataset(
             *[
                 dataset[i][
@@ -359,7 +378,6 @@ class SimCLRTrainer(BaseTrainer):
                 for i in range(n_views)
             ]
         )
-
 
         requested_workers = num_workers
         if requested_workers < 0:
@@ -404,8 +422,8 @@ class SimCLRTrainer(BaseTrainer):
                 warmup=False,
                 max_lr_hold_epochs=self.max_lr_epochs,
             )
-
-        return train_loader, optimizer, scheduler, dataset
+        breakpoint()
+        return train_loader, optimizer, scheduler
 
     def accuracy(self, output, target, topk=(1,)):
         """Computes the accuracy over the k top predictions for the specified values of k"""

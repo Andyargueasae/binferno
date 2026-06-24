@@ -13,6 +13,11 @@ from loguru._logger import Logger
 
 from ..features import BinfernoFeatureBuilder
 
+TAX_NODES = "tax_node"
+TAX_NODE_INDICES = "tax_node_index"
+PARENTAL_ARRAY = "parental_array"
+TAXONOMY_DF="contig_taxonomy_df"
+
 
 class BaseTrainer(BaseModel):
 
@@ -128,11 +133,12 @@ class BaseTrainer(BaseModel):
 
     def get_embeddings(
         self,
-        model=None,
-        data_df=None,
-        output_path=None,
-        batch_size=1024,
-        save_individual_embs=False,
+        model: nn.Module,
+        data_df: pd.DataFrame,
+        taxonomy_features: pd.DataFrame,
+        output_path: Path = None,
+        batch_size: int = 1024,
+        save_individual_embs: bool =False,
     ) -> pd.DataFrame:
 
         if not os.path.exists(os.path.dirname(output_path)):
@@ -147,6 +153,8 @@ class BaseTrainer(BaseModel):
         embeddings = dict()
         kmer_embs = dict()
         cov_embs = dict()
+        tax_embs = dict()
+        
         orig_contigs = data_df[data_df.index.str.endswith(".original")].copy()
         suffix = ".original"
 
@@ -154,6 +162,9 @@ class BaseTrainer(BaseModel):
             # reformat the data_df index by finding those not containing ".", rename them as .original.
             orig_contigs = data_df[data_df.index.str.endswith(".0")].copy()
             suffix = ".0"
+        
+        if taxonomy_features is not None:
+            taxonomy_features = taxonomy_features[taxonomy_features.index.str.endswith(suffix)].copy()
 
         with torch.no_grad():
             for i in range(0, len(orig_contigs), batch_size):
@@ -162,7 +173,15 @@ class BaseTrainer(BaseModel):
                     batch_encode.values, dtype=torch.float32
                 ).to(device)
 
-                batch_embeddings = model.get_embedding(batch_features)
+                if taxonomy_features is not None:
+                    batch_taxonomy = taxonomy_features.iloc[i : i + batch_size]
+                    batch_taxonomy = torch.tensor(
+                        batch_taxonomy.values, dtype=torch.float32
+                    ).to(device)
+                else:
+                    batch_taxonomy = None
+
+                batch_embeddings = model.get_embedding(batch_features, batch_taxonomy)
                 batch_embeddings = F.normalize(batch_embeddings, p=2, dim=1)
                 for j, header in enumerate(batch_encode.index):
                     clean_header = header.replace(suffix, "")
@@ -170,11 +189,19 @@ class BaseTrainer(BaseModel):
 
                     # Save encoder embeddings if requested
                     if save_individual_embs:
-                        kmer_emb, cov_emb = model.get_separate_modality_embs(
-                            batch_features
-                        )
-                        kmer_embs[clean_header] = kmer_emb[j].cpu().numpy()
-                        cov_embs[clean_header] = cov_emb[j].cpu().numpy()
+                        if taxonomy_features is not None:
+                            kmer_emb, cov_emb, tax_emb = model.get_separate_modality_embs(
+                                batch_features, batch_taxonomy
+                            )
+                            kmer_embs[clean_header] = kmer_emb[j].cpu().numpy()
+                            cov_embs[clean_header] = cov_emb[j].cpu().numpy()
+                            tax_embs[clean_header] = tax_emb[j].cpu().numpy()
+                        else:
+                            kmer_emb, cov_emb = model.get_separate_modality_embs(
+                                batch_features
+                            )
+                            kmer_embs[clean_header] = kmer_emb[j].cpu().numpy()
+                            cov_embs[clean_header] = cov_emb[j].cpu().numpy()
 
         embeddings_df = pd.DataFrame.from_dict(embeddings, orient="index")
         embeddings_df.to_csv(str(embeddings_path), sep="\t")
@@ -192,6 +219,12 @@ class BaseTrainer(BaseModel):
 
             kmer_emb_df.to_csv(kmer_embeddings, sep="\t")
             cov_emb_df.to_csv(coverage_embeddings, sep="\t")
+            if taxonomy_features is not None:
+                tax_embeddings = os.path.join(
+                    os.path.dirname(output_path), "tax_embeddings.tsv"
+                )
+                tax_emb_df = pd.DataFrame.from_dict(tax_embs, orient="index")
+                tax_emb_df.to_csv(tax_embeddings, sep="\t")
 
         return embeddings_df
 

@@ -91,7 +91,7 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
             return [resulting_features, taxonomy_features], self._get_kmer_dim()
 
         canonical_features = pd.DataFrame()
-        taxonomy_features: Optional[pd.DataFrame|Dict] = None
+        taxonomy_features: Optional[pd.DataFrame|Dict|None] = None
         
         if self.use_kmer:
             kmer_data = output_dir / "kmer_features.tsv"

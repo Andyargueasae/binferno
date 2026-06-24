@@ -11,8 +11,12 @@ class NeuralNetwork(nn.Module):
         dropout=0.05,
         output_dim=128,
         proj_head_dim=512,
-        tax_emb_dim: int = 0,  # corgi or dnabert_s
+        tax_emb_dim: int = 0,
         hierarchical_taxonomy: bool = False,
+        # taxonomy-specific arguments
+        tax_nodes=None,
+        node_indices=None,
+        parental_array=None,
     ):
         super(NeuralNetwork, self).__init__()
         self.coverage_dim = coverage_dim  # by default we ask users to provide coverage.

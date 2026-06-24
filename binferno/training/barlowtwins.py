@@ -4,7 +4,7 @@ import os
 from collections import OrderedDict
 from pathlib import Path
 
-from typing import Dict, Tuple
+from typing import Dict, List, Optional, Tuple
 from pydantic import Field
 import torch
 import torch.nn as nn
@@ -21,7 +21,7 @@ import loguru
 
 from .models.barlow_twins import NeuralNetwork
 from ..features import BinfernoFeatureBuilder
-from .base import BaseTrainer
+from .base import BaseTrainer, TAXONOMY_DF, TAX_NODES, TAX_NODE_INDICES, PARENTAL_ARRAY
 
 
 class BarlowTwinsTrainer(BaseTrainer):
@@ -78,11 +78,13 @@ class BarlowTwinsTrainer(BaseTrainer):
          - view_num: number of augmented views to generate for each contig.
          - contig_length: minimum length of contigs to consider for augmentation.
         """
+
         output_aug_dir = output_dir / "augmentation"
         output_aug_dir.mkdir(parents=True, exist_ok=True)
         output_train_dir = output_dir / "training"
         output_train_dir.mkdir(parents=True, exist_ok=True)
         embedding_path = output_train_dir / "embeddings.tsv"
+        
         if embedding_path.exists():
             logger.info(
                 f"Embeddings already exist at {embedding_path}. Loading embeddings from file."
@@ -115,8 +117,13 @@ class BarlowTwinsTrainer(BaseTrainer):
             taxonomy_dim = taxonomy_features.shape[1]
             hierarchical_taxonomy = False
         elif isinstance(taxonomy_features, dict):
-            taxonomy_dim = 1
+            taxonomy_dim = 1 # an integer for each contig. 
             hierarchical_taxonomy = True
+
+        if hierarchical_taxonomy:
+            tax_nodes = taxonomy_features[TAX_NODES]
+            node_indices = taxonomy_features[TAX_NODE_INDICES]
+            parental_array = taxonomy_features[PARENTAL_ARRAY]
 
         feature_df = self.sort_features_by_method(
             canonical_feature_df,
@@ -132,7 +139,6 @@ class BarlowTwinsTrainer(BaseTrainer):
             device = torch.device("cpu")
             torch.set_num_threads(threads)
         logger.info(f"Using device: {device}")
-
         cov_dim = sum([1 for col in feature_df.columns if "cov" in col])
 
         model = NeuralNetwork(
@@ -142,6 +148,9 @@ class BarlowTwinsTrainer(BaseTrainer):
             tax_emb_dim=taxonomy_dim,
             hierarchical_taxonomy=hierarchical_taxonomy,
             output_dim=self.output_dim,
+            tax_nodes=tax_nodes if hierarchical_taxonomy else None,
+            node_indices=node_indices if hierarchical_taxonomy else None,
+            parental_array=parental_array if hierarchical_taxonomy else None,
         ).to(device)
 
         logger.info(f"Model architecture:\n{model}")
@@ -153,10 +162,12 @@ class BarlowTwinsTrainer(BaseTrainer):
             batch_size=self.batch_size,
             epochs=self.epochs,
             num_workers=threads,
+            taxonomy_features=taxonomy_features,
         )
 
         model_path = output_train_dir / "best_model.pt"
         if not model_path.exists():
+            # TODO: incorporate taxonomy features, split to two situations.
             model = self.train(
                 dataloader=dataloader,
                 optimizer=optimizer,
@@ -177,14 +188,15 @@ class BarlowTwinsTrainer(BaseTrainer):
         if not embedding_path.exists():
             orig_df = feature_df[feature_df.index.str.endswith(".original")]
             namelist = [index.rsplit(".", 1)[0] for index in orig_df.index]
+            # incorporate taxonomy features, split to 2 situations.
             embeddings = self.get_embeddings(
                 model=model,
                 data_df=feature_df,
+                taxonomy_features=taxonomy_features,
                 output_path=embedding_path,
                 batch_size=self.batch_size,
                 save_individual_embs=self.get_individual_embs,
             )
-        # TODO: retrieve embeddings with taxonomy, June 23, 2026.
 
         embeddings = pd.DataFrame(
             F.normalize(torch.from_numpy(embeddings.values).float(), dim=1).numpy(),
@@ -203,13 +215,9 @@ class BarlowTwinsTrainer(BaseTrainer):
     class BT_loss(nn.Module):
         def __init__(self, lambda_bt=5e-3, alpha=1.0, eps=1e-6):
             super().__init__()
-            self.lambda_bt = lambda_bt  # lambda barlow twins tunes the importance of the redundancy reduction term relative to the invariance term. A higher lambda_bt encourages the model to produce more decorrelated features, while a lower lambda_bt allows for more redundancy in the features.
-            self.alpha = alpha  # alpha tunes the importance of the invariance loss relative to the redundancy loss. A higher alpha emphasizes the importance of making the diagonal elements of the correlation matrix close to 1, while a lower alpha allows for more flexibility in the diagonal elements.
+            self.lambda_bt = lambda_bt  
+            self.alpha = alpha  
             self.eps = eps
-            # self.register_buffer(
-            #     'off_diag_mask',
-            #     ~torch.eye(proj_dim, dtype=torch.bool)
-            # )
             self._cache = {}
 
         def forward(self, feature1, feature2, return_stats=False):
@@ -270,10 +278,15 @@ class BarlowTwinsTrainer(BaseTrainer):
             return loss
             
     class BuildDataset:
-        def __init__(self, data_df, max_positive_pairs=700000):
+        def __init__(self,
+            data_df: pd.DataFrame, 
+            max_positive_pairs=700000,
+            taxonomy_features: Optional[pd.DataFrame|Dict|None] = None
+        ):
             self.data_df = data_df
             self.max_positive_pairs = max_positive_pairs
             self.fragment_contig_ids = list(data_df.index)
+            self.taxonomy_features = taxonomy_features
 
             grouped = self._group_fragments_by_contig()
             self.base_name_to_id = {
@@ -347,19 +360,6 @@ class BarlowTwinsTrainer(BaseTrainer):
                 return list(candidate_pairs)
 
             return random.sample(candidate_pairs, max_cap)
-
-        def form_positive_pairs(self):
-            """
-            Kept for compatibility with the original interface.
-            """
-            return self._build_all_positive_pairs()
-
-        def _select_positive_pairs(self, all_potential_pairs, max_cap):
-            """
-            Kept for compatibility with the original interface.
-            """
-            return self._cap_positive_pairs(all_potential_pairs, max_cap)
-
         def pair_frgs_to_contigs(self) -> dict:
             """
             Kept for compatibility with the original interface.
@@ -372,24 +372,15 @@ class BarlowTwinsTrainer(BaseTrainer):
                 (feature1, feature2, base_id)
             """
             X = self.data_df.to_numpy(dtype=np.float32, copy=False)
+            if isinstance(self.taxonomy_features, pd.DataFrame):
+                tax_X = self.taxonomy_features.to_numpy(dtype=np.float32, copy=False)
+            elif isinstance(self.taxonomy_features, dict):
+                tax_X = self.taxonomy_features[TAXONOMY_DF].to_numpy(dtype=np.float32, copy=False)
+            else:
+                tax_X = None
 
-            if not np.isfinite(X).all():
-                bad_rows, bad_cols = np.where(~np.isfinite(X))
-                print("First bad entries:")
-                for r, c in zip(bad_rows[:20], bad_cols[:20]):
-                    print(
-                        "row:",
-                        r,
-                        "index:",
-                        self.data_df.index[r],
-                        "col:",
-                        self.data_df.columns[c],
-                        "value:",
-                        self.data_df.iloc[r, c],
-                    )
-                raise ValueError(
-                    "data_df contains NaN or Inf before TensorDataset construction."
-                )
+            assert not np.isnan(X).any(), "data_df contains NaN values before TensorDataset construction."
+            assert not np.isinf(X).any(), "data_df contains Inf values before TensorDataset construction."
 
             pair_indices = np.asarray(self.training_pairs, dtype=np.int64)
             idx1 = pair_indices[:, 0]
@@ -404,8 +395,14 @@ class BarlowTwinsTrainer(BaseTrainer):
                 count=len(idx1),
             )
             base_ids = torch.from_numpy(base_ids_np)
-
-            return TensorDataset(features1, features2, base_ids)
+            if tax_X is not None:
+                assert not np.isnan(tax_X).any(), "taxonomy_features contains NaN values before TensorDataset construction."
+                assert not np.isinf(tax_X).any(), "taxonomy_features contains Inf values before TensorDataset construction."
+                tax_features1 = torch.from_numpy(tax_X[idx1].copy())
+                tax_features2 = torch.from_numpy(tax_X[idx2].copy())
+                return TensorDataset(features1, features2, tax_features1, tax_features2, base_ids)
+            else:
+                return TensorDataset(features1, features2, None, None, base_ids)
 
     def prepare_trainer(
         self,
@@ -415,9 +412,9 @@ class BarlowTwinsTrainer(BaseTrainer):
         logger=None,
         epochs: int = 300,
         num_workers: int = 0,
-        **kwargs,
+        taxonomy_features: Optional[pd.DataFrame|Dict|None] = None,
     ):
-        dataset_builder = self.BuildDataset(data_df=data_df)
+        dataset_builder = self.BuildDataset(data_df=data_df, taxonomy_features=taxonomy_features)
         train_dataset = dataset_builder.construct_tensordatasets_from_pairs()
 
         effective_batch_size = batch_size
@@ -462,6 +459,7 @@ class BarlowTwinsTrainer(BaseTrainer):
             warmup=True,
             max_lr_hold_epochs=self.max_lr_epochs,
         )
+        breakpoint()
         return dataloader, optimizer, scheduler
 
     def train(
@@ -472,9 +470,8 @@ class BarlowTwinsTrainer(BaseTrainer):
         device: torch.device,
         method: str = "barlow_twins",
         epochs: int = 300,
-        model=None,
+        model: nn.Module = None,
         output_dir: Path = None,
-        auxiliary_loss=False,
         logger=loguru._logger.Logger,
     ):
         self.unify_seeds(
@@ -495,7 +492,9 @@ class BarlowTwinsTrainer(BaseTrainer):
                 dataloader=dataloader,
                 optimizer=optimizer,
                 device=device,
-                auxiliary_loss=auxiliary_loss,
+                tax_nodes=tax_nodes if tax_nodes is not None else None,
+                node_indices=node_indices if node_indices is not None else None,
+                parental_array=parental_array if parental_array is not None else None,
             )
 
             scheduler.step()
@@ -530,47 +529,37 @@ class BarlowTwinsTrainer(BaseTrainer):
         return model
 
     def train_an_epoch(
-        self, model, dataloader, optimizer, device, auxiliary_loss=False
+        self,
+        model: nn.Module, 
+        dataloader: torch.utils.data.DataLoader, 
+        optimizer: torch.optim.Optimizer, 
+        device: torch.device, 
     ):
         criterion = self.BT_loss(lambda_bt=5e-3, alpha=1.0).to(device)
-        # if using kmer or coverage.
-        auxiliary_criterion = self.modality_BT_loss(lambda_bt=5e-3, alpha=1.0).to(
-            device
-        )
         model.train()
         total_loss = 0.0
         stats = None
 
-        for batch_i, batch_data in enumerate(dataloader):
-            features1, features2, base_ids = batch_data
+        for batch_i, batch_data in enumerate(dataloader): # here it determines taxonomy data to be yes or no.
+            features1, features2, tax_1, tax_2, base_ids = batch_data
+            # another question comes: two positive pairs should have same taxonomy. 
             features1 = features1.to(device, non_blocking=True)
             features2 = features2.to(device, non_blocking=True)
 
             optimizer.zero_grad(set_to_none=True)
 
-            output1, output2, kmer_z1, kmer_z2, cov_z1, cov_z2 = model(
-                features1, features2
+            output1, output2 = model(
+                features1, features2, tax_1, tax_2
             )
-
             last_batch = batch_i == len(dataloader) - 1
 
             # fused_embedding derived loss.
             if last_batch:
-                fuse_loss, stats = criterion(
+                loss, stats = criterion(
                     feature1=output1, feature2=output2, return_stats=True
                 )
-
             else:
-                fuse_loss = criterion(feature1=output1, feature2=output2)
-
-            if auxiliary_loss:
-                L_kmer = 1.0
-                L_cov = 1.0
-                aux_loss_kmer = auxiliary_criterion(feature1=kmer_z1, feature2=kmer_z2)
-                aux_loss_cov = auxiliary_criterion(feature1=cov_z1, feature2=cov_z2)
-                loss = fuse_loss + L_kmer * aux_loss_kmer + L_cov * aux_loss_cov
-            else:
-                loss = fuse_loss
+                loss = criterion(feature1=output1, feature2=output2)
 
             loss.backward()
 
@@ -579,7 +568,7 @@ class BarlowTwinsTrainer(BaseTrainer):
             )  # prevent the exploding gradient.
 
             optimizer.step()
-            total_loss += fuse_loss.item()  # sum loss.
+            total_loss += loss.item()  # sum loss.
 
         avg_loss = total_loss / len(dataloader)
         return avg_loss, stats

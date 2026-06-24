@@ -5,7 +5,7 @@ import networkx as nx
 import numpy as np
 
 class HierarchicalTaxonomyEncoder(nn.Module):
-    # June 23, 2026 TODO.
+    # June 24, 2026 TODO.
     def __init__(
         self,
         input_dim: int,
@@ -26,8 +26,6 @@ class HierarchicalTaxonomyEncoder(nn.Module):
             nn.BatchNorm1d(output_dim),
             nn.LeakyReLU(),
         )
-
-
 
     def forward(self, x):
         return self.taxonomy_encoder(x)
@@ -77,6 +75,11 @@ class TaxonomyHead(nn.Module):
         # taking into account the hierarchy defined by the tree.
         raise NotImplementedError(
             "This function should be implemented to compute the flat softmax NLL loss."
+        )
+    
+    def LabelHloss(self, tree):
+        raise NotImplementedError(
+            "This function should be implemented to compute the hierarchical loss based on the tree structure."
         )
 
     def SumLeafDescendants(self, tree, strict=False):
