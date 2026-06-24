@@ -20,7 +20,7 @@ class TaxonomyFeatureBuilder(BaseFeatureBuilder):
     """
 
     taxonomy: Path = Field(
-        None,
+        Path(),
         description="Path to a TSV file containing taxonomic classifications for each contig. Columns: contig_id, taxonomy_string.",
     )
 

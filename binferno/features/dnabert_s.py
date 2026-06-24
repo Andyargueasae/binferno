@@ -102,9 +102,7 @@ class DnaBertSFeatureBuilder(BaseFeatureBuilder):
     def embed_sequence(self, seq, tokenizer, model, device, max_len=512, stride=256):
         chunk_embs = []
 
-        for start in progress.track(
-            range(0, len(seq), stride), description="Embedding chunks"
-        ):
+        for start in range(0, len(seq), stride):
             sub_seq = seq[start : start + max_len]
 
             if len(sub_seq) < 50:

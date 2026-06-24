@@ -26,7 +26,7 @@ def prep_model_simclr():
     model = SimCLRModel(
         tnf_dim=args.get("tnf_dim", 136),
         coverage_dim=N_COV * 2,
-        corgi_dim=0,
+        tax_emb_dim=0,
     ).to(DEVICE)
     return model
 
@@ -36,7 +36,7 @@ def prep_model_barlowtwins():
     model = BarlowTwinsModel(
         tnf_dim=args.get("tnf_dim", 136),
         coverage_dim=N_COV * 2,
-        corgi_dim=0,
+        tax_emb_dim=0,
         proj_head_dim=128 * 4,
     ).to(DEVICE)
     return model

@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from .taxonomy import HierarchicalTaxonomyEncoder, _build_tax_emb_encoder
+from .taxonomy import TaxonomyHead, _build_tax_emb_encoder
 
 class NeuralNetwork(nn.Module):
     def __init__(
@@ -19,12 +19,12 @@ class NeuralNetwork(nn.Module):
         parental_array=None,
     ):
         super(NeuralNetwork, self).__init__()
-        self.coverage_dim = coverage_dim  # by default we ask users to provide coverage.
+        self.coverage_dim = coverage_dim 
         self.output_dim = output_dim
         self.proj_head_dim = proj_head_dim
         self.tnf_dim = tnf_dim
         self.tax_emb_dim = tax_emb_dim
-        self.hierarchical_taxonomy = hierarchical_taxonomy  # used to determine later in the forward: whether to feed hierarchical taxonomy logits into the fusion network or an embedding
+        self.hierarchical_taxonomy = hierarchical_taxonomy 
 
         if self.tax_emb_dim > 0:
             if not hierarchical_taxonomy:
@@ -35,10 +35,10 @@ class NeuralNetwork(nn.Module):
                     dropout=dropout,
                 )
             else:
-                self.taxonomy_encoder = HierarchicalTaxonomyEncoder(
-                    input_dim=tax_emb_dim,
-                    hidden_dim=tax_emb_dim,
-                    output_dim=output_dim,
+                self.taxonomy_encoder = TaxonomyHead(
+                    in_dim=tax_emb_dim,
+                    table_parent=parental_array,
+                    hidden=tax_emb_dim,
                     dropout=dropout,
                 )
 
@@ -59,7 +59,6 @@ class NeuralNetwork(nn.Module):
             nn.LeakyReLU(),
         )
 
-        # determined by coverage dim.
         self.coverage_encoder = _build_coverage_encoder(
             coverage_dim=coverage_dim, output_dim=output_dim, dropout=dropout
         )
@@ -69,7 +68,7 @@ class NeuralNetwork(nn.Module):
             emb_dim=output_dim,
             kmer_enc_dim=output_dim,  # modality 1
             coverage_dim=self.final_cov_dim,  # modality 2
-            tax_emb_dim=tax_emb_dim,  # modality 3, if we include taxonomy embeddings as a separate modality. If we directly concatenate taxonomy embeddings with kmer features and feed into the same encoder, then we don't need this separate modality dimension for taxonomy.
+            tax_emb_dim=tax_emb_dim,  # modality 3
         )
 
         self.representation_dim = output_dim
@@ -81,19 +80,17 @@ class NeuralNetwork(nn.Module):
             dropout=0.0,
         )
 
-    # TODO: embed the taxonomy features in model June 23 2026.
     def _encode(self, x: torch.Tensor, tax_emb: torch.Tensor = None):
         # encode tnf and coverage features separately, then fuse them together.
         tnf_features = x[:, : self.tnf_dim]
         tnf_encode = self.tnf_encoder(tnf_features)
         cov_features = x[:, self.tnf_dim :]
         cov_encode = self.coverage_encoder(cov_features)
-        if not tax_emb is None:
+        if (not tax_emb is None ) and (not self.hierarchical_taxonomy):
             tax_encode = self.taxonomy_encoder(tax_emb)
-            # here two diverged choices: merge with tnf or used alone. 
             fused_encode = self.fusion_network(tnf_encode, cov_encode, tax_encode=tax_encode)  # 128
         else:
-            fused_encode = self.fusion_network(tnf_encode, cov_encode)  # 128
+            fused_encode = self.fusion_network(tnf_encode, cov_encode) 
         return fused_encode
 
     def get_embedding(self, x: torch.Tensor, tax_emb: torch.Tensor = None):
@@ -105,8 +102,12 @@ class NeuralNetwork(nn.Module):
         coverage_features = x[:, self.tnf_dim :]
         coverage_encoded = self.coverage_encoder(coverage_features)
         if not tax_emb is None:
-            tax_encoded = self.taxonomy_encoder(tax_emb)
-            return kmer_encoded, coverage_encoded, tax_encoded
+            if not self.hierarchical_taxonomy:
+                tax_encoded = self.taxonomy_encoder(tax_emb)
+                return kmer_encoded, coverage_encoded, tax_encoded
+            else:
+                tax_logits = self.taxonomy_encoder(tax_emb)
+                return kmer_encoded, coverage_encoded, tax_logits # how does logits offer embeddings?
         return kmer_encoded, coverage_encoded
 
     def forward_one(self, x: torch.Tensor, tax_emb: torch.Tensor = None):
@@ -135,9 +136,17 @@ def _build_bt_projector(in_dim, proj_dim=768, n_layers=3, dropout=0.0):
     BN'd output. Width matters most; depth (3 layers) follows the BT recipe.
 
     in_dim:    representation_dim (fused embedding size, e.g. 128)
-    proj_dim:  projector width — sweep this (512/768/1024), because output dim is only 128, we just bump it to 3-4x of the output dim, which is 512 or 768, to give the projector enough capacity to learn a good representation for the Barlow Twins loss optimization. The original paper uses 2048 for ImageNet, but our input dimension is much smaller, so we can use a smaller projector dimension.
+
+    proj_dim:  projector width — sweep this (512/768/1024), because output dim is only 128,
+                we just bump it to 3-4x of the output dim, which is 512 or 768, to give the 
+                projector enough capacity to learn a good representation for the Barlow Twins 
+                loss optimization. The original paper uses 2048 for ImageNet, but our input 
+                dimension is much smaller, so we can use a smaller projector dimension.
+
     n_layers:  total linear layers (BT uses 3)
+
     dropout:   keep 0.0 to match the BT recipe; exposed only for experiments
+
     """
     assert n_layers >= 2, "projector needs at least 2 layers"
     layers = []
@@ -352,11 +361,11 @@ class AttentionFusion(nn.Module):
             scale_coverage = scale_layer(gated_coverage)
             if tax_feature is not None and self.tax_emb_dim > 0:
                 scale_tax = scale_layer(gated_tax)
-                scale_features.append(torch.cat([scale_kmer, scale_coverage, scale_tax], dim=1)) # if (batch_size, emb_dim) -> (batch_size, emb_dim * 3) after concatenation.
+                scale_features.append(torch.cat([scale_kmer, scale_coverage, scale_tax], dim=1)) # (batch_size, emb_dim) -> (batch_size, emb_dim * 3)
             else:
-                scale_features.append(torch.cat([scale_kmer, scale_coverage], dim=1)) # if (batch_size, emb_dim) -> (batch_size, emb_dim * 2) after concatenation.
+                scale_features.append(torch.cat([scale_kmer, scale_coverage], dim=1)) # (batch_size, emb_dim) -> (batch_size, emb_dim * 2)
 
-        multi_scale_concat = torch.cat(scale_features, dim=1) # if we have 3 scales and no taxonomy, this will be (batch_size, emb_dim * 2 * 3); if we have taxonomy, this will be (batch_size, emb_dim * 3 * 3)
+        multi_scale_concat = torch.cat(scale_features, dim=1) # (batch_size, emb_dim * 3 * 3)
         multi_scale_compressed = self.multi_scale_compressor(multi_scale_concat)
         interaction_features = self.interaction_module(multi_scale_compressed)
 

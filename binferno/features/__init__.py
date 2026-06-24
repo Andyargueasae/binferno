@@ -60,7 +60,7 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
         output_dir: Path = None,
         contig_length: int = 1000,  # used to calibrate corgi when run raw data.
         max_norm_stacked: bool = False,  # whether to normalize the coverage features before feeding into the model. we found that normalizing the coverage features before feeding into the model can lead to better performance, so we set std_first to True for simclr training.
-    ) -> Tuple[List[pd.DataFrame, Optional[pd.DataFrame|Dict|None]], int]:
+    ) -> Tuple[List[pd.DataFrame|Optional[pd.DataFrame|Dict|None]], int]:
 
         if (
             (not self.use_kmer)

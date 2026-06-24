@@ -1,12 +1,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
+
 from .cr_vae import VAE
-from .taxonomy import HierarchicalTaxonomyEncoder, _build_tax_emb_encoder
+from .taxonomy import TaxonomyHead, _build_tax_emb_encoder
 
-
-# The neuralnetwork orthologous to comebin's MLP, but we have to gain further modules for the third-modality encoding.
 class NeuralNetwork(nn.Module):
     def __init__(
         self,
@@ -26,9 +24,9 @@ class NeuralNetwork(nn.Module):
         self.tnf_dim = tnf_dim
         self.proj_head_dim = proj_head_dim
         self.proj = proj
-        self.tax_emb_dim = tax_emb_dim  # corgi or dnabert_s embedding dimension. Paired with tax_emb in forward pass.
+        self.tax_emb_dim = tax_emb_dim
         self.hidden_dim = hidden_dim
-        self.hierarchical_taxonomy = hierarchical_taxonomy  # used to determine later in the forward: whether to feed hierarchical taxonomy logits into the fusion network or an embedding
+        self.hierarchical_taxonomy = hierarchical_taxonomy
 
         self.tnf_enc_dim = tnf_dim
 
@@ -40,14 +38,14 @@ class NeuralNetwork(nn.Module):
             n_hidden_layers=3,
         )
 
-        self.tnf_enc_dim += output_dim  # after encoding coverage, we will concatenate with tnf features and feed into the fusion network, so we need to update the tnf_enc_dim accordingly.
+        self.tnf_enc_dim += output_dim
 
         self.final_cov_dim = output_dim
 
         # taxonomy string feature prediction, requires hierarchical loss.
         if tax_emb_dim > 0:
             if not hierarchical_taxonomy:
-                self.tnf_enc_dim += output_dim # if taxonomy is not hierarchical, add another emb_dim.
+                self.tnf_enc_dim += output_dim
                 self.taxonomy_encoder = _build_tax_emb_encoder(
                     tax_emb_dim=tax_emb_dim,
                     hidden_dim=tax_emb_dim,
@@ -56,10 +54,10 @@ class NeuralNetwork(nn.Module):
                 )
             else:
                 # hierarchical taxonomy.
-                self.taxonomy_encoder = HierarchicalTaxonomyEncoder(
-                    input_dim=tax_emb_dim,
-                    hidden_dim=tax_emb_dim,
-                    output_dim=output_dim,
+                self.taxonomy_encoder = TaxonomyHead(
+                    in_dim=tax_emb_dim,
+                    table_parent=None,
+                    hidden=tax_emb_dim,
                     dropout=dropout,
                 )
 
@@ -94,27 +92,37 @@ class NeuralNetwork(nn.Module):
             nn.BatchNorm1d(proj_head_dim),
         )
 
-    def _encode(self, x, tax_emb: torch.Tensor = None):
+    def _encode(
+        self, 
+        x: torch.Tensor,
+        tax_emb: torch.Tensor = None
+    ):
         tnf_features = x[:, : self.tnf_dim]
         cov_features = x[:, self.tnf_dim : self.tnf_dim + self.coverage_dim]
         cov_encode = self.coverage_encoder(cov_features)  # not normalized anymore.
 
         # taxonomy embedding encoding if provided. 
-        if not tax_emb is None:
+        if (not tax_emb is None) and (not self.hierarchical_taxonomy):
             tax_encode = self.taxonomy_encoder(tax_emb)
             tnf_features = torch.cat([tnf_features, F.normalize(tax_encode, dim=-1)], dim=-1)
 
         fused_encode = self.tnf_encoder(
             torch.cat([tnf_features, F.normalize(cov_encode, dim=-1)], dim=-1)
         ) # 392 if tax_emb isn't none, or 264-dim.
-        return fused_encode, cov_encode, tax_encode if not tax_emb is None else None
+        return fused_encode, cov_encode, tax_encode if (not tax_emb is None) and (not self.hierarchical_taxonomy) else None
 
-    def get_embedding(self, x: torch.Tensor, tax_emb: torch.Tensor = None):
+    def get_embedding(
+        self, 
+        x: torch.Tensor, 
+        tax_emb: torch.Tensor = None
+    ):
         return self._encode(x, tax_emb)[0]
 
     def forward(
-        self, x: torch.Tensor, tax_emb: torch.Tensor = None
-    ):  # When doing a forward, we need an optional taxonomy embedding input.
+        self, 
+        x: torch.Tensor, 
+        tax_emb: torch.Tensor = None
+    ):
         fused_emb, cov_emb, tax_emb = self._encode(x, tax_emb)
         if self.proj:
             proj_emb = self.proj_head(fused_emb)
