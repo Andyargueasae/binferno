@@ -1,9 +1,10 @@
 import torch
 import torch.nn as nn
 
-from .taxonomy import TaxonomyHead
+from .taxonomy import TaxonomyFusion
 
 class NeuralNetwork(nn.Module):
+    LATENT_DIM=32
     def __init__(
         self,
         tnf_dim,
@@ -30,17 +31,17 @@ class NeuralNetwork(nn.Module):
             if not hierarchical_taxonomy:
                 self.taxonomy_encoder = _build_tax_emb_encoder(
                     tax_emb_dim=tax_emb_dim,
-                    hidden_dim=tax_emb_dim,
                     output_dim=output_dim,
                     dropout=dropout,
                 )
             else:
-                self.taxonomy_encoder = TaxonomyHead(
+                tax_emb_dim += tnf_dim + coverage_dim
+                self.taxonomy_encoder = TaxonomyFusion(
                     in_dim=tax_emb_dim,
+                    latent_dim=self.LATENT_DIM,
+                    table_parent=parental_array,
                     tax_nodes=tax_nodes,
                     node_indices=node_indices,
-                    table_parent=parental_array,
-                    hidden=tax_emb_dim,
                     dropout=dropout,
                 )
 
@@ -88,9 +89,13 @@ class NeuralNetwork(nn.Module):
         tnf_encode = self.tnf_encoder(tnf_features)
         cov_features = x[:, self.tnf_dim :]
         cov_encode = self.coverage_encoder(cov_features)
-        if (tax_emb is not None) and (not self.hierarchical_taxonomy):
+        if (tax_emb is not None): 
+            if self.hierarchical_taxonomy:
+                tax_emb = torch.cat([tnf_encode, cov_encode, tax_emb], dim=1)
+            else:
+                pass
             tax_encode = self.taxonomy_encoder(tax_emb)
-            fused_encode = self.fusion_network(tnf_encode, cov_encode, tax_encode=tax_encode)  # 128
+            fused_encode = self.fusion_network(tnf_encode, cov_encode, tax_feature=tax_encode)  # 128
         else:
             fused_encode = self.fusion_network(tnf_encode, cov_encode) 
         return fused_encode
@@ -112,7 +117,7 @@ class NeuralNetwork(nn.Module):
                 return kmer_encoded, coverage_encoded, tax_logits # how does logits offer embeddings?
         return kmer_encoded, coverage_encoded
 
-    def forward_one(self, x: torch.Tensor, tax_emb: torch.Tensor = torch.empty(0, dtype=torch.int32)):
+    def forward_one(self, x: torch.Tensor, tax_emb: torch.Tensor = None):
         fused_emb = self._encode(x, tax_emb)
         proj_emb = self.proj_head(fused_emb)
         return proj_emb
@@ -121,8 +126,8 @@ class NeuralNetwork(nn.Module):
         self,
         x1: torch.Tensor,
         x2: torch.Tensor,
-        tax_emb1: torch.Tensor = torch.empty(0, dtype=torch.int32),
-        tax_emb2: torch.Tensor = torch.empty(0, dtype=torch.int32),
+        tax_emb1: torch.Tensor = None,
+        tax_emb2: torch.Tensor = None,
     ):
         z1 = self.forward_one(x1, tax_emb1)
         z2 = self.forward_one(x2, tax_emb2)
@@ -206,7 +211,6 @@ class AttentionFusion(nn.Module):
             dropout=self.DEFAULT_DROPOUT,
             batch_first=True,
         )
-        # corgi was once treated as a separate modality and entered attention, but gave poor results.
 
         self.kmer_gate = nn.Sequential(
             nn.Linear(self.emb_dim * self.GATE_INPUT_MULTIPLIER, self.emb_dim),

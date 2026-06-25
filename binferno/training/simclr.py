@@ -1,5 +1,6 @@
 from pathlib import Path
 import random
+import os
 from collections import OrderedDict
 
 import torch
@@ -28,7 +29,7 @@ class SimCLRTrainer(BaseTrainer):
         description="Whether to use a projection head in the NeuralNetwork architecture.",
     )
     learning_rate: float = Field(
-        default=2.5e-3, description="Learning rate for training."
+        default=1e-3, description="Learning rate for training."
     )
     batch_size: int = Field(default=1024, description="Batch size for training.")
     epochs: int = Field(default=300, description="Number of epochs for training.")
@@ -682,6 +683,20 @@ class SimCLRTrainer(BaseTrainer):
             num_views=view_num,
             length_threshold=contig_length,
         )
+
+        for view in range(view_num):
+            output_fasta = os.path.join(
+                output_dir, f"augmented_fragments_view{view}.fasta"
+            )
+            view_fragments = [
+                (header, seq)
+                for header, seq in All_Fragments
+                if header.endswith(f".{view}")
+            ]
+            with open(output_fasta, "w") as f:
+                for fragment_header, fragment_seq in view_fragments:
+                    f.write(f">{fragment_header}\n")
+                    f.write(f"{fragment_seq}\n")
         return FragMent_Dict, All_Fragments
 
 

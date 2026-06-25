@@ -1,14 +1,16 @@
 # features/coverage.py
 import os
-from multiprocessing import Pool
-from typing import Dict, List, Set, Tuple, Union, Any
 import glob
+from multiprocessing import Pool
+
+from typing import Dict, List, Set, Tuple, Union, Any
 import pandas as pd
-from .base import BaseFeatureBuilder
 import numpy as np
 import pysam
 from tqdm import tqdm
 from pydantic import Field
+
+from .base import BaseFeatureBuilder
 
 FragmentDict = Dict[str, Dict[str, Union[str, List[str]]]]
 CoverageDict = Dict[str, float]

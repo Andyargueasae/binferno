@@ -1,11 +1,13 @@
 import glob
 from pathlib import Path
-from .base import BaseFeatureBuilder
+import os
+
 import pandas as pd
 import numpy as np
 from typing import Union, Optional, Tuple, List
-import os
 from pydantic import Field
+
+from .base import BaseFeatureBuilder
 from ..utils import calc_n50
 
 

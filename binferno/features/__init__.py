@@ -101,6 +101,7 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
             else:
                 logger.info("Generating k-mer features...")
                 kmer_df = self.kmer(All_Fragments)
+                kmer_df.to_csv(kmer_data, sep="\t", index=True, header=True) if self.save_features else None
 
             canonical_features = pd.concat([canonical_features, kmer_df], axis=1)
 
@@ -137,6 +138,8 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
                 corgi_df = self.corgi(
                     output_dir, contigs=contigs, min_length=contig_length
                 )
+                corgi_df.to_csv(corgi_data, sep="\t", index=True, header=True) if self.save_features else None
+
             taxonomy_features = corgi_df # pd.DataFrame type.
 
         elif self.use_dnabert_s:
@@ -152,7 +155,8 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
                     fragments=All_Fragments,
                     logger=logger,
                 )
-            taxonomy_features = dnabert_s_df # pd.DataFrame type.
+                dnabert_s_df.to_csv(dnabert_s_data, sep="\t", index=True, header=True) if self.save_features else None
+            taxonomy_features = dnabert_s_df
             
         # Finally, coverages are loaded.
         if self.use_coverage:
@@ -177,6 +181,8 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
                         to other features ({canonical_features.shape[0]}). Please check the coverage feature \
                         generation."
                     )
+                coverage_df.to_csv(coverage_data, sep="\t", index=True, header=True) if self.save_features else None
+
             canonical_features = pd.concat([canonical_features, coverage_df], axis=1)
 
         if taxonomy_features:

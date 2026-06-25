@@ -28,7 +28,7 @@ from .base import BaseTrainer, TAXONOMY_DF, TAX_NODES, TAX_NODE_INDICES, PARENTA
 class BarlowTwinsTrainer(BaseTrainer):
 
     learning_rate: float = Field(
-        default=2.5e-3, description="Learning rate for training."
+        default=1e-3, description="Learning rate for training."
     )
     batch_size: int = Field(default=1024, description="Batch size for training.")
     epochs: int = Field(default=300, description="Number of epochs for training.")

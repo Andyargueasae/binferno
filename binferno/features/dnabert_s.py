@@ -1,10 +1,7 @@
-from pathlib import Path
-
 import torch
 import numpy as np
 import pandas as pd
 from transformers import AutoTokenizer, AutoModel, AutoConfig
-import pyfastx
 import time
 from pydantic import Field
 import loguru
@@ -41,7 +38,6 @@ class DnaBertSFeatureBuilder(BaseFeatureBuilder):
         logger.info(f"Using model checkpoint: {model_path}")
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        seqs = [(name, str(seq)) for name, seq in fragments if len(seq) > 1000]
 
         # the configuration is now changed completely.
         config = AutoConfig.from_pretrained(
@@ -65,10 +61,10 @@ class DnaBertSFeatureBuilder(BaseFeatureBuilder):
 
         features = []
         names = []
-        total = len(seqs)
+        total = len(fragments)
         logger.info(f"Embedding sequences: {total} contigs to process")
 
-        for idx, (name, seq) in enumerate(seqs, start=1):
+        for idx, (name, seq) in enumerate(fragments, start=1):
             if idx == 1 or idx % 100 == 0 or idx == total:
                 logger.info(f"Embedding progress: {idx}/{total} contigs")
 
@@ -114,6 +110,7 @@ class DnaBertSFeatureBuilder(BaseFeatureBuilder):
         df = pd.DataFrame(features, index=names)
         end_time = time.time()
         logger.info(f"Feature extraction completed in {end_time - start_time:.2f} seconds.")
+        
         return df
 
     def embed_sequence(self, seq, tokenizer, model, device, max_len=512, stride=256):

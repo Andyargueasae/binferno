@@ -3,9 +3,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .cr_vae import VAE
-from .taxonomy import TaxonomyHead
+from .taxonomy import TaxonomyFusion
 
 class NeuralNetwork(nn.Module):
+    LATENT_DIM=32
     def __init__(
         self,
         tnf_dim: int,
@@ -17,6 +18,10 @@ class NeuralNetwork(nn.Module):
         hidden_dim: int = 1024,
         tax_emb_dim: int = 0,
         hierarchical_taxonomy: bool = False,
+        # for hierarchical taxonomy.
+        parental_array: torch.Tensor = None,
+        tax_nodes: list = None,
+        node_indices: dict = None,
     ):
         super(NeuralNetwork, self).__init__()
         self.coverage_dim = coverage_dim  # by default we ask users to provide coverage.
@@ -39,7 +44,6 @@ class NeuralNetwork(nn.Module):
         )
 
         self.tnf_enc_dim += output_dim
-
         self.final_cov_dim = output_dim
 
         # taxonomy string feature prediction, requires hierarchical loss.
@@ -48,16 +52,18 @@ class NeuralNetwork(nn.Module):
                 self.tnf_enc_dim += output_dim
                 self.taxonomy_encoder = _build_tax_emb_encoder(
                     tax_emb_dim=tax_emb_dim,
-                    hidden_dim=tax_emb_dim,
                     output_dim=output_dim,
                     dropout=dropout,
                 )
             else:
                 # hierarchical taxonomy.
-                self.taxonomy_encoder = TaxonomyHead(
+                tax_emb_dim += tnf_dim + coverage_dim
+                self.taxonomy_encoder = TaxonomyFusion(
                     in_dim=tax_emb_dim,
-                    table_parent=None,
-                    hidden=tax_emb_dim,
+                    latent_dim=self.LATENT_DIM,
+                    table_parent=parental_array,
+                    tax_nodes=tax_nodes,
+                    node_indices=node_indices,
                     dropout=dropout,
                 )
 
@@ -99,17 +105,22 @@ class NeuralNetwork(nn.Module):
     ):
         tnf_features = x[:, : self.tnf_dim]
         cov_features = x[:, self.tnf_dim : self.tnf_dim + self.coverage_dim]
-        cov_encode = self.coverage_encoder(cov_features)  # not normalized anymore.
 
         # taxonomy embedding encoding if provided. 
-        if (not tax_emb is None) and (not self.hierarchical_taxonomy):
-            tax_encode = self.taxonomy_encoder(tax_emb)
-            tnf_features = torch.cat([tnf_features, F.normalize(tax_encode, dim=-1)], dim=-1)
+        if (not tax_emb is None): 
+            if (not self.hierarchical_taxonomy):
+                tax_encode = self.taxonomy_encoder(tax_emb)
+                tnf_features = torch.cat([tnf_features, F.normalize(tax_encode, dim=-1)], dim=-1)
+            else:
+                fused_emb = torch.cat([tnf_features, cov_features, tax_emb], dim=1)
+                tax_encode = self.taxonomy_encoder(fused_emb)
+                tnf_features = torch.cat([tnf_features, F.normalize(tax_encode, dim=-1)], dim=-1)
 
+        cov_encode = self.coverage_encoder(cov_features)  # not normalized anymore.
         fused_encode = self.tnf_encoder(
             torch.cat([tnf_features, F.normalize(cov_encode, dim=-1)], dim=-1)
-        ) # 392 if tax_emb isn't none, or 264-dim.
-        return fused_encode, cov_encode, tax_encode if (not tax_emb is None) and (not self.hierarchical_taxonomy) else None
+        )
+        return fused_encode, cov_encode
 
     def get_embedding(
         self, 
@@ -123,11 +134,11 @@ class NeuralNetwork(nn.Module):
         x: torch.Tensor, 
         tax_emb: torch.Tensor = None
     ):
-        fused_emb, cov_emb, tax_emb = self._encode(x, tax_emb)
+        fused_emb, cov_emb = self._encode(x, tax_emb)
         if self.proj:
             proj_emb = self.proj_head(fused_emb)
-            return proj_emb, cov_emb, tax_emb
-        return fused_emb, cov_emb, tax_emb
+            return proj_emb, cov_emb
+        return fused_emb, cov_emb
 
 def _build_coverage_encoder(
     coverage_dim: int,
