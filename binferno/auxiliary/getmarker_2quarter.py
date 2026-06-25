@@ -428,4 +428,7 @@ if __name__ == "__main__":
     rc = gethmmmarker(hmm, fasta, min_seq_len, out, max_effort)
     if rc != 0:
         print("No suitable marker found.", file=sys.stderr)
-        raise RuntimeError("No suitable marker found.")
+        sys.exit(1)
+    else:
+        print(f"Marker(s) written to {out}.")
+        sys.exit(0)

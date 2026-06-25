@@ -1,4 +1,3 @@
-# features/coverage.py
 import os
 import glob
 from multiprocessing import Pool
@@ -8,7 +7,6 @@ import pandas as pd
 import numpy as np
 import pysam
 from tqdm import tqdm
-from pydantic import Field
 
 from .base import BaseFeatureBuilder
 
@@ -691,8 +689,3 @@ class CoverageFeatureBuilder(BaseFeatureBuilder):
 
         return cov_df
 
-
-# ======= Multisample coverage features. =======
-# class CoverageMultiFeatureBuilder(CoverageFeatureBuilder):
-# def __call__():
-# pass

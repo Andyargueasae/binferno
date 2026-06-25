@@ -142,3 +142,12 @@ def test_coverage_features(bam_dir, dummy_all_fragments):
         cov_df.shape[1] == 2
     ), f"Expected 2 columns (mean and std) for one sample, but got {cov_df.shape[1]}."
     assert np.all(cov_df.values >= 0), "Coverage values should be non-negative."
+
+def test_corgi_features():
+    assert True, "Corgi features are currently not implemented, so this test is a placeholder."
+
+def test_taxonomy_features():
+    assert True, "Taxonomy features are currently not implemented, so this test is a placeholder."
+
+def test_dnabert_s_features():
+    assert True, "DNABERT features are currently not implemented, so this test is a placeholder."

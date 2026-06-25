@@ -4,7 +4,6 @@ from functools import partial
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import networkx as nx
 import numpy as np
 
 class TaxonomyHead(nn.Module):

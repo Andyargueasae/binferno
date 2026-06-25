@@ -133,7 +133,7 @@ def test_barlowtwins_train_an_epoch():
         tnf_dim=args.get("tnf_dim", 136),
     )
     model = prep_model_barlowtwins()
-    data_df = toy_features(n_cov=N_COV, simclr=False) # input features.
+    data_df = toy_features(n_cov=N_COV, simclr=False)
     dataloader, optimizer, scheduler = trainer.prepare_trainer(
             model=model,
             data_df=data_df,
