@@ -96,12 +96,13 @@ class NeuralNetwork(nn.Module):
                 pass
             tax_encode = self.taxonomy_encoder(tax_emb)
             fused_encode = self.fusion_network(tnf_encode, cov_encode, tax_feature=tax_encode)  # 128
+            return fused_encode, tax_encode
         else:
             fused_encode = self.fusion_network(tnf_encode, cov_encode) 
-        return fused_encode
+            return fused_encode
 
     def get_embedding(self, x: torch.Tensor, tax_emb: torch.Tensor = None):
-        return self._encode(x, tax_emb)
+        return self._encode(x, tax_emb)[0]
 
     def get_separate_modality_embs(self, x: torch.Tensor, tax_emb: torch.Tensor = None):
         kmer_features = x[:, : self.tnf_dim]
@@ -118,9 +119,9 @@ class NeuralNetwork(nn.Module):
         return kmer_encoded, coverage_encoded
 
     def forward_one(self, x: torch.Tensor, tax_emb: torch.Tensor = None):
-        fused_emb = self._encode(x, tax_emb)
+        fused_emb, tax_emb = self._encode(x, tax_emb)
         proj_emb = self.proj_head(fused_emb)
-        return proj_emb
+        return proj_emb, tax_emb
 
     def forward(
         self,
@@ -129,9 +130,9 @@ class NeuralNetwork(nn.Module):
         tax_emb1: torch.Tensor = None,
         tax_emb2: torch.Tensor = None,
     ):
-        z1 = self.forward_one(x1, tax_emb1)
-        z2 = self.forward_one(x2, tax_emb2)
-        return z1, z2
+        z1, tax_emb1 = self.forward_one(x1, tax_emb1)
+        z2, tax_emb2 = self.forward_one(x2, tax_emb2)
+        return z1, z2, tax_emb1, tax_emb2
 
 def _build_bt_projector(in_dim, proj_dim=768, n_layers=3, dropout=0.0):
     """

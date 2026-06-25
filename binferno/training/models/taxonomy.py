@@ -12,7 +12,7 @@ class TaxonomyHead(nn.Module):
         super().__init__()
         self.tree = Hierarchy(np.asarray(table_parent))
         self.n_leaf = int(self.tree.leaf_mask().sum())
-        self.n_nodes = self.tree.num_nodes()
+        self.n_nodes = len(table_parent)  # number of nodes in the tree, including internal nodes and leaves
         self.tax_nodes = tax_nodes            # optional: index -> name, for readout
         self.node_indices = node_indices      # optional: name  -> index
  
@@ -27,8 +27,8 @@ class TaxonomyHead(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(hidden, self.n_leaf),   # logits over leaves
         )
-        self.loss_fn = FlatSoftmaxNLL(self.tree)
-        self.sum_leaf = SumLeafDescendants(self.tree, strict=False)
+        self.loss_fn = FlatSoftmaxNLL(np.asarray(table_parent))
+        self.sum_leaf = SumLeafDescendants(Hierarchy(np.asarray(table_parent)), strict=False)
  
     def forward(self, 
         fused: torch.Tensor,  # [B, in_dim]

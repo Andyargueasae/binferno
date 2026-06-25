@@ -111,8 +111,6 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
             tax_nodes, tax_node_indices, parental_array, contig_taxonomy_df = (
                 self.taxonomy(
                     contigs=contigs,
-                    taxonomy=contigs,  # assuming the taxonomy information is provided in the contigs file for now, can be changed to a separate file in the future.
-                    output_dir=output_dir,
                     logger=logger,
                 )
             )

@@ -30,7 +30,6 @@ def test_dbscan_clustering() -> None:
     clustering = DbscanClustering()
     logger.bind(test="dbscan_clustering")
     assert True, "This is a placeholder test for dbscan clustering. Implement this test when the function is implemented."
-    return
 
 
 def test_utils_marker_gene_finder():

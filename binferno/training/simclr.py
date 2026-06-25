@@ -16,7 +16,7 @@ from typing import Dict, List, Optional, Tuple
 from torch.cuda.amp import GradScaler, autocast
 
 from ..utils import calc_n50
-from .base import BaseTrainer, TAXONOMY_DF, TAX_NODES, TAX_NODE_INDICES, PARENTAL_ARRAY
+from .base import BaseTrainer, label_augmented_views, TAXONOMY_DF, TAX_NODES, TAX_NODE_INDICES, PARENTAL_ARRAY
 from ..features import BinfernoFeatureBuilder
 from .models.simclr import NeuralNetwork
 from .InfoNCEloss import info_nce_loss, info_nce_loss_hard_weight
@@ -225,67 +225,7 @@ class SimCLRTrainer(BaseTrainer):
         )
 
         return embeddings
-
-    def sort_features_by_method(
-        self,
-        features_df: pd.DataFrame,
-        simclr: bool = False,
-        contig_ids: list = None,
-    ) -> pd.DataFrame:
-        if not contig_ids:
-            raise ValueError(
-                "contig_ids is required for sorting features. Please provide the list of contig names in the "
-                "order they were processed during augmentation."
-            )
-        if not simclr:
-            # sort the features_df by index.
-            features_df = features_df.sort_index()
-            return features_df
-        else:
-            # for simclr, group by view, stack the features of same view together, then concatenate the features.
-            features_df["view"] = (
-                features_df.index.str.rsplit(".", n=1).str[-1].astype(str)
-            )
-            # replace "original" as "0".
-            # features_df["view"] = features_df["view"].replace("original", "0")
-            features_df["view"] = features_df["view"].astype(int)
-
-            features_df = features_df.sort_values(by=["view"], ascending=True)
-            for i, view in enumerate(features_df["view"].unique()):
-                view_df = features_df[features_df["view"] == view]
-                # reindex view_df to make sure the order of features is the same across views.
-                view_df.index = [ind.rsplit(".", 1)[0] for ind in view_df.index]
-                view_df = view_df.reindex(
-                    contig_ids
-                )  # reindexing to ensure the same order of contigs across views
-                view_df.index = [
-                    f"{idx}.{view}" for idx in view_df.index
-                ]  # restore the original index format after reindexing
-                if i == 0:
-                    sorted_features_df = view_df
-                else:
-                    sorted_features_df = pd.concat(
-                        [sorted_features_df, view_df], axis=0
-                    )
-            # for each view, make sure to sort the features by index.
-            features_df = sorted_features_df.drop(columns=["view"])
-            return features_df
-    def label_augmented_views(self, taxonomy_df: pd.DataFrame, augmented_indices: list) -> pd.DataFrame:
-        """
-        This function is to label the augmented views with the same taxonomy label as the original contig.
-        """
-        tax_df = taxonomy_df.copy().set_index(taxonomy_df["contig_id"])
-        contig_to_taxonomy = dict(zip(tax_df.index, tax_df.values))
-        # create a new dataframe to store the taxonomy labels for the augmented views.
-        augmented_taxonomy_df = pd.DataFrame(index=augmented_indices, columns=tax_df.columns)
-        for index in augmented_indices:
-            contig_name = index.rsplit(".", 1)[0]
-            if contig_name in contig_to_taxonomy:
-                augmented_taxonomy_df.loc[index] = contig_to_taxonomy[contig_name]
-            else:
-                raise ValueError(f"Contig name {contig_name} not found in taxonomy dataframe.")
-        return augmented_taxonomy_df # ensure the index order matches the order of the features dataframe after sorting by method.
-
+    
     def prepare_trainer(
         self,
         data_df,
@@ -342,10 +282,17 @@ class SimCLRTrainer(BaseTrainer):
                 )
             elif isinstance(taxonomy_features, dict):
                 # if the dict is given, the taxonomy is only for the original contigs, and the same taxonomy label is assigned to all augmented views of the same contig.
-                taxonomy_labels = self.label_augmented_views(taxonomy_features[TAXONOMY_DF], data_df.index.tolist())
+                taxonomy_labels = label_augmented_views(taxonomy_features[TAXONOMY_DF],
+                    data_df.index.tolist(),
+                    node_indices = taxonomy_features[TAX_NODE_INDICES],)
+                taxonomy_labels = self.sort_features_by_method(
+                    taxonomy_labels,
+                    contig_ids=namelist,
+                    simclr=True,
+                )
                 tax_label_dataset = list(
-                    torch.split(torch.from_numpy(taxonomy_labels.values).long(), len(namelist))
-                ) # should also be the same size at axis=0 as dataset.
+                    torch.split(torch.from_numpy(taxonomy_labels.values.astype(float)).float(), len(namelist))
+                )
                 train_dataset = torch.utils.data.TensorDataset(
                     *[
                         dataset[i][
@@ -360,7 +307,7 @@ class SimCLRTrainer(BaseTrainer):
                             >= contig_length
                         ]
                         for i in range(len(tax_label_dataset))
-                    ]
+                    ],
                 ) # match tax label to exact view's exact features. 
                 
         else:
@@ -539,10 +486,12 @@ class SimCLRTrainer(BaseTrainer):
             raise ValueError("n_cov must be non-negative.")
 
         for i, features in enumerate(dataloader):
-            contig_features = torch.cat(features, dim=0).to(device, non_blocking=True)
+            contig_features, tax_features = features[:self.view_num], features[self.view_num:]
+            contig_features = torch.cat(contig_features, dim=0).to(device, non_blocking=True)
+            tax_features = torch.cat(tax_features, dim=0).to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
             actual_batch_size = contig_features.shape[0] // self.view_num
-            enc_feature, cov_emb, tax_emb = model(contig_features, tax_emb=None) # tax_emb is not used for simclr.
+            enc_feature, cov_emb, tax_emb = model(contig_features, tax_emb=tax_features) # tax_emb is not used for simclr.
             loss, batch_acc, _ = info_nceloss_fn(
                 enc_feature,
                 batch_size=actual_batch_size,

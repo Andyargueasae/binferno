@@ -4,12 +4,11 @@ import os
 from collections import OrderedDict
 from pathlib import Path
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 from pydantic import Field
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch import Tensor as _Tensor
 from torch.utils.data import DataLoader, TensorDataset
 from torch.backends import cudnn
 import torch.nn.functional as F
@@ -22,7 +21,7 @@ import loguru
 
 from .models.barlow_twins import NeuralNetwork
 from ..features import BinfernoFeatureBuilder
-from .base import BaseTrainer, TAXONOMY_DF, TAX_NODES, TAX_NODE_INDICES, PARENTAL_ARRAY
+from .base import BaseTrainer, label_augmented_views, TAXONOMY_DF, TAX_NODES, TAX_NODE_INDICES, PARENTAL_ARRAY
 
 
 class BarlowTwinsTrainer(BaseTrainer):
@@ -60,6 +59,10 @@ class BarlowTwinsTrainer(BaseTrainer):
     proj_head_dim: int = Field(
         default=512,
         description="Dimension of the projection head used in the Barlow Twins architecture. The projection head is a small neural network that maps the output of the main encoder to a space where the Barlow Twins loss is applied. A larger proj_head_dim can allow for more complex transformations and potentially better performance, but it also increases the number of parameters and computational cost of the model.",
+    )
+    l_tax: float = Field(
+        default=0.3,
+        description="Weight for the taxonomy loss in the overall loss function. This parameter controls the influence of the taxonomy loss on the training process. A higher value increases the importance of taxonomy information, while a lower value reduces its impact.",
     )
 
     def __call__(
@@ -375,7 +378,11 @@ class BarlowTwinsTrainer(BaseTrainer):
             if isinstance(self.taxonomy_features, pd.DataFrame):
                 tax_X = self.taxonomy_features.to_numpy(dtype=np.float32, copy=False)
             elif isinstance(self.taxonomy_features, dict):
-                tax_X = self.taxonomy_features[TAXONOMY_DF].to_numpy(dtype=np.float32, copy=False)
+                tax_X = label_augmented_views(self.taxonomy_features[TAXONOMY_DF], 
+                    self.data_df.index.tolist(),
+                    node_indices=self.taxonomy_features[TAX_NODE_INDICES],
+                )
+                tax_X = tax_X.to_numpy(dtype=np.float32, copy=False)
             else:
                 tax_X = None
 
@@ -545,7 +552,7 @@ class BarlowTwinsTrainer(BaseTrainer):
 
                 optimizer.zero_grad(set_to_none=True)
 
-                output1, output2 = model(
+                output1, output2, tax_enc1, tax_enc2 = model(
                     features1, features2, tax_1, tax_2
                 )
             except ValueError:  # this is for the case when taxonomy features are not provided, and the model is designed to ignore them.
@@ -555,7 +562,7 @@ class BarlowTwinsTrainer(BaseTrainer):
 
                 optimizer.zero_grad(set_to_none=True)
 
-                output1, output2 = model(
+                output1, output2, tax_enc1, tax_enc2 = model(
                     features1, features2, None, None
                 )
             last_batch = batch_i == len(dataloader) - 1

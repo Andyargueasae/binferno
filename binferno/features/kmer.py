@@ -1,6 +1,4 @@
-from itertools import product
 import itertools
-import os
 
 from typing import Tuple, List
 import pandas as pd
@@ -126,6 +124,5 @@ class KmerFeatureBuilder(BaseFeatureBuilder):
             fragments, kmer_len=self.kmer_len, pseudocount=self.pseudocount
         )
         return kmer_df
-
 
 # ======= Multisample kmer features. =======

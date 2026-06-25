@@ -187,7 +187,6 @@ class BaseTrainer(BaseModel):
                     clean_header = header.replace(suffix, "")
                     embeddings[clean_header] = batch_embeddings[j].cpu().numpy()
 
-                    # Save encoder embeddings if requested
                     if save_individual_embs:
                         if taxonomy_features is not None:
                             kmer_emb, cov_emb, tax_emb = model.get_separate_modality_embs(
@@ -297,3 +296,25 @@ class BaseTrainer(BaseModel):
 
             loss = self.lambda_tax * (loss_same + loss_diff)
             return loss
+        
+def label_augmented_views(
+    taxonomy_df: pd.DataFrame, 
+    augmented_indices: list,
+    node_indices: dict = None) -> pd.DataFrame:
+    """
+    This function is to label the augmented views with the same taxonomy label as the original contig.
+    """
+    tax_df = taxonomy_df.copy().set_index(taxonomy_df["contig_id"])
+    # Select only numeric columns to avoid object dtype issues
+    numeric_cols = tax_df.select_dtypes(include=[np.number]).columns.tolist()
+    tax_df = tax_df[numeric_cols]
+    contig_to_taxonomy = dict(zip(tax_df.index, tax_df.values))
+    # create a new dataframe to store the taxonomy labels for the augmented views.
+    augmented_taxonomy_df = pd.DataFrame(index=augmented_indices, columns=tax_df.columns)
+    for index in augmented_indices:
+        contig_name = index.rsplit(".", 1)[0]
+        if contig_name in contig_to_taxonomy:
+            augmented_taxonomy_df.loc[index] = contig_to_taxonomy[contig_name]
+        else:
+            augmented_taxonomy_df.loc[index] = np.full(len(numeric_cols), node_indices.get("unclassified", -1))  # assign -1 for unknown contigs
+    return augmented_taxonomy_df.astype(float) # ensure the index order matches the order of the features dataframe after sorting by method.

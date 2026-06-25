@@ -8,7 +8,7 @@ from typing import List
 
 from .base import BaseFeatureBuilder
 
-TAXONOMY_HEADER = ["contig_id", "taxonomy_string"]
+TAXONOMY_HEADER = ["contigs", "predictions"]
 
 
 class TaxonomyFeatureBuilder(BaseFeatureBuilder):
@@ -24,19 +24,26 @@ class TaxonomyFeatureBuilder(BaseFeatureBuilder):
         description="Path to a TSV file containing taxonomic classifications for each contig. Columns: contig_id, taxonomy_string.",
     )
 
-    def __call__(self, contigs: List, logger: loguru._logger.Logger) -> pd.DataFrame:
+    def __call__(self, contigs: Path, logger: loguru._logger.Logger) -> pd.DataFrame:
         """
         Constructs a taxonomy graph and returns it as a DataFrame.
 
         Parameters:
-        - contigs: A list containing contig information, including taxonomic classifications.
+        - contigs: A Path object pointing to the contig file.
+        - logger: A loguru logger for logging information.
 
         Returns:
         - A DataFrame representing the taxonomy graph.
         """
         taxonomy_df = pd.read_csv(self.taxonomy, sep="\t", header=0)
         # filter the contigs by contigs list.
-        taxonomy_df = taxonomy_df[taxonomy_df["contig_id"].isin(contigs)]
+        contig_ids = set()
+        with open(contigs, "r") as f:
+            for line in f:
+                if line.startswith(">"):
+                    contig_id = line[1:].strip().split()[0]
+                    contig_ids.add(contig_id)
+        taxonomy_df = taxonomy_df[taxonomy_df["contigs"].isin(contig_ids)]
         tax_nodes, tax_node_indices, parental_array = self._construct_taxonomy_graph(
             logger, taxonomy_df
         )
@@ -44,7 +51,7 @@ class TaxonomyFeatureBuilder(BaseFeatureBuilder):
         # assign the node index per contig for the finest taxonomy level.
         contig_to_tax_node = {}
         for _, row in taxonomy_df.iterrows():
-            contig_id, taxonomy_str = row["contig_id"], row["taxonomy_string"]
+            contig_id, taxonomy_str = row["contigs"], row["predictions"]
             if not taxonomy_str or taxonomy_str == "unclassified":
                 contig_to_tax_node[contig_id] = tax_node_indices[
                     "root"
@@ -81,13 +88,13 @@ class TaxonomyFeatureBuilder(BaseFeatureBuilder):
         root = "root"
         G.add_node(root)
         for _, row in taxonomy_df.iterrows():
-            contig_id, taxonomy_str = row["contig_id"], row["taxonomy_string"]
+            contig_id, taxonomy_str = row["contigs"], row["predictions"]
             if not taxonomy_str:
                 continue
             taxonomy_levels = taxonomy_str.split(
                 ";"
             )  # assume in "domain;phylum;class;order;family;genus;species" format, by having --tax-lineage 1 in mmseqs2.
-            G.add_node(root, taxonomy_levels[0])  # add the domain as a child of root.
+            G.add_edge(root, taxonomy_levels[0])
             for i in range(1, len(taxonomy_levels)):
                 parent_taxon = taxonomy_levels[i - 1]
                 child_taxon = taxonomy_levels[i]
