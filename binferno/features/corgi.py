@@ -63,14 +63,74 @@ def run_corgi(
     from corgi import Corgi
 
     corgi = Corgi()
+    # Older bio-corgi versions may ignore `embeddings=` and only support CSV outputs.
+    # Always request CSV and backfill embedding/index files from it when needed.
+    output_csv_path = Path(output_csv) if output_csv else None
+    if output_csv_path is None and embedding:
+        output_csv_path = Path(embedding).with_suffix(".csv")
+
     _ = corgi.predict(
         input=str(input_fasta),
-        output_csv=output_csv,
+        output_csv=str(output_csv_path) if output_csv_path else None,
         embeddings=embedding,
         min_length=min_length,
         checkpoint=model_path,
     )
+
+    if embedding:
+        embedding_path = Path(embedding)
+        index_path = embedding_path.with_suffix(".index")
+        if (not embedding_path.exists()) or (not index_path.exists()):
+            if output_csv_path is None or not output_csv_path.exists():
+                raise RuntimeError(
+                    "Corgi did not generate embeddings/index files and no fallback CSV was produced. "
+                    "Please provide a bio-corgi version with embedding export support."
+                )
+            _create_embedding_files_from_csv(output_csv_path, embedding_path, index_path)
+
+    # remove the csv file. we don't need it anymore.
+    if output_csv_path and output_csv_path.exists():
+        output_csv_path.unlink()
     return
+
+
+def _create_embedding_files_from_csv(
+    csv_path: Path, embedding_path: Path, index_path: Path
+) -> None:
+    df = pd.read_csv(csv_path)
+    required_cols = {"file", "original_id"}
+    missing_required = required_cols - set(df.columns)
+    if missing_required:
+        raise RuntimeError(
+            f"Corgi fallback failed: missing required columns {sorted(missing_required)} in '{csv_path}'."
+        )
+
+    meta_cols = {
+        "file",
+        "accession",
+        "prediction",
+        "probability",
+        "original_id",
+        "description",
+    }
+    feature_cols = [
+        col
+        for col in df.columns
+        if col not in meta_cols and pd.api.types.is_numeric_dtype(df[col])
+    ]
+    if not feature_cols:
+        raise RuntimeError(
+            f"Corgi fallback failed: no numeric feature columns found in '{csv_path}'."
+        )
+
+    embedding_path.parent.mkdir(parents=True, exist_ok=True)
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+
+    embeddings = df[feature_cols].to_numpy(dtype=np.float16, copy=False)
+    embeddings.tofile(embedding_path)
+
+    index_lines = [f"{f}\t{oid}" for f, oid in zip(df["file"], df["original_id"])]
+    index_path.write_text("\n".join(index_lines) + "\n")
 
 
 class CorgiFeatureBuilder(BaseFeatureBuilder):

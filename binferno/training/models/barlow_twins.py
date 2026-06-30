@@ -35,9 +35,9 @@ class NeuralNetwork(nn.Module):
                     dropout=dropout,
                 )
             else:
-                tax_emb_dim += tnf_dim + coverage_dim
+                self.tax_emb_dim += tnf_dim + coverage_dim
                 self.taxonomy_encoder = TaxonomyFusion(
-                    in_dim=tax_emb_dim,
+                    in_dim=self.tax_emb_dim,
                     latent_dim=self.LATENT_DIM,
                     table_parent=parental_array,
                     tax_nodes=tax_nodes,
@@ -67,11 +67,18 @@ class NeuralNetwork(nn.Module):
         )
         self.final_cov_dim = output_dim
 
+        fusion_tax_dim = 0
+        if self.hierarchical_taxonomy:
+            fusion_tax_dim = self.LATENT_DIM
+        elif self.tax_emb_dim > 0:
+            fusion_tax_dim = output_dim
+        
+
         self.fusion_network = AttentionFusion(
             emb_dim=output_dim,
             kmer_enc_dim=output_dim,  # modality 1
             coverage_dim=self.final_cov_dim,  # modality 2
-            tax_emb_dim=tax_emb_dim,  # modality 3
+            tax_emb_dim=fusion_tax_dim,  # modality 3
         )
 
         self.representation_dim = output_dim
@@ -91,10 +98,12 @@ class NeuralNetwork(nn.Module):
         cov_encode = self.coverage_encoder(cov_features)
         if (tax_emb is not None): 
             if self.hierarchical_taxonomy:
-                tax_emb = torch.cat([tnf_encode, cov_encode, tax_emb], dim=1)
+                tax_emb = torch.cat([tnf_features, cov_features, tax_emb], dim=1)
             else:
                 pass
             tax_encode = self.taxonomy_encoder(tax_emb)
+            if isinstance(tax_encode, dict):
+                tax_encode = tax_encode["latent"]
             fused_encode = self.fusion_network(tnf_encode, cov_encode, tax_feature=tax_encode)  # 128
             return fused_encode, tax_encode
         else:
@@ -109,13 +118,14 @@ class NeuralNetwork(nn.Module):
         kmer_encoded = self.tnf_encoder(kmer_features)
         coverage_features = x[:, self.tnf_dim :]
         coverage_encoded = self.coverage_encoder(coverage_features)
-        if tax_emb is not None and not self.hierarchical_taxonomy:
+        if tax_emb is not None:
             if not self.hierarchical_taxonomy:
                 tax_encoded = self.taxonomy_encoder(tax_emb)
                 return kmer_encoded, coverage_encoded, tax_encoded
             else:
-                tax_logits = self.taxonomy_encoder(tax_emb)
-                return kmer_encoded, coverage_encoded, tax_logits # how does logits offer embeddings?
+                tax_emb = torch.cat([kmer_features, coverage_features, tax_emb], dim=1)
+                tax_latents = self.taxonomy_encoder(tax_emb)['latent']
+                return kmer_encoded, coverage_encoded, tax_latents
         return kmer_encoded, coverage_encoded
 
     def forward_one(self, x: torch.Tensor, tax_emb: torch.Tensor = None):
@@ -186,6 +196,7 @@ class AttentionFusion(nn.Module):
     FINAL_FUSION_HIDDEN_MULTIPLIER = 2
     RESIDUAL_WEIGHT_INIT = 0.5
     ADAPTIVE_DROPOUT_MAX_MULTIPLIER = 2.0
+    TOKEN_TYPE_IDS=2
 
     def __init__(
         self,
@@ -213,6 +224,18 @@ class AttentionFusion(nn.Module):
             batch_first=True,
         )
 
+        if self.tax_emb_dim > 0:
+            self.GATE_INPUT_MULTIPLIER += 1 # add one more for taxonomy features in the gating mechanism.
+            self.tax_emb_proj = nn.Linear(self.tax_emb_dim, self.emb_dim)
+            self.taxonomy_gate = nn.Sequential(
+                nn.Linear(self.emb_dim * self.GATE_INPUT_MULTIPLIER, self.emb_dim),
+                nn.Sigmoid(),
+            )
+            self.FINAL_FUSION_INPUT_MULTIPLIER += 1  # add one more for taxonomy features in the final fusion.
+            self.MULTI_SCALE_CONCAT_MULTIPLIER += 3 # add three more for taxonomy features in the multi-scale fusion (three scales).
+            self.TOKEN_TYPE_IDS += 1 # add one more for taxonomy features in the token type embedding.
+            
+
         self.kmer_gate = nn.Sequential(
             nn.Linear(self.emb_dim * self.GATE_INPUT_MULTIPLIER, self.emb_dim),
             nn.Sigmoid(),
@@ -221,15 +244,7 @@ class AttentionFusion(nn.Module):
             nn.Linear(self.emb_dim * self.GATE_INPUT_MULTIPLIER, self.emb_dim),
             nn.Sigmoid(),
         )
-        if self.tax_emb_dim > 0:
-            self.tax_emb_proj = nn.Linear(self.tax_emb_dim, self.emb_dim)
-            self.taxonomy_gate = nn.Sequential(
-                nn.Linear(self.emb_dim * self.GATE_INPUT_MULTIPLIER, self.emb_dim),
-                nn.Sigmoid(),
-            )
-            self.FINAL_FUSION_INPUT_MULTIPLIER += 1  # add one more for taxonomy features in the final fusion.
-            self.MULTI_SCALE_CONCAT_MULTIPLIER += 3 # add three more for taxonomy features in the multi-scale fusion (three scales).
-
+    
         self.fused_proj = nn.Sequential(
             nn.Linear(
                 self.emb_dim * self.FINAL_FUSION_INPUT_MULTIPLIER,
@@ -286,7 +301,8 @@ class AttentionFusion(nn.Module):
             nn.ReLU(),
             nn.Linear(emb_dim * self.INTERACTION_INTERMEDIATE_MULTIPLIER, emb_dim),
         )
-        self.token_type_emb = nn.Embedding(2, emb_dim)  # 0=kmer, 1=coverage
+        
+        self.token_type_emb = nn.Embedding(self.TOKEN_TYPE_IDS, emb_dim)  # 0=kmer, 1=coverage
 
     def forward(self, 
         tnf_feature: torch.Tensor, 
@@ -310,18 +326,19 @@ class AttentionFusion(nn.Module):
 
         kmer_attended = attended[:, 0, :]  # ( batch_size, emb_dim)
         cov_attended = attended[:, 1, :]  # ( batch_size, emb_dim)
-        if tax_feature is not None:
+        if tax_feature is not None and self.tax_emb_dim > 0:
             tax_attended = attended[:, 2, :]  # ( batch_size, emb_dim)
 
         attended_feature = kmer_attended + cov_attended  # ( batch_size, emb_dim)
-        if tax_feature is not None:
+        if tax_feature is not None and self.tax_emb_dim > 0:
             attended_feature += tax_attended # ( batch_size, emb_dim)
 
         kmer_emb = kmer_emb.squeeze(1)
         cov_emb = cov_emb.squeeze(1)
         gated_features = [kmer_emb, cov_emb]
         if tax_feature is not None and self.tax_emb_dim > 0:
-            gated_features.append(tax_emb.squeeze(1))
+            tax_emb = tax_emb.squeeze(1)
+            gated_features.append(tax_emb)
 
         kmer_gate_weight = self.kmer_gate(torch.cat(gated_features, dim=1))
         coverage_gate_weight = self.coverage_gate(torch.cat(gated_features, dim=1))
@@ -351,7 +368,6 @@ class AttentionFusion(nn.Module):
         )
         if tax_feature is not None and self.tax_emb_dim > 0:
             tax_gate_weight = self.taxonomy_gate(torch.cat(gated_features, dim=1))
-            tax_attended = tax_attended.squeeze(1)
             gated_tax = (
                 tax_gate_weight * tax_emb + (1 - tax_gate_weight) * tax_attended
             )

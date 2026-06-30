@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from loguru._logger import Logger
+import rich.progress as progress
 
 from ..features import BinfernoFeatureBuilder
 
@@ -135,7 +136,7 @@ class BaseTrainer(BaseModel):
         self,
         model: nn.Module,
         data_df: pd.DataFrame,
-        taxonomy_features: pd.DataFrame,
+        taxonomy_df: pd.DataFrame,
         output_path: Path = None,
         batch_size: int = 1024,
         save_individual_embs: bool =False,
@@ -163,24 +164,28 @@ class BaseTrainer(BaseModel):
             orig_contigs = data_df[data_df.index.str.endswith(".0")].copy()
             suffix = ".0"
         
-        if taxonomy_features is not None:
-            taxonomy_features = taxonomy_features[taxonomy_features.index.str.endswith(suffix)].copy()
+        if taxonomy_df is not None:
+            if model.hierarchical_taxonomy:
+                tax_index = [ind.split(".", 1)[0] for ind in orig_contigs.index]
+                taxonomy_df = taxonomy_df.loc[tax_index].copy()
+            else:
+                taxonomy_df = taxonomy_df.loc[orig_contigs.index].copy()
 
+        assert taxonomy_df.shape[0] == orig_contigs.shape[0], "Mismatch in number of rows between taxonomy_df and orig_contigs."
         with torch.no_grad():
-            for i in range(0, len(orig_contigs), batch_size):
+            for i in progress.track(range(0, len(orig_contigs), batch_size), description="Processing batches"):
                 batch_encode = orig_contigs.iloc[i : i + batch_size]
                 batch_features = torch.tensor(
                     batch_encode.values, dtype=torch.float32
                 ).to(device)
 
-                if taxonomy_features is not None:
-                    batch_taxonomy = taxonomy_features.iloc[i : i + batch_size]
+                if taxonomy_df is not None:
+                    batch_taxonomy = taxonomy_df.iloc[i : i + batch_size]
                     batch_taxonomy = torch.tensor(
                         batch_taxonomy.values, dtype=torch.float32
                     ).to(device)
                 else:
                     batch_taxonomy = None
-
                 batch_embeddings = model.get_embedding(batch_features, batch_taxonomy)
                 batch_embeddings = F.normalize(batch_embeddings, p=2, dim=1)
                 for j, header in enumerate(batch_encode.index):
@@ -188,7 +193,7 @@ class BaseTrainer(BaseModel):
                     embeddings[clean_header] = batch_embeddings[j].cpu().numpy()
 
                     if save_individual_embs:
-                        if taxonomy_features is not None:
+                        if taxonomy_df is not None:
                             kmer_emb, cov_emb, tax_emb = model.get_separate_modality_embs(
                                 batch_features, batch_taxonomy
                             )
@@ -218,7 +223,7 @@ class BaseTrainer(BaseModel):
 
             kmer_emb_df.to_csv(kmer_embeddings, sep="\t")
             cov_emb_df.to_csv(coverage_embeddings, sep="\t")
-            if taxonomy_features is not None:
+            if taxonomy_df is not None:
                 tax_embeddings = os.path.join(
                     os.path.dirname(output_path), "tax_embeddings.tsv"
                 )

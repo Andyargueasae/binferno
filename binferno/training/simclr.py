@@ -13,7 +13,7 @@ import pyfastx
 import loguru
 import pandas as pd
 from typing import Dict, List, Optional, Tuple
-from torch.cuda.amp import GradScaler, autocast
+# from torch.cuda.amp import GradScaler, autocast
 
 from ..utils import calc_n50
 from .base import BaseTrainer, label_augmented_views, TAXONOMY_DF, TAX_NODES, TAX_NODE_INDICES, PARENTAL_ARRAY
@@ -209,10 +209,15 @@ class SimCLRTrainer(BaseTrainer):
                 temperature=temperature,
             )
 
+        if isinstance(taxonomy_features, pd.DataFrame):
+            taxonomy_df = taxonomy_features.loc[canonical_feature_df.index]
+        else:
+            taxonomy_df = taxonomy_features[TAXONOMY_DF].set_index("contig_id")
+
         embeddings = self.get_embeddings(
             model=model,
             data_df=canonical_feature_df,
-            taxonomy_features=taxonomy_features,
+            taxonomy_df=taxonomy_df,
             output_path=embedding_path,
             batch_size=self.batch_size,
             save_individual_embs=self.get_individual_embs,

@@ -183,7 +183,7 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
 
             canonical_features = pd.concat([canonical_features, coverage_df], axis=1)
 
-        if taxonomy_features:
+        if taxonomy_features is not None:
             with open(output_dir / "taxonomy_features.pkl", "wb") as f:
                 pickle.dump(taxonomy_features, f)
         

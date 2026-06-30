@@ -58,6 +58,7 @@ class NeuralNetwork(nn.Module):
             else:
                 # hierarchical taxonomy.
                 tax_emb_dim += tnf_dim + coverage_dim
+                self.tnf_enc_dim += self.LATENT_DIM
                 self.taxonomy_encoder = TaxonomyFusion(
                     in_dim=tax_emb_dim,
                     latent_dim=self.LATENT_DIM,
@@ -106,21 +107,22 @@ class NeuralNetwork(nn.Module):
         tnf_features = x[:, : self.tnf_dim]
         cov_features = x[:, self.tnf_dim : self.tnf_dim + self.coverage_dim]
 
-        # taxonomy embedding encoding if provided. 
+        # taxonomy embedding encoding if provided.
+        tax_encode = None 
         if (not tax_emb is None): 
             if (not self.hierarchical_taxonomy):
                 tax_encode = self.taxonomy_encoder(tax_emb)
                 tnf_features = torch.cat([tnf_features, F.normalize(tax_encode, dim=-1)], dim=-1)
             else:
                 fused_emb = torch.cat([tnf_features, cov_features, tax_emb], dim=1)
-                tax_encode = self.taxonomy_encoder(fused_emb)
+                tax_encode = self.taxonomy_encoder(fused_emb)['latent']
                 tnf_features = torch.cat([tnf_features, F.normalize(tax_encode, dim=-1)], dim=-1)
 
         cov_encode = self.coverage_encoder(cov_features)  # not normalized anymore.
         fused_encode = self.tnf_encoder(
             torch.cat([tnf_features, F.normalize(cov_encode, dim=-1)], dim=-1)
         )
-        return fused_encode, cov_encode
+        return fused_encode, cov_encode, tax_encode
 
     def get_embedding(
         self, 
@@ -128,17 +130,23 @@ class NeuralNetwork(nn.Module):
         tax_emb: torch.Tensor = None
     ):
         return self._encode(x, tax_emb)[0]
+    
+    def get_separate_modality_embs(self, x: torch.Tensor, tax_emb: torch.Tensor = None):
+        fused_enc, cov_enc, tax_enc = self._encode(x, tax_emb)
+        if tax_enc is None:
+            return fused_enc, cov_enc
+        return fused_enc, cov_enc, tax_enc
 
     def forward(
         self, 
         x: torch.Tensor, 
         tax_emb: torch.Tensor = None
     ):
-        fused_emb, cov_emb = self._encode(x, tax_emb)
+        fused_enc, cov_enc, tax_enc = self._encode(x, tax_emb)
         if self.proj:
-            proj_emb = self.proj_head(fused_emb)
-            return proj_emb, cov_emb
-        return fused_emb, cov_emb
+            proj_emb = self.proj_head(fused_enc)
+            return proj_emb, cov_enc, tax_enc
+        return fused_enc, cov_enc, tax_enc
 
 def _build_coverage_encoder(
     coverage_dim: int,

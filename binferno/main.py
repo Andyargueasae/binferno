@@ -19,11 +19,11 @@ def binferno(
             help="Path to the input contigs in fasta format.",
         ),
     ],
-    bam: Annotated[
+    bam_dir: Annotated[
         Path,
         tyro.conf.arg(
-            name="bam",
-            metavar="BAM",
+            name="bam_dir",
+            metavar="BAM_DIR",
             help="Path to the input directory of BAM files, must be paired with contigs. Used for calculating coverage mean and std.",
         ),
     ],
@@ -62,7 +62,7 @@ def binferno(
 
     embeddings = training(
         contigs=contigs,
-        bam=bam,
+        bam=bam_dir,
         output_dir=output_dir,
         features=features,
         threads=threads,

@@ -192,10 +192,16 @@ class BarlowTwinsTrainer(BaseTrainer):
             orig_df = feature_df[feature_df.index.str.endswith(".original")]
             namelist = [index.rsplit(".", 1)[0] for index in orig_df.index]
             # incorporate taxonomy features, split to 2 situations.
+
+            if isinstance(taxonomy_features, pd.DataFrame):
+                taxonomy_df = taxonomy_features.loc[orig_df.index]
+            else:
+                taxonomy_df = taxonomy_features[TAXONOMY_DF].set_index("contig_id")
+
             embeddings = self.get_embeddings(
                 model=model,
                 data_df=feature_df,
-                taxonomy_features=taxonomy_features,
+                taxonomy_df=taxonomy_df,
                 output_path=embedding_path,
                 batch_size=self.batch_size,
                 save_individual_embs=self.get_individual_embs,
@@ -549,6 +555,8 @@ class BarlowTwinsTrainer(BaseTrainer):
                 # another question comes: two positive pairs should have same taxonomy. 
                 features1 = features1.to(device, non_blocking=True)
                 features2 = features2.to(device, non_blocking=True)
+                tax_1 = tax_1.to(device, non_blocking=True)
+                tax_2 = tax_2.to(device, non_blocking=True)
 
                 optimizer.zero_grad(set_to_none=True)
 
@@ -650,10 +658,6 @@ class BarlowTwinsTrainer(BaseTrainer):
                 max_overlap=max_overlap,
             )
             fragments.extend(generated)
-
-            # print(
-            #     f"Generated {len(fragments)} fragments for {header} (length {seq_len})"
-            # )
 
         return fragments
 
