@@ -5,6 +5,7 @@ from collections import OrderedDict
 
 import torch
 import torch.nn.functional as F
+from torch.utils.data import TensorDataset, DataLoader
 import numpy as np
 from tqdm import tqdm
 from torch.backends import cudnn
@@ -16,18 +17,19 @@ from typing import Dict, List, Optional, Tuple
 # from torch.cuda.amp import GradScaler, autocast
 
 from ..utils import calc_n50
-from .base import BaseTrainer, label_augmented_views, TAXONOMY_DF, TAX_NODES, TAX_NODE_INDICES, PARENTAL_ARRAY
 from ..features import BinfernoFeatureBuilder
 from .models.simclr import NeuralNetwork
 from .InfoNCEloss import info_nce_loss, info_nce_loss_hard_weight
+from .base import (
+    BaseTrainer, 
+    label_augmented_views, build_targets_and_mask, 
+    TAXONOMY_DF, TAX_NODES, TAX_NODE_INDICES, PARENTAL_ARRAY
+)
+
 
 KMER_DIM = 136
 
 class SimCLRTrainer(BaseTrainer):
-    proj: bool = Field(
-        default=False,
-        description="Whether to use a projection head in the NeuralNetwork architecture.",
-    )
     learning_rate: float = Field(
         default=1e-3, description="Learning rate for training."
     )
@@ -52,7 +54,7 @@ class SimCLRTrainer(BaseTrainer):
         "If the N50 is greater than 10,000, the temperature is set to 0.07; otherwise, it is set to 0.15.",
     )
     max_lr_epochs: int = Field(
-        default=10,
+        default=0,
         description="Number of epochs to wait before resuming learning rate scheduling after reaching the maximum learning rate.",
     )
     hard_weighted_nce: bool = Field(
@@ -125,7 +127,6 @@ class SimCLRTrainer(BaseTrainer):
             threads=threads,
             logger=logger,
             output_dir=output_aug_dir,
-            max_norm_stacked=True,
         )
 
         features, kmer_dim = feature_result
@@ -148,11 +149,11 @@ class SimCLRTrainer(BaseTrainer):
         cov_dim = sum([1 for col in canonical_feature_df.columns if "cov" in col])
         kmer_dim = kmer_dim if kmer_dim != KMER_DIM else KMER_DIM
         
+        hierarchical_taxonomy = False
         if taxonomy_features is None:
             taxonomy_dim = 0
         elif isinstance(taxonomy_features, pd.DataFrame):
             taxonomy_dim = taxonomy_features.shape[1]
-            hierarchical_taxonomy = False
         elif isinstance(taxonomy_features, dict):
             taxonomy_dim = 1 # one integer for each contig representing label.
             hierarchical_taxonomy = True
@@ -167,7 +168,6 @@ class SimCLRTrainer(BaseTrainer):
             coverage_dim=cov_dim,
             output_dim=self.output_dim,
             tax_emb_dim=taxonomy_dim,
-            proj=self.proj,
             hidden_dim=self.hidden_dim,
             hierarchical_taxonomy=hierarchical_taxonomy,
             tax_nodes=tax_nodes if hierarchical_taxonomy else None,
@@ -203,6 +203,7 @@ class SimCLRTrainer(BaseTrainer):
                 device=device,
                 method="simclr",
                 model=model,
+                epochs=self.epochs,
                 logger=logger,
                 n_cov=cov_dim,
                 output_dir=output_train_dir,
@@ -211,8 +212,10 @@ class SimCLRTrainer(BaseTrainer):
 
         if isinstance(taxonomy_features, pd.DataFrame):
             taxonomy_df = taxonomy_features.loc[canonical_feature_df.index]
-        else:
+        elif isinstance(taxonomy_features, dict):
             taxonomy_df = taxonomy_features[TAXONOMY_DF].set_index("contig_id")
+        else: 
+            taxonomy_df = None
 
         embeddings = self.get_embeddings(
             model=model,
@@ -233,11 +236,10 @@ class SimCLRTrainer(BaseTrainer):
     
     def prepare_trainer(
         self,
-        data_df,
-        model=None,
-        n_views=6,
-        simclrnet=False,
-        contigs=None,
+        model,
+        data_df: pd.DataFrame,
+        n_views: int=6,
+        contigs: Path=None,
         num_workers: int = 4,
         batch_size: int = 1024,
         contig_length: int = 1000,
@@ -250,6 +252,12 @@ class SimCLRTrainer(BaseTrainer):
         dataset = list(
             torch.split(torch.from_numpy(data_df.values).float(), len(namelist))
         )
+        dataset = [
+            dataset[i][
+                np.array([self.length_weight(name) for name in namelist])
+                >= contig_length
+            ] for i in range(n_views)
+        ]
         epochs = self.epochs 
         assert (
             len(dataset) == n_views
@@ -265,58 +273,60 @@ class SimCLRTrainer(BaseTrainer):
         # taxonomy.
         if taxonomy_features is not None:
             if isinstance(taxonomy_features, pd.DataFrame):
-                taxonomy_features = taxonomy_features.reindex(data_df.index) # make sure the taxonomy features are in the same order as the data_df
+                
+                taxonomy_features = taxonomy_features.reindex(data_df.index)
+
                 tax_tensor = list(
                     torch.split(torch.from_numpy(taxonomy_features.values).float(), len(namelist))
                 ) # should have been the same size at axis=0 as dataset.
-                train_dataset = torch.utils.data.TensorDataset(
-                    *[
-                        dataset[i][
-                            np.array([length_weight[name] for name in namelist])
-                            >= contig_length
-                        ]
-                        for i in range(n_views)
-                    ],
-                    *[
-                        tax_tensor[i][
-                            np.array([length_weight[name] for name in namelist])
-                            >= contig_length
-                        ]
-                        for i in range(len(tax_tensor))
-                    ],
+                tax_tensor = [
+                    tax_tensor[i][
+                        np.array([length_weight[name] for name in namelist])
+                        >= contig_length
+                    ] for i in range(n_views)
+                ][:n_views] # make sure the number of views is the same as n_views
+                
+                train_dataset = TensorDataset(
+                    *dataset, *tax_tensor 
                 )
+
             elif isinstance(taxonomy_features, dict):
-                # if the dict is given, the taxonomy is only for the original contigs, and the same taxonomy label is assigned to all augmented views of the same contig.
-                taxonomy_labels = label_augmented_views(taxonomy_features[TAXONOMY_DF],
+                taxonomy_labels = label_augmented_views(
+                    taxonomy_features[TAXONOMY_DF],
                     data_df.index.tolist(),
-                    node_indices = taxonomy_features[TAX_NODE_INDICES],)
+                    node_indices = taxonomy_features[TAX_NODE_INDICES]
+                )
                 taxonomy_labels = self.sort_features_by_method(
                     taxonomy_labels,
                     contig_ids=namelist,
                     simclr=True,
                 )
+
                 tax_label_dataset = list(
                     torch.split(torch.from_numpy(taxonomy_labels.values.astype(float)).float(), len(namelist))
                 )
-                train_dataset = torch.utils.data.TensorDataset(
-                    *[
-                        dataset[i][
-                            np.array([length_weight[name] for name in namelist])
-                            >= contig_length
-                        ]
-                        for i in range(n_views)
-                    ],
-                    *[
-                        tax_label_dataset[i][
-                            np.array([length_weight[name] for name in namelist])
-                            >= contig_length
-                        ]
-                        for i in range(len(tax_label_dataset))
-                    ],
-                ) # match tax label to exact view's exact features. 
+                tax_label_dataset = [
+                    tax_label_dataset[i][
+                        np.array([length_weight[name] for name in namelist])
+                        >= contig_length
+                    ] for i in range(n_views)
+                ]
+
+                target_idx, mask = build_targets_and_mask(
+                    taxonomy_labels,
+                    contig_names=namelist,
+                    contig_taxonomy=taxonomy_features[TAXONOMY_DF].set_index("contig_id").to_dict(orient="index"),
+                    node_indices=taxonomy_features[TAX_NODE_INDICES],
+                )
+                train_dataset = TensorDataset(
+                    *dataset, # view_num
+                    *tax_label_dataset, # view_num
+                    target_idx, # one tensor for the target labels, same length as namelist
+                    mask, # one tensor for the boolean mask, same length as namelist
+                )
                 
         else:
-            train_dataset = torch.utils.data.TensorDataset(
+            train_dataset = TensorDataset(
             *[
                 dataset[i][
                     np.array([length_weight[name] for name in namelist])
@@ -348,44 +358,21 @@ class SimCLRTrainer(BaseTrainer):
                 }
             )
 
-        train_loader = torch.utils.data.DataLoader(**dataloader_kwargs)
+        train_loader = DataLoader(**dataloader_kwargs)
 
-        if simclrnet:
-            optimizer = torch.optim.AdamW(
-                model.parameters(), lr=1e-3, weight_decay=1e-4
-            )
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, T_max=epochs, eta_min=0, last_epoch=-1
-            )
-        else:
-            optimizer = torch.optim.AdamW(
-                model.parameters(), lr=1e-4, weight_decay=0.05, betas=(0.9, 0.95)
-            )
-            scheduler = self.warmup_cosine_scheduler(
-                optimizer,
-                learning_rate=self.learning_rate,
-                min_learning_rate=1e-4,
-                epochs=epochs,
-                warmup=False,
-                max_lr_hold_epochs=self.max_lr_epochs,
-            )
+        optimizer = torch.optim.AdamW(
+            model.parameters(), lr=1e-4, weight_decay=0.05, betas=(0.9, 0.95)
+        )
+        scheduler = self.warmup_cosine_scheduler(
+            optimizer,
+            learning_rate=self.learning_rate,
+            min_learning_rate=1e-4,
+            epochs=epochs,
+            warmup=False,
+            max_lr_hold_epochs=self.max_lr_epochs,
+        )
+
         return train_loader, optimizer, scheduler
-
-    def accuracy(self, output, target, topk=(1,)):
-        """Computes the accuracy over the k top predictions for the specified values of k"""
-        with torch.no_grad():
-            maxk = max(topk)
-            batch_size = target.size(0)
-
-            _, pred = output.topk(maxk, 1, True, True)
-            pred = pred.t()
-            correct = pred.eq(target.view(1, -1).expand_as(pred))
-
-            res = []
-            for k in topk:
-                correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
-                res.append(correct_k.mul_(100.0 / batch_size))
-            return res
 
     def length_weight(self, contig: str):
         seq_obj = pyfastx.Fastx(contig)
@@ -461,8 +448,8 @@ class SimCLRTrainer(BaseTrainer):
                 f"Loaded best model with loss: {best_loss:.4f} and accuracy: {best_acc:.4f}"
             )
 
-            torch.save(model.state_dict(), MODEL_PATH)
-            logger.info(f"Model saved to {MODEL_PATH}")
+        torch.save(model.state_dict(), MODEL_PATH)
+        logger.info(f"Model saved to {MODEL_PATH}")
 
         return model
 
@@ -493,7 +480,10 @@ class SimCLRTrainer(BaseTrainer):
         for i, features in enumerate(dataloader):
             contig_features, tax_features = features[:self.view_num], features[self.view_num:]
             contig_features = torch.cat(contig_features, dim=0).to(device, non_blocking=True)
-            tax_features = torch.cat(tax_features, dim=0).to(device, non_blocking=True)
+            if tax_features:
+                tax_features = torch.cat(tax_features, dim=0).to(device, non_blocking=True)
+            else:
+                tax_features = None
             optimizer.zero_grad(set_to_none=True)
             actual_batch_size = contig_features.shape[0] // self.view_num
             enc_feature, cov_emb, tax_emb = model(contig_features, tax_emb=tax_features) # tax_emb is not used for simclr.

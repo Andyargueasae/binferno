@@ -21,8 +21,11 @@ import loguru
 
 from .models.barlow_twins import NeuralNetwork
 from ..features import BinfernoFeatureBuilder
-from .base import BaseTrainer, label_augmented_views, TAXONOMY_DF, TAX_NODES, TAX_NODE_INDICES, PARENTAL_ARRAY
-
+from .base import (
+    BaseTrainer,
+    label_augmented_views, build_targets_and_mask,
+    TAXONOMY_DF, TAX_NODES, TAX_NODE_INDICES, PARENTAL_ARRAY
+)
 
 class BarlowTwinsTrainer(BaseTrainer):
 
@@ -115,13 +118,14 @@ class BarlowTwinsTrainer(BaseTrainer):
 
         features, kmer_dim = feature_result
         canonical_feature_df, taxonomy_features = features
+        hierarchical_taxonomy = False
+
         if taxonomy_features is None:
             taxonomy_dim = 0
         elif isinstance(taxonomy_features, pd.DataFrame):
             taxonomy_dim = taxonomy_features.shape[1]
-            hierarchical_taxonomy = False
         elif isinstance(taxonomy_features, dict):
-            taxonomy_dim = 1 # an integer for each contig. 
+            taxonomy_dim = 1
             hierarchical_taxonomy = True
 
         if hierarchical_taxonomy:
@@ -296,6 +300,7 @@ class BarlowTwinsTrainer(BaseTrainer):
             self.max_positive_pairs = max_positive_pairs
             self.fragment_contig_ids = list(data_df.index)
             self.taxonomy_features = taxonomy_features
+            self.htax = False
 
             grouped = self._group_fragments_by_contig()
             self.base_name_to_id = {
@@ -389,6 +394,10 @@ class BarlowTwinsTrainer(BaseTrainer):
                     node_indices=self.taxonomy_features[TAX_NODE_INDICES],
                 )
                 tax_X = tax_X.to_numpy(dtype=np.float32, copy=False)
+                node_indices = self.taxonomy_features[TAX_NODE_INDICES]
+                contig_ids = self.data_df.index.tolist()
+                target_idx, mask = build_targets_and_mask(contig_ids, self.taxonomy_features[TAXONOMY_DF], node_indices)
+                self.htax = True
             else:
                 tax_X = None
 
@@ -409,11 +418,14 @@ class BarlowTwinsTrainer(BaseTrainer):
             )
             base_ids = torch.from_numpy(base_ids_np)
             if tax_X is not None:
-                assert not np.isnan(tax_X).any(), "taxonomy_features contains NaN values before TensorDataset construction."
-                assert not np.isinf(tax_X).any(), "taxonomy_features contains Inf values before TensorDataset construction."
                 tax_features1 = torch.from_numpy(tax_X[idx1].copy())
                 tax_features2 = torch.from_numpy(tax_X[idx2].copy())
-                return TensorDataset(features1, features2, tax_features1, tax_features2, base_ids)
+                if not self.htax:
+                    assert not np.isnan(tax_X).any(), "taxonomy_features contains NaN values before TensorDataset construction."
+                    assert not np.isinf(tax_X).any(), "taxonomy_features contains Inf values before TensorDataset construction."
+                    return TensorDataset(features1, features2, tax_features1, tax_features2, base_ids)
+                else:
+                    return TensorDataset(features1, features2, tax_features1, tax_features2, base_ids, target_idx, mask)
             else:
                 return TensorDataset(features1, features2, base_ids)
 
@@ -550,19 +562,22 @@ class BarlowTwinsTrainer(BaseTrainer):
         stats = None
 
         for batch_i, batch_data in enumerate(dataloader): # here it determines taxonomy data to be yes or no.
+            is_htax = model.hierarchical_taxonomy
             try:
-                features1, features2, tax_1, tax_2, base_ids = batch_data # tax_1 and tax_2 will be empty tensors if taxonomy features are not provided, and the model should be designed to handle that case appropriately (e.g., by ignoring those inputs or using default values). The presence of tax_1 and tax_2 in the batch data allows the training loop to seamlessly support both scenarios (with or without taxonomy features) without needing separate code paths.
-                # another question comes: two positive pairs should have same taxonomy. 
-                features1 = features1.to(device, non_blocking=True)
-                features2 = features2.to(device, non_blocking=True)
-                tax_1 = tax_1.to(device, non_blocking=True)
-                tax_2 = tax_2.to(device, non_blocking=True)
+                if is_htax:
+                    features1, features2, tax_1, tax_2, base_ids = batch_data 
+                    features1 = features1.to(device, non_blocking=True)
+                    features2 = features2.to(device, non_blocking=True)
+                    tax_1 = tax_1.to(device, non_blocking=True)
+                    tax_2 = tax_2.to(device, non_blocking=True)
 
-                optimizer.zero_grad(set_to_none=True)
+                    optimizer.zero_grad(set_to_none=True)
 
-                output1, output2, tax_enc1, tax_enc2 = model(
-                    features1, features2, tax_1, tax_2
-                )
+                    output1, output2, tax_enc1, tax_enc2 = model(
+                        features1, features2, tax_1, tax_2
+                    )
+                else:
+                    raise NotImplementedError("Taxonomy features are not provided, and the model is designed to ignore them.")
             except ValueError:  # this is for the case when taxonomy features are not provided, and the model is designed to ignore them.
                 features1, features2, base_ids = batch_data
                 features1 = features1.to(device, non_blocking=True)
@@ -570,7 +585,7 @@ class BarlowTwinsTrainer(BaseTrainer):
 
                 optimizer.zero_grad(set_to_none=True)
 
-                output1, output2, tax_enc1, tax_enc2 = model(
+                output1, output2, _, _ = model(
                     features1, features2, None, None
                 )
             last_batch = batch_i == len(dataloader) - 1

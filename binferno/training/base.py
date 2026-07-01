@@ -11,6 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from loguru._logger import Logger
 import rich.progress as progress
+from typing import Dict, List, Tuple
 
 from ..features import BinfernoFeatureBuilder
 
@@ -96,7 +97,7 @@ class BaseTrainer(BaseModel):
         warmup: bool = False,
         warmup_epochs: int = 10,
         max_lr_hold_epochs: int = 0,
-        learning_rate: float = 2.5e-3,
+        learning_rate: float = 1e-3,
     ):
         max_lr = learning_rate
         # warmup_start_lr = max_lr * 0.1
@@ -108,14 +109,13 @@ class BaseTrainer(BaseModel):
 
         def lr_lambda(current_epoch):
 
-            if current_epoch < warmup_epochs:
-                if warmup:
+            if current_epoch < hold_end:
+                if warmup and current_epoch < warmup_epochs:
                     # Linear ramp from start_lr to max_lr
                     progress = current_epoch / max(warmup_epochs - 1, 1)
                     lr = start_lr + progress * (max_lr - start_lr)
                 else:
-                    if current_epoch < hold_end:
-                        lr = max_lr
+                    lr = max_lr
 
             else:
                 decay_epochs = epochs - hold_end
@@ -171,7 +171,8 @@ class BaseTrainer(BaseModel):
             else:
                 taxonomy_df = taxonomy_df.loc[orig_contigs.index].copy()
 
-        assert taxonomy_df.shape[0] == orig_contigs.shape[0], "Mismatch in number of rows between taxonomy_df and orig_contigs."
+            assert taxonomy_df.shape[0] == orig_contigs.shape[0], "Mismatch in number of rows between taxonomy_df and orig_contigs."
+        
         with torch.no_grad():
             for i in progress.track(range(0, len(orig_contigs), batch_size), description="Processing batches"):
                 batch_encode = orig_contigs.iloc[i : i + batch_size]
@@ -323,3 +324,30 @@ def label_augmented_views(
         else:
             augmented_taxonomy_df.loc[index] = np.full(len(numeric_cols), node_indices.get("unclassified", -1))  # assign -1 for unknown contigs
     return augmented_taxonomy_df.astype(float) # ensure the index order matches the order of the features dataframe after sorting by method.
+
+# TODO: next step: refactor this function, without any vamb-style coding. Intuitive. 
+def build_targets_and_mask(self, 
+    contig_names: List[str], 
+    contig_taxonomy: Dict, 
+    node_indices: Dict) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    contig_names    : list[str], in the SAME order as your feature matrix rows
+    contig_taxonomy : dict name -> ContigTaxonomy (or missing/None if unlabeled)
+    node_indices    : dict taxon_name -> node index   (from make_graph's ind_nodes)
+    """
+    n = len(contig_names)
+    target_idx = np.zeros(n, dtype=np.int64)        # default root (sentinel)
+    mask = np.zeros(n, dtype=bool)            # default False
+    for i, name in enumerate(contig_names):
+        tax = contig_taxonomy.get(name)
+        if tax is None or not tax.ranks:
+            continue                                 # stays root / False
+        deepest = tax.ranks[-1]                       # most specific assigned rank
+        idx = node_indices.get(deepest)
+        if idx is None:
+            continue                                 # taxon not in tree -> unlabeled
+        target_idx[i] = idx
+        mask[i] = True
+
+    # indexing uses contig names order.
+    return torch.from_numpy(target_idx), torch.from_numpy(mask)

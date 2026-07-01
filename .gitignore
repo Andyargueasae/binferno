@@ -240,3 +240,4 @@ diagonsis_cVAE_barlowtwins.py
 
 conda_env.txt
 *.tsv
+*.html

@@ -67,6 +67,7 @@ def _calculate_fragment_stats_vectorized(coverage_array, fragment_coords):
             if len(fragment_coverage) > 0:
                 means[i] = np.mean(fragment_coverage)
                 stds[i] = (
+                    # Here we computed the standard deviation initially using np.std. 
                     np.std(fragment_coverage) if len(fragment_coverage) > 1 else 0.0
                 )
             else:
@@ -117,7 +118,7 @@ def _calculate_fragment_stats_vectorized(coverage_array, fragment_coords):
 
                 # Handle numerical precision issues
                 vars_valid = np.maximum(vars_valid, 0)
-                stds_valid = np.sqrt(vars_valid)
+                stds_valid = np.sqrt(vars_valid) # variance got square rooted. 
 
                 # Map back to full arrays
                 means[valid_mask] = means_valid
@@ -143,8 +144,8 @@ def _calculate_fragment_stats_vectorized(coverage_array, fragment_coords):
 
 def _process_contig_coverage_worker(args):
     bam_contig_name, contig_data_list, total_coverage_per_base, bam_contig_length = args
-    fragment_coverage = {}
-    fragment_coverage_std = {}
+    fragment_coverage: Dict[str, float] = {}
+    fragment_coverage_std: Dict[str, float] = {}
 
     try:
         if total_coverage_per_base is None or bam_contig_length is None:
@@ -468,7 +469,7 @@ def _normalise_coverage_dicts(
             {k: v / factor for k, v in coverage_std.items()},
         )
 
-    if max_normalize:
+    elif max_normalize: # change to elif: the rpkm_normalize and max_normalize are mutually exclusive, so we can use elif here.
         pseudocount = 1e-5
 
         cov = {k: v + pseudocount for k, v in coverage.items()}
@@ -584,7 +585,7 @@ def calculate_bam_cov(
             bam_batch,
             disable_progress=disable_inner_progress,
         )
-
+        
         if max_norm_stacked:
             coverage, coverage_std = _normalise_coverage_dicts(
                 coverage=coverage,

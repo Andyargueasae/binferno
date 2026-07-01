@@ -59,7 +59,6 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
         logger: loguru.logger = None,  # type: ignore
         output_dir: Path = None,
         contig_length: int = 1000,  # used to calibrate corgi when run raw data.
-        max_norm_stacked: bool = False,  # whether to normalize the coverage features before feeding into the model. we found that normalizing the coverage features before feeding into the model can lead to better performance, so we set std_first to True for simclr training.
     ) -> Tuple[List[pd.DataFrame|Optional[pd.DataFrame|Dict|None]], int]:
 
         if (
@@ -171,7 +170,7 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
                     bam_path,
                     threads,
                     logger,
-                    max_norm_stacked=max_norm_stacked,
+                    max_norm_stacked=False,
                 )
                 if coverage_df.shape[0] != canonical_features.shape[0]:
                     raise ValueError(
