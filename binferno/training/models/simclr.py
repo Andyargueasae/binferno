@@ -49,12 +49,7 @@ class NeuralNetwork(nn.Module):
         # taxonomy string feature prediction, requires hierarchical loss.
         if tax_emb_dim > 0:
             if not hierarchical_taxonomy:
-                self.tnf_enc_dim += output_dim
-                self.taxonomy_encoder = _build_tax_emb_encoder(
-                    tax_emb_dim=tax_emb_dim,
-                    output_dim=output_dim,
-                    dropout=dropout,
-                )
+                self.tnf_enc_dim += tax_emb_dim
             else:
                 # hierarchical taxonomy.
                 tax_emb_dim += tnf_dim + coverage_dim
@@ -106,23 +101,25 @@ class NeuralNetwork(nn.Module):
     ):
         tnf_features = x[:, : self.tnf_dim]
         cov_features = x[:, self.tnf_dim : self.tnf_dim + self.coverage_dim]
-
-        # taxonomy embedding encoding if provided.
-        tax_encode = None 
+        cov_encode = self.coverage_encoder(cov_features)  # not normalized anymore.
         if (not tax_emb is None): 
             if (not self.hierarchical_taxonomy):
-                tax_encode = self.taxonomy_encoder(tax_emb)
-                tnf_features = torch.cat([tnf_features, F.normalize(tax_encode, dim=-1)], dim=-1)
+                tax_emb = F.normalize(tax_emb, dim=-1)
+                tnf_features = torch.cat([tnf_features,tax_emb], dim=-1)
+                fused_encode = self.tnf_encoder(
+                    torch.cat([tnf_features, F.normalize(cov_encode, dim=-1)], dim=-1)
+                )
+                return fused_encode, cov_encode, tax_emb
             else:
                 fused_emb = torch.cat([tnf_features, cov_features, tax_emb], dim=1)
                 tax_encode = self.taxonomy_encoder(fused_emb)['latent']
                 tnf_features = torch.cat([tnf_features, F.normalize(tax_encode, dim=-1)], dim=-1)
-
-        cov_encode = self.coverage_encoder(cov_features)  # not normalized anymore.
-        fused_encode = self.tnf_encoder(
-            torch.cat([tnf_features, F.normalize(cov_encode, dim=-1)], dim=-1)
-        )
-        return fused_encode, cov_encode, tax_encode
+                return fused_encode, cov_encode, tax_encode
+        else:
+            fused_encode = self.tnf_encoder(
+                torch.cat([tnf_features, F.normalize(cov_encode, dim=-1)], dim=-1)
+            )
+            return fused_encode, cov_encode, None
 
     def get_embedding(
         self, 
@@ -134,7 +131,7 @@ class NeuralNetwork(nn.Module):
     def get_separate_modality_embs(self, x: torch.Tensor, tax_emb: torch.Tensor = None):
         fused_enc, cov_enc, tax_enc = self._encode(x, tax_emb)
         if tax_enc is None:
-            return fused_enc, cov_enc
+            return fused_enc, cov_enc, None
         return fused_enc, cov_enc, tax_enc
 
     def forward(
@@ -174,22 +171,22 @@ def _build_coverage_encoder(
     encoder.append(nn.LeakyReLU())
     return nn.Sequential(*encoder)
 
-def _build_tax_emb_encoder(
-    tax_emb_dim: int, 
-    hidden_dim: int = 512, 
-    output_dim: int = 128, 
-    dropout: float = 0.1
-):
-    n_layers = 3
-    modules = []
-    input_dim = tax_emb_dim
-    for _ in range(n_layers):
-        modules.append(nn.Linear(input_dim, hidden_dim))
-        modules.append(nn.BatchNorm1d(hidden_dim))
-        modules.append(nn.LeakyReLU())
-        modules.append(nn.Dropout(dropout))
-        input_dim = hidden_dim
-    modules.append(nn.Linear(hidden_dim, output_dim))
-    modules.append(nn.BatchNorm1d(output_dim))
-    modules.append(nn.LeakyReLU())
-    return nn.Sequential(*modules)
+# def _build_tax_emb_encoder(
+#     tax_emb_dim: int, 
+#     hidden_dim: int = 512, 
+#     output_dim: int = 128, 
+#     dropout: float = 0.1
+# ):
+#     n_layers = 3
+#     modules = []
+#     input_dim = tax_emb_dim
+#     for _ in range(n_layers):
+#         modules.append(nn.Linear(input_dim, hidden_dim))
+#         modules.append(nn.BatchNorm1d(hidden_dim))
+#         modules.append(nn.LeakyReLU())
+#         modules.append(nn.Dropout(dropout))
+#         input_dim = hidden_dim
+#     modules.append(nn.Linear(hidden_dim, output_dim))
+#     modules.append(nn.BatchNorm1d(output_dim))
+#     modules.append(nn.LeakyReLU())
+#     return nn.Sequential(*modules)

@@ -23,7 +23,7 @@ from .models.barlow_twins import NeuralNetwork
 from ..features import BinfernoFeatureBuilder
 from .base import (
     BaseTrainer,
-    label_augmented_views, build_targets_and_mask,
+    label_augmented_views, build_mask,
     TAXONOMY_DF, TAX_NODES, TAX_NODE_INDICES, PARENTAL_ARRAY
 )
 
@@ -170,11 +170,14 @@ class BarlowTwinsTrainer(BaseTrainer):
             epochs=self.epochs,
             num_workers=threads,
             taxonomy_features=taxonomy_features,
+            namelist=namelist
         )
 
+        node_indices = taxonomy_features[TAX_NODE_INDICES]
+        taxonomy_df = taxonomy_features[TAXONOMY_DF]
+                
         model_path = output_train_dir / "best_model.pt"
         if not model_path.exists():
-            # TODO: incorporate taxonomy features, split to two situations.
             model = self.train(
                 dataloader=dataloader,
                 optimizer=optimizer,
@@ -262,11 +265,8 @@ class BarlowTwinsTrainer(BaseTrainer):
 
             if return_stats:
                 with torch.no_grad():
-                    # Isolate off-diagonals cleanly using the cached identity matrix
                     off_diag_abs = C.abs().masked_fill(eye.to(torch.bool), 0.0)
 
-                    # Bundle tensors together into a single structure before sending to CPU
-                    # This minimizes the overhead of calling .item() sequentially
                     stats_tensor = torch.stack(
                         [
                             diag.mean(),
@@ -294,13 +294,15 @@ class BarlowTwinsTrainer(BaseTrainer):
         def __init__(self,
             data_df: pd.DataFrame, 
             max_positive_pairs=700000,
-            taxonomy_features: Optional[pd.DataFrame|Dict|None] = None
+            taxonomy_features: Optional[pd.DataFrame|Dict|None] = None,
+            namelist: Optional[list[str]] = None
         ):
             self.data_df = data_df
             self.max_positive_pairs = max_positive_pairs
             self.fragment_contig_ids = list(data_df.index)
             self.taxonomy_features = taxonomy_features
-            self.htax = False
+            self.namelist = namelist
+            self.h_tax = False
 
             grouped = self._group_fragments_by_contig()
             self.base_name_to_id = {
@@ -389,15 +391,14 @@ class BarlowTwinsTrainer(BaseTrainer):
             if isinstance(self.taxonomy_features, pd.DataFrame):
                 tax_X = self.taxonomy_features.to_numpy(dtype=np.float32, copy=False)
             elif isinstance(self.taxonomy_features, dict):
+                self.h_tax = True
                 tax_X = label_augmented_views(self.taxonomy_features[TAXONOMY_DF], 
                     self.data_df.index.tolist(),
                     node_indices=self.taxonomy_features[TAX_NODE_INDICES],
                 )
-                tax_X = tax_X.to_numpy(dtype=np.float32, copy=False)
+                taxonomy_df = self.taxonomy_features[TAXONOMY_DF].set_index("contig_id")
                 node_indices = self.taxonomy_features[TAX_NODE_INDICES]
-                contig_ids = self.data_df.index.tolist()
-                target_idx, mask = build_targets_and_mask(contig_ids, self.taxonomy_features[TAXONOMY_DF], node_indices)
-                self.htax = True
+                tax_X = tax_X.to_numpy(dtype=np.float32, copy=False)
             else:
                 tax_X = None
 
@@ -420,12 +421,17 @@ class BarlowTwinsTrainer(BaseTrainer):
             if tax_X is not None:
                 tax_features1 = torch.from_numpy(tax_X[idx1].copy())
                 tax_features2 = torch.from_numpy(tax_X[idx2].copy())
-                if not self.htax:
-                    assert not np.isnan(tax_X).any(), "taxonomy_features contains NaN values before TensorDataset construction."
-                    assert not np.isinf(tax_X).any(), "taxonomy_features contains Inf values before TensorDataset construction."
+                if not self.h_tax:
                     return TensorDataset(features1, features2, tax_features1, tax_features2, base_ids)
                 else:
-                    return TensorDataset(features1, features2, tax_features1, tax_features2, base_ids, target_idx, mask)
+                    # turn idx1 to base name, and then reindex base names to get mask. 
+                    mask = torch.zeros(len(idx1), dtype=torch.bool)
+                    for i, idx in enumerate(idx1): # idx1 is the index 
+                        base_name = self._extract_base_name(self.data_df.index[idx])
+                        tax = taxonomy_df.loc[base_name]["tax_node_idx"] if base_name in taxonomy_df.index else node_indices.get("root", -1)
+                        if tax != node_indices.get("root", -1):
+                            mask[i] = True
+                    return TensorDataset(features1, features2, tax_features1, tax_features2, mask, base_ids)
             else:
                 return TensorDataset(features1, features2, base_ids)
 
@@ -438,8 +444,9 @@ class BarlowTwinsTrainer(BaseTrainer):
         epochs: int = 300,
         num_workers: int = 0,
         taxonomy_features: Optional[pd.DataFrame|Dict|None] = None,
+        namelist: Optional[list[str]] = None,
     ):
-        dataset_builder = self.BuildDataset(data_df=data_df, taxonomy_features=taxonomy_features)
+        dataset_builder = self.BuildDataset(data_df=data_df, taxonomy_features=taxonomy_features, namelist=namelist)
         train_dataset = dataset_builder.construct_tensordatasets_from_pairs()
 
         effective_batch_size = batch_size
@@ -497,6 +504,8 @@ class BarlowTwinsTrainer(BaseTrainer):
         model: nn.Module = None,
         output_dir: Path = None,
         logger=loguru._logger.Logger,
+        target_idx: Optional[torch.Tensor] = None,
+        mask: Optional[torch.Tensor] = None,
     ):
         self.unify_seeds(
             self.seed
@@ -564,21 +573,19 @@ class BarlowTwinsTrainer(BaseTrainer):
         for batch_i, batch_data in enumerate(dataloader): # here it determines taxonomy data to be yes or no.
             is_htax = model.hierarchical_taxonomy
             try:
-                if is_htax:
-                    features1, features2, tax_1, tax_2, base_ids = batch_data 
-                    features1 = features1.to(device, non_blocking=True)
-                    features2 = features2.to(device, non_blocking=True)
-                    tax_1 = tax_1.to(device, non_blocking=True)
-                    tax_2 = tax_2.to(device, non_blocking=True)
+                features1, features2, tax_1, tax_2, base_ids = batch_data 
+                features1 = features1.to(device, non_blocking=True)
+                features2 = features2.to(device, non_blocking=True)
+                tax_1 = tax_1.to(device, non_blocking=True)
+                tax_2 = tax_2.to(device, non_blocking=True)
 
-                    optimizer.zero_grad(set_to_none=True)
+                optimizer.zero_grad(set_to_none=True)
 
-                    output1, output2, tax_enc1, tax_enc2 = model(
-                        features1, features2, tax_1, tax_2
-                    )
-                else:
-                    raise NotImplementedError("Taxonomy features are not provided, and the model is designed to ignore them.")
-            except ValueError:  # this is for the case when taxonomy features are not provided, and the model is designed to ignore them.
+                output1, output2, tax_enc1, tax_enc2 = model(
+                    features1, features2, tax_1, tax_2
+                )
+                # TODO: think of: using directly encoded features rather than adding an encoder. i.e.: concat [featuresk, tax_k] and pass to tnf encoder, as tax_k is generated from nucleotides. 
+            except ValueError:
                 features1, features2, base_ids = batch_data
                 features1 = features1.to(device, non_blocking=True)
                 features2 = features2.to(device, non_blocking=True)
@@ -590,7 +597,6 @@ class BarlowTwinsTrainer(BaseTrainer):
                 )
             last_batch = batch_i == len(dataloader) - 1
 
-            # fused_embedding derived loss.
             if last_batch:
                 loss, stats = criterion(
                     feature1=output1, feature2=output2, return_stats=True

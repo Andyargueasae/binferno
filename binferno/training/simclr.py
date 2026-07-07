@@ -22,10 +22,9 @@ from .models.simclr import NeuralNetwork
 from .InfoNCEloss import info_nce_loss, info_nce_loss_hard_weight
 from .base import (
     BaseTrainer, 
-    label_augmented_views, build_targets_and_mask, 
+    label_augmented_views, build_mask, 
     TAXONOMY_DF, TAX_NODES, TAX_NODE_INDICES, PARENTAL_ARRAY
 )
-
 
 KMER_DIM = 136
 
@@ -162,6 +161,10 @@ class SimCLRTrainer(BaseTrainer):
             tax_nodes = taxonomy_features[TAX_NODES]
             node_indices = taxonomy_features[TAX_NODE_INDICES]
             parental_array = taxonomy_features[PARENTAL_ARRAY]
+        else:
+            tax_nodes = None
+            node_indices = None
+            parental_array = None
 
         model = NeuralNetwork(
             tnf_dim=kmer_dim,
@@ -170,9 +173,9 @@ class SimCLRTrainer(BaseTrainer):
             tax_emb_dim=taxonomy_dim,
             hidden_dim=self.hidden_dim,
             hierarchical_taxonomy=hierarchical_taxonomy,
-            tax_nodes=tax_nodes if hierarchical_taxonomy else None,
-            node_indices=node_indices if hierarchical_taxonomy else None,
-            parental_array=parental_array if hierarchical_taxonomy else None,
+            tax_nodes=tax_nodes,
+            node_indices=node_indices,
+            parental_array=parental_array,
         ).to(device)
 
         logger.info(f"Model architecture:\n{model}")
@@ -183,7 +186,6 @@ class SimCLRTrainer(BaseTrainer):
             contig_length=self.contig_length,
             model=model,
             n_views=self.view_num,
-            simclrnet=False,
             contigs=contigs,
             num_workers=threads,
             taxonomy_features=taxonomy_features,
@@ -252,9 +254,10 @@ class SimCLRTrainer(BaseTrainer):
         dataset = list(
             torch.split(torch.from_numpy(data_df.values).float(), len(namelist))
         )
+        length_weight = self.length_weight(contig=contigs)
         dataset = [
             dataset[i][
-                np.array([self.length_weight(name) for name in namelist])
+                np.array([length_weight[name] for name in namelist])
                 >= contig_length
             ] for i in range(n_views)
         ]
@@ -270,7 +273,6 @@ class SimCLRTrainer(BaseTrainer):
                 "Length weight is empty. Please check the contigs input and the length_weight function."
             )
 
-        # taxonomy.
         if taxonomy_features is not None:
             if isinstance(taxonomy_features, pd.DataFrame):
                 
@@ -301,28 +303,27 @@ class SimCLRTrainer(BaseTrainer):
                     contig_ids=namelist,
                     simclr=True,
                 )
-
-                tax_label_dataset = list(
-                    torch.split(torch.from_numpy(taxonomy_labels.values.astype(float)).float(), len(namelist))
-                )
-                tax_label_dataset = [
-                    tax_label_dataset[i][
-                        np.array([length_weight[name] for name in namelist])
-                        >= contig_length
-                    ] for i in range(n_views)
-                ]
-
-                target_idx, mask = build_targets_and_mask(
-                    taxonomy_labels,
+                _, mask = build_mask(
                     contig_names=namelist,
-                    contig_taxonomy=taxonomy_features[TAXONOMY_DF].set_index("contig_id").to_dict(orient="index"),
+                    contig_taxonomy=dict(zip(taxonomy_features[TAXONOMY_DF]["contig_id"], taxonomy_features[TAXONOMY_DF]["tax_node_idx"])),
                     node_indices=taxonomy_features[TAX_NODE_INDICES],
                 )
+
+                mask = mask[np.array([length_weight[name] for name in namelist]) >= contig_length]
+                
+                tax_label_dataset = list(
+                    torch.split(torch.from_numpy(taxonomy_labels.values.astype(np.int32)).float(), len(namelist))
+                )
+                target_idx = tax_label_dataset[0][
+                    np.array([length_weight[name] for name in namelist])
+                    >= contig_length
+                ]
+                del tax_label_dataset
+
                 train_dataset = TensorDataset(
-                    *dataset, # view_num
-                    *tax_label_dataset, # view_num
-                    target_idx, # one tensor for the target labels, same length as namelist
-                    mask, # one tensor for the boolean mask, same length as namelist
+                    *dataset,
+                    target_idx, # can it be vanished because tax_label_dataset are all redundantly the same label? they are from the same contig!
+                    mask
                 )
                 
         else:
@@ -404,8 +405,6 @@ class SimCLRTrainer(BaseTrainer):
                 "Logger is not provided for training. Please provide a logger in the kwargs with key 'logger'."
             )
 
-        # Create once so the index cache persists across all epochs
-
         epoch_iter = tqdm(range(epochs), desc="Training Epochs")
         early_stopping = EarlyStoppingManagerSimCLR(patience=self.patience)
         for epoch in epoch_iter:
@@ -477,16 +476,20 @@ class SimCLRTrainer(BaseTrainer):
         if n_cov < 0 or n_cov == 0:
             raise ValueError("n_cov must be non-negative.")
 
+        h_tax = model.hierarchical_taxonomy
+
         for i, features in enumerate(dataloader):
             contig_features, tax_features = features[:self.view_num], features[self.view_num:]
             contig_features = torch.cat(contig_features, dim=0).to(device, non_blocking=True)
-            if tax_features:
+            if tax_features and not h_tax:
                 tax_features = torch.cat(tax_features, dim=0).to(device, non_blocking=True)
+            elif tax_features and h_tax:
+                continue
             else:
                 tax_features = None
             optimizer.zero_grad(set_to_none=True)
             actual_batch_size = contig_features.shape[0] // self.view_num
-            enc_feature, cov_emb, tax_emb = model(contig_features, tax_emb=tax_features) # tax_emb is not used for simclr.
+            enc_feature, cov_emb, tax_emb = model(contig_features, tax_emb=tax_features) 
             loss, batch_acc, _ = info_nceloss_fn(
                 enc_feature,
                 batch_size=actual_batch_size,

@@ -7,6 +7,7 @@ from typing import Any, Tuple
 import pandas as pd
 import loguru
 import numpy as np
+from pydantic import Field
 from sklearn.preprocessing import normalize
 from sklearn.cluster import DBSCAN, Birch
 from sklearn.neighbors import kneighbors_graph
@@ -20,7 +21,11 @@ from .cluster_utils import (
 )
 
 
-class DbscanClustering(BaseClustering):
+class DbscanClustering(BaseClustering): # add the choice of HDBSCAN in addition to DBSCAN.
+    hdbscan: bool = Field(
+        default=False,
+        description="Whether to use HDBSCAN instead of DBSCAN for clustering.",
+    )
     def __call__(
         self,
         contigs: Path,
@@ -142,6 +147,7 @@ class DbscanClustering(BaseClustering):
             scoring="count",  # Path A; switch to "smooth" to compare
             do_rescue=True,  # long-read singleton + BIRCH rescue
             logger=logger,
+            hdbscan=self.hdbscan
         )
         logger.info(
             f"DBSCAN sweep: {len(best_bins)} bins, score={best_score:.3f}, "
@@ -351,6 +357,7 @@ def dbscan_marker_sweep(
     lam: float = 1.0,
     do_rescue: bool = False,  # noise-rescue pass on the winning clustering
     logger: loguru._logger.Logger = None,
+    hdbscan: bool = False,  # Whether to use HDBSCAN instead of DBSCAN
 ):
     graph = build_knn_graph(latent, metric=metric)
     eps_grid = derive_eps_grid(graph, latent.shape[0])

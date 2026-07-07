@@ -55,8 +55,7 @@ class TaxonomyFeatureBuilder(BaseFeatureBuilder):
             if not taxonomy_str or taxonomy_str == "unclassified":
                 contig_to_tax_node[contig_id] = tax_node_indices[
                     "root"
-                ]  # assign to root if unclassified.
-                continue
+                ]  # assign to root if unclassified, so they are not used in training. This is a design choice; you may choose to handle unclassified contigs differently.
             taxonomy_levels = taxonomy_str.split(";")
             finest_taxon = taxonomy_levels[-1]
             tax_node_idx = tax_node_indices[finest_taxon]
@@ -66,7 +65,7 @@ class TaxonomyFeatureBuilder(BaseFeatureBuilder):
         contig_taxonomy_df = pd.DataFrame(
             {
                 "contig_id": list(contig_to_tax_node.keys()),
-                "tax_node_idx": list(contig_to_tax_node.values()),
+                "tax_node_idx": list(contig_to_tax_node.values()), # it already maps conitgs to the finest tax_node index.
             }
         )
         return tax_nodes, tax_node_indices, parental_array, contig_taxonomy_df
@@ -91,9 +90,7 @@ class TaxonomyFeatureBuilder(BaseFeatureBuilder):
             contig_id, taxonomy_str = row["contigs"], row["predictions"]
             if not taxonomy_str:
                 continue
-            taxonomy_levels = taxonomy_str.split(
-                ";"
-            )  # assume in "domain;phylum;class;order;family;genus;species" format, by having --tax-lineage 1 in mmseqs2.
+            taxonomy_levels = taxonomy_str.split(";")  # assume in "domain;phylum;class;order;family;genus;species" format, by having --tax-lineage 1 in mmseqs2.
             G.add_edge(root, taxonomy_levels[0])
             for i in range(1, len(taxonomy_levels)):
                 parent_taxon = taxonomy_levels[i - 1]
@@ -110,7 +107,6 @@ class TaxonomyFeatureBuilder(BaseFeatureBuilder):
         nodes = [root] + [child for _, child in edges]
         node_indices = {node: idx for idx, node in enumerate(nodes)}
 
-        # make a list storing the parent of each node, for later use in constructing the adjacency matrix.
         table_parent: list[int] = [
             -1 if n == root else node_indices[next(iterator(G.predecessors(n)))]
             for n in nodes
@@ -118,7 +114,6 @@ class TaxonomyFeatureBuilder(BaseFeatureBuilder):
         # Verify ancestor-first ordering: every parent precedes its child
         assert all(p < i for i, p in enumerate(table_parent) if p != -1)
 
-        # Now problem comes: what format do we want to keep for taxonomy?
         return nodes, node_indices, table_parent
 
 
