@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from .base import BaseClustering, ClusterResult
 
+# TODO: implement a current cluster check by reclustering based on the list above.
 class Recluster(BaseClustering):
     def __call__(self):
         pass

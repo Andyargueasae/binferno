@@ -23,7 +23,7 @@ from .models.barlow_twins import NeuralNetwork
 from ..features import BinfernoFeatureBuilder
 from .base import (
     BaseTrainer,
-    label_augmented_views, build_mask,
+    label_augmented_views,
     TAXONOMY_DF, TAX_NODES, TAX_NODE_INDICES, PARENTAL_ARRAY
 )
 
@@ -67,6 +67,14 @@ class BarlowTwinsTrainer(BaseTrainer):
         default=0.3,
         description="Weight for the taxonomy loss in the overall loss function. This parameter controls the influence of the taxonomy loss on the training process. A higher value increases the importance of taxonomy information, while a lower value reduces its impact.",
     )
+    concat_emb: bool = Field(
+        default=False,
+        description="Whether to concatenate the embeddings from different views before applying the Barlow Twins loss. \
+        If True, the embeddings from all views are concatenated into a single vector, which is then used for loss computation. \
+        If False, the loss is computed separately for each view and then averaged. Concatenating embeddings can capture more " \
+        "information from multiple views, but it also increases the dimensionality of the input to the loss function.",
+    )
+    # do we want to dimension-reduce the concatenated features for clustering? it can save time for clustering, but it may lose some information.
 
     def __call__(
         self,
@@ -132,6 +140,7 @@ class BarlowTwinsTrainer(BaseTrainer):
             tax_nodes = taxonomy_features[TAX_NODES]
             node_indices = taxonomy_features[TAX_NODE_INDICES]
             parental_array = taxonomy_features[PARENTAL_ARRAY]
+            taxonomy_df = taxonomy_features[TAXONOMY_DF]
 
         feature_df = self.sort_features_by_method(
             canonical_feature_df,
@@ -163,18 +172,28 @@ class BarlowTwinsTrainer(BaseTrainer):
 
         logger.info(f"Model architecture:\n{model}")
 
-        dataloader, optimizer, scheduler = self.prepare_trainer(
-            model=model,
-            data_df=feature_df,
-            batch_size=self.batch_size,
-            epochs=self.epochs,
-            num_workers=threads,
-            taxonomy_features=taxonomy_features,
-            namelist=namelist
-        )
-
-        node_indices = taxonomy_features[TAX_NODE_INDICES]
-        taxonomy_df = taxonomy_features[TAXONOMY_DF]
+        if not self.concat_emb:
+            dataloader, optimizer, scheduler = self.prepare_trainer(
+                model=model,
+                data_df=feature_df,
+                batch_size=self.batch_size,
+                epochs=self.epochs,
+                num_workers=threads,
+                taxonomy_features=taxonomy_features,
+                namelist=namelist,
+                weights=self.length_weight(contig=contigs)
+            )
+        else:
+            dataloader, optimizer, scheduler = self.prepare_trainer(
+                model=model,
+                data_df=feature_df,
+                batch_size=self.batch_size,
+                epochs=self.epochs,
+                num_workers=threads,
+                taxonomy_features=None,
+                namelist=namelist,
+                weights=None
+            )
                 
         model_path = output_train_dir / "best_model.pt"
         if not model_path.exists():
@@ -202,9 +221,11 @@ class BarlowTwinsTrainer(BaseTrainer):
 
             if isinstance(taxonomy_features, pd.DataFrame):
                 taxonomy_df = taxonomy_features.loc[orig_df.index]
+            elif isinstance(taxonomy_features, dict):
+                taxonomy_df = taxonomy_features[TAXONOMY_DF]
             else:
-                taxonomy_df = taxonomy_features[TAXONOMY_DF].set_index("contig_id")
-
+                taxonomy_df = None
+                
             embeddings = self.get_embeddings(
                 model=model,
                 data_df=feature_df,
@@ -219,6 +240,16 @@ class BarlowTwinsTrainer(BaseTrainer):
             index=embeddings.index,
             columns=embeddings.columns,
         )
+
+        # apply concatenation to DNABERT-S or Corgi features here only if taxonomy features are available.
+        if self.concat_emb and taxonomy_features is not None:
+            logger.info("Concatenating embeddings from different views.")
+            taxonomy_features_orig = taxonomy_features.loc[orig_df.index] if isinstance(taxonomy_features, pd.DataFrame) else None
+            try: 
+                embeddings = pd.concat([embeddings, taxonomy_features_orig], axis=1)
+            except Exception as e:
+                logger.error(f"Error concatenating embeddings: {e}. Check if taxonomy features are available and compatible.")
+                logger.debug("Will proceed without concatenation.")
 
         return embeddings
 
@@ -396,7 +427,7 @@ class BarlowTwinsTrainer(BaseTrainer):
                     self.data_df.index.tolist(),
                     node_indices=self.taxonomy_features[TAX_NODE_INDICES],
                 )
-                taxonomy_df = self.taxonomy_features[TAXONOMY_DF].set_index("contig_id")
+                taxonomy_df = self.taxonomy_features[TAXONOMY_DF]
                 node_indices = self.taxonomy_features[TAX_NODE_INDICES]
                 tax_X = tax_X.to_numpy(dtype=np.float32, copy=False)
             else:
@@ -445,6 +476,7 @@ class BarlowTwinsTrainer(BaseTrainer):
         num_workers: int = 0,
         taxonomy_features: Optional[pd.DataFrame|Dict|None] = None,
         namelist: Optional[list[str]] = None,
+        weights: Optional[Dict|None] = None, # should be fragment_dict or all_fragments. 
     ):
         dataset_builder = self.BuildDataset(data_df=data_df, taxonomy_features=taxonomy_features, namelist=namelist)
         train_dataset = dataset_builder.construct_tensordatasets_from_pairs()
@@ -567,54 +599,128 @@ class BarlowTwinsTrainer(BaseTrainer):
     ):
         criterion = self.BT_loss(lambda_bt=5e-3, alpha=1.0).to(device)
         model.train()
-        total_loss = 0.0
+        
+        sum_loss = 0.0
         stats = None
 
         for batch_i, batch_data in enumerate(dataloader): # here it determines taxonomy data to be yes or no.
             is_htax = model.hierarchical_taxonomy
+            last_batch = batch_i == len(dataloader) - 1
             try:
-                features1, features2, tax_1, tax_2, base_ids = batch_data 
-                features1 = features1.to(device, non_blocking=True)
-                features2 = features2.to(device, non_blocking=True)
-                tax_1 = tax_1.to(device, non_blocking=True)
-                tax_2 = tax_2.to(device, non_blocking=True)
+                if not is_htax:
+                    features1, features2, tax_1, tax_2, base_ids = batch_data 
+                    features1 = features1.to(device, non_blocking=True)
+                    features2 = features2.to(device, non_blocking=True)
+                    tax_1 = tax_1.to(device, non_blocking=True)
+                    tax_2 = tax_2.to(device, non_blocking=True)
+                    optimizer.zero_grad(set_to_none=True)
+                    total_loss, stats = self.calculate_loss(
+                        model=model,
+                        features1=features1,
+                        features2=features2,
+                        tax_1=tax_1,
+                        tax_2=tax_2,
+                        mask=None,
+                        last_batch=last_batch
+                    )
 
-                optimizer.zero_grad(set_to_none=True)
+                else:
+                    feature1, feature2, label1, label2, mask, base_ids = batch_data
+                    feature1 = feature1.to(device)
+                    feature2 = feature2.to(device)
+                    label1 = label1.to(device)
+                    label2 = label2.to(device)
+                    mask = mask.to(device)
+                    optimizer.zero_grad(set_to_none=True)
+                    total_loss, stats = self.calculate_loss(
+                        model=model,
+                        features1=feature1,
+                        features2=feature2,
+                        tax_1=label1,
+                        tax_2=label2,
+                        mask=mask,
+                        last_batch=last_batch
+                    )
+                
+                total_loss.backward()
 
-                output1, output2, tax_enc1, tax_enc2 = model(
-                    features1, features2, tax_1, tax_2
-                )
-                # TODO: think of: using directly encoded features rather than adding an encoder. i.e.: concat [featuresk, tax_k] and pass to tnf encoder, as tax_k is generated from nucleotides. 
             except ValueError:
                 features1, features2, base_ids = batch_data
                 features1 = features1.to(device, non_blocking=True)
                 features2 = features2.to(device, non_blocking=True)
 
                 optimizer.zero_grad(set_to_none=True)
-
-                output1, output2, _, _ = model(
-                    features1, features2, None, None
+                total_loss, stats = self.calculate_loss(
+                    model=model,
+                    features1=features1,
+                    features2=features2,
+                    tax_1=None,
+                    tax_2=None,
+                    mask=None,
+                    last_batch=last_batch
                 )
-            last_batch = batch_i == len(dataloader) - 1
-
-            if last_batch:
-                loss, stats = criterion(
-                    feature1=output1, feature2=output2, return_stats=True
-                )
-            else:
-                loss = criterion(feature1=output1, feature2=output2)
-
-            loss.backward()
+                total_loss.backward()
 
             torch.nn.utils.clip_grad_norm_(
                 model.parameters(), max_norm=1.0
             )  # prevent the exploding gradient.
 
             optimizer.step()
-            total_loss += loss.item()  # sum loss.
+            sum_loss += total_loss.item()  # sum loss.
 
-        avg_loss = total_loss / len(dataloader)
+        avg_loss = sum_loss / len(dataloader)
         return avg_loss, stats
+    
+    def calculate_loss(self, model, features1, features2, tax_1=None, tax_2=None, mask=None, last_batch=False):
+        criterion = self.BT_loss(lambda_bt=5e-3, alpha=1.0).to(features1.device)
+        is_htax = model.hierarchical_taxonomy
+
+        if tax_1 is not None or tax_2 is not None:
+            if not is_htax:
+                output1, output2, tax_enc1, tax_enc2 = model(
+                    features1, features2, tax_1, tax_2
+                )
+                if last_batch:
+                    loss, stats = criterion(feature1=output1, feature2=output2, return_stats=True)
+                    tax_vec_loss, tax_stats = criterion(feature1=tax_enc1, feature2=tax_enc2, return_stats=True)
+                    loss = loss + tax_vec_loss
+
+                    # merge stats from both losses
+                    stats = {**stats, **{f"tax_{k}": v for k, v in tax_stats.items()}}
+                    return loss, stats
+                else:
+                    loss = criterion(feature1=output1, feature2=output2)
+                    tax_vec_loss = criterion(feature1=tax_enc1, feature2=tax_enc2)
+                    loss = loss + tax_vec_loss
+                    return loss, None
+
+            else:
+                output1, output2, tax_feature1, tax_feature2 = model(
+                    features1, features2, tax_emb1=tax_1, tax_emb2=tax_2
+                )
+                logit1, logit2 = tax_feature1["logits"], tax_feature2["logits"]
+                tax_hloss1 = model.taxonomy_encoder.loss(logit1, tax_1, mask, weights=None)
+                tax_hloss2 = model.taxonomy_encoder.loss(logit2, tax_2, mask, weights=None)
+                tax_hloss = (tax_hloss1 + tax_hloss2) / 2
+                if last_batch:
+                    loss, stats = criterion(feature1=output1, feature2=output2, return_stats=True)
+                    total_loss = loss + tax_hloss
+                    return total_loss, stats
+                else:
+                    loss = criterion(feature1=output1, feature2=output2)
+                    total_loss = loss + tax_hloss
+                    return total_loss, None
+        else:
+            output1, output2 = model(
+                features1, features2
+            )
+            if last_batch:
+                loss, stats = criterion(feature1=output1, feature2=output2, return_stats=True)
+                return loss, stats
+            else:
+                loss = criterion(feature1=output1, feature2=output2)
+                return loss, None
+        
 
     def barlow_twins_augmentation(
         self,

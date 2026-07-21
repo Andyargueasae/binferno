@@ -10,12 +10,7 @@ from .base import BaseFeatureBuilder
 
 
 class DnaBertSFeatureBuilder(BaseFeatureBuilder):
-    pca: bool = Field(
-        False, description="Whether to apply PCA to reduce dimensionality of features."
-    )
-    n_components: int = Field(
-        128, description="Number of PCA components to retain if PCA is applied."
-    )
+
     max_len: int = Field(
         768,
         description="Maximum sequence length for DNABERT-S. Sequences longer than this will be chunked.",
@@ -88,24 +83,6 @@ class DnaBertSFeatureBuilder(BaseFeatureBuilder):
         assert (
             self.n_components < features.shape[1]
         ), f"n_components ({self.n_components}) must be less than feature dimension ({features.shape[1]})."
-
-        n_components = min(self.n_components, features.shape[0], features.shape[1])
-
-        if n_components < 2:
-            # too few contigs for meaningful PCA
-            logger.warning("Too few contigs for meaningful PCA. Skipping PCA.")
-        else:
-            from sklearn.decomposition import PCA
-
-            pca = PCA(n_components=n_components)
-            features = pca.fit_transform(features)
-
-        if features.shape[1] < self.n_components:
-            features = np.pad(
-                features,
-                ((0, 0), (0, self.n_components - features.shape[1])),
-                mode="constant",
-            )
 
         df = pd.DataFrame(features, index=names)
         end_time = time.time()

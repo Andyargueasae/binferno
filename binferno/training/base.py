@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 from pydantic import BaseModel
+import pyfastx
 import pandas as pd
 import torch
 import torch.nn as nn
@@ -35,8 +36,14 @@ class BaseTrainer(BaseModel):
         raise NotImplementedError(
             "The __call__ method must be implemented by the subclass."
         )
+    def length_weight(self, contig: str) -> Dict[str, int]:
+        seq_obj = pyfastx.Fastx(contig)
+        contig_length = dict()
+        for name, seq in seq_obj:
+            contig_length[name] = len(seq)
+        return contig_length
 
-    def unify_seeds(self, seed):
+    def unify_seeds(self, seed: int):
         # synchronize random seeds for reproducibility.
         random.seed(seed)
         np.random.seed(seed)
@@ -49,13 +56,13 @@ class BaseTrainer(BaseModel):
             torch.backends.cudnn.benchmark = False
 
     class EarlyStoppingManager:
-        def __init__(self, patience=10):
+        def __init__(self, patience: int = 10):
             self.patience = patience
             self._lowest_loss = float("inf")
             self._saved_state = None
             self._stagnant_epochs = 0
 
-        def check_improvement(self, loss, model_state):
+        def check_improvement(self, loss: float, model_state: dict):
             improved = loss < self._lowest_loss
 
             if improved:
@@ -73,7 +80,7 @@ class BaseTrainer(BaseModel):
             """Return the best checkpoint state and its associated loss."""
             return self._saved_state, self._lowest_loss
 
-    def print_stats(self, stats, epoch, method="barlow_twins", logger=None):
+    def print_stats(self, stats: dict, epoch: int, method: str = "barlow_twins", logger: Logger = None):
         if logger is None:
             raise ValueError(
                 "Logger is not provided for printing stats. Please provide a logger."
@@ -310,10 +317,10 @@ def label_augmented_views(
     """
     This function is to label the augmented views with the same taxonomy label as the original contig.
     """
-    tax_df = taxonomy_df.copy().set_index(taxonomy_df["contig_id"])
+
     # Select only numeric columns to avoid object dtype issues
-    numeric_cols = tax_df.select_dtypes(include=[np.number]).columns.tolist()
-    tax_df = tax_df[numeric_cols]
+    numeric_cols = taxonomy_df.select_dtypes(include=[np.number]).columns.tolist()
+    tax_df = taxonomy_df[numeric_cols]
     contig_to_taxonomy = dict(zip(tax_df.index, tax_df.values))
     # create a new dataframe to store the taxonomy labels for the augmented views.
     augmented_taxonomy_df = pd.DataFrame(index=augmented_indices, columns=tax_df.columns)
@@ -325,25 +332,25 @@ def label_augmented_views(
             augmented_taxonomy_df.loc[index] = np.full(len(numeric_cols), node_indices.get("unclassified", -1))  # assign -1 for unknown contigs
     return augmented_taxonomy_df.astype(int) # ensure the index order matches the order of the features dataframe after sorting by method.
 
-# TODO: next step: refactor this function, without any vamb-style coding. Intuitive. 
-def build_mask( 
-    contig_names: List[str], 
-    contig_taxonomy: Dict[str, int], 
-    node_indices: Dict) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    contig_names    : list[str], in the SAME order as your feature matrix rows
-    contig_taxonomy : dict name -> ContigTaxonomy (or missing/None if unlabeled)
-    node_indices    : dict taxon_name -> node index   (from make_graph's ind_nodes)
-    """
-    n = len(contig_names)
-    mask = np.zeros(n, dtype=bool) # default False
-    for i, name in enumerate(contig_names): # i index is with same order of contig_names.
-        name = name.rsplit(".", 1)[0] # remove any suffices.
-        tax = contig_taxonomy.get(name, None)
-        if tax is None:
-            raise ValueError(f"Warning: Contig {name} not found in taxonomy. Assigning root index and mask False.")
-        if tax == node_indices.get("root", -1): # back in feature module, all unclassified contigs are assigned to root.
-            continue
-        mask[i] = True
+# # TODO: next step: refactor this function, without any vamb-style coding. Intuitive. 
+# def build_mask( 
+#     contig_names: List[str], 
+#     contig_taxonomy: Dict[str, int], 
+#     node_indices: Dict) -> Tuple[torch.Tensor, torch.Tensor]:
+#     """
+#     contig_names    : list[str], in the SAME order as your feature matrix rows
+#     contig_taxonomy : dict name -> ContigTaxonomy (or missing/None if unlabeled)
+#     node_indices    : dict taxon_name -> node index   (from make_graph's ind_nodes)
+#     """
+#     n = len(contig_names)
+#     mask = np.zeros(n, dtype=bool) # default False
+#     for i, name in enumerate(contig_names): # i index is with same order of contig_names.
+#         name = name.rsplit(".", 1)[0] # remove any suffices.
+#         tax = contig_taxonomy.get(name, None)
+#         if tax is None:
+#             raise ValueError(f"Warning: Contig {name} not found in taxonomy. Assigning root index and mask False.")
+#         if tax == node_indices.get("root", -1): # back in feature module, all unclassified contigs are assigned to root.
+#             continue
+#         mask[i] = True
 
-    return torch.from_numpy(mask)
+#     return torch.from_numpy(mask)

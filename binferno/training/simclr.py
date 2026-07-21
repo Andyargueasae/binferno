@@ -215,7 +215,7 @@ class SimCLRTrainer(BaseTrainer):
         if isinstance(taxonomy_features, pd.DataFrame):
             taxonomy_df = taxonomy_features.loc[canonical_feature_df.index]
         elif isinstance(taxonomy_features, dict):
-            taxonomy_df = taxonomy_features[TAXONOMY_DF].set_index("contig_id")
+            taxonomy_df = taxonomy_features[TAXONOMY_DF]
         else: 
             taxonomy_df = None
 
@@ -246,6 +246,7 @@ class SimCLRTrainer(BaseTrainer):
         batch_size: int = 1024,
         contig_length: int = 1000,
         taxonomy_features: Optional[Dict|pd.DataFrame|None]=None,
+        weights: Optional[Dict|None]=None, # should be fragment_dict or all_fragments.
     ):
         # determine the namelist for the dataset.
         orig_df = data_df[data_df.index.str.endswith("0")]
@@ -303,9 +304,9 @@ class SimCLRTrainer(BaseTrainer):
                     contig_ids=namelist,
                     simclr=True,
                 )
-                _, mask = build_mask(
+                mask = build_mask(
                     contig_names=namelist,
-                    contig_taxonomy=dict(zip(taxonomy_features[TAXONOMY_DF]["contig_id"], taxonomy_features[TAXONOMY_DF]["tax_node_idx"])),
+                    contig_taxonomy=dict(zip(taxonomy_features[TAXONOMY_DF].index, taxonomy_features[TAXONOMY_DF]["tax_node_idx"])),
                     node_indices=taxonomy_features[TAX_NODE_INDICES],
                 )
 
@@ -375,13 +376,6 @@ class SimCLRTrainer(BaseTrainer):
 
         return train_loader, optimizer, scheduler
 
-    def length_weight(self, contig: str):
-        seq_obj = pyfastx.Fastx(contig)
-        contig_length = dict()
-        for name, seq in seq_obj:
-            contig_length[name] = len(seq)
-        return contig_length
-
     def train(
         self,
         dataloader: torch.utils.data.DataLoader,
@@ -400,6 +394,7 @@ class SimCLRTrainer(BaseTrainer):
             self.seed
         )  # ensure reproducibility by unifying seeds across random, numpy, and torch.
         MODEL_PATH = output_dir / "best_model.pt"
+        h_tax = model.hierarchical_taxonomy
         if logger is None:
             raise ValueError(
                 "Logger is not provided for training. Please provide a logger in the kwargs with key 'logger'."
@@ -408,14 +403,24 @@ class SimCLRTrainer(BaseTrainer):
         epoch_iter = tqdm(range(epochs), desc="Training Epochs")
         early_stopping = EarlyStoppingManagerSimCLR(patience=self.patience)
         for epoch in epoch_iter:
-            avg_loss, stats = self.train_an_epoch(
-                model=model,
-                dataloader=dataloader,
-                optimizer=optimizer,
-                device=device,
-                temperature=temperature,
-                n_cov=n_cov,
-            )
+            if not h_tax:
+                avg_loss, stats = self.train_an_epoch(
+                    model=model,
+                    dataloader=dataloader,
+                    optimizer=optimizer,
+                    device=device,
+                    temperature=temperature,
+                    n_cov=n_cov,
+                )
+            else:
+                avg_loss, stats = self.train_an_epoch_htax(
+                    model=model,
+                    dataloader=dataloader,
+                    optimizer=optimizer,
+                    device=device,
+                    temperature=temperature,
+                    n_cov=n_cov,
+                )
 
             scheduler.step()
 
@@ -471,23 +476,18 @@ class SimCLRTrainer(BaseTrainer):
 
         model.train()
         stats = None
-        total_loss = 0.0
+        sum_loss = 0.0
         total_acc = 0.0
         if n_cov < 0 or n_cov == 0:
             raise ValueError("n_cov must be non-negative.")
 
-        h_tax = model.hierarchical_taxonomy
-
         for i, features in enumerate(dataloader):
+            # data loading differentiation. 
             contig_features, tax_features = features[:self.view_num], features[self.view_num:]
+            tax_features = torch.cat(tax_features, dim=0).to(device, non_blocking=True)
             contig_features = torch.cat(contig_features, dim=0).to(device, non_blocking=True)
-            if tax_features and not h_tax:
-                tax_features = torch.cat(tax_features, dim=0).to(device, non_blocking=True)
-            elif tax_features and h_tax:
-                continue
-            else:
-                tax_features = None
             optimizer.zero_grad(set_to_none=True)
+
             actual_batch_size = contig_features.shape[0] // self.view_num
             enc_feature, cov_emb, tax_emb = model(contig_features, tax_emb=tax_features) 
             loss, batch_acc, _ = info_nceloss_fn(
@@ -500,17 +500,88 @@ class SimCLRTrainer(BaseTrainer):
             loss.backward()
             optimizer.step()
 
-            total_loss += loss.item()
+            sum_loss += loss.item()
             total_acc += batch_acc
             last_batch = i == len(dataloader) - 1
 
             if last_batch:
                 stats = {
-                    "loss": total_loss / len(dataloader),
+                    "loss": sum_loss / len(dataloader),
                     "top1_acc": total_acc / len(dataloader),
                 }
 
-        return total_loss / len(dataloader), stats
+        return sum_loss / len(dataloader), stats
+    
+    def train_an_epoch_htax(
+        self,
+        model,
+        dataloader,
+        optimizer,
+        device,
+        temperature=0.15,
+        n_cov=0,
+        ):
+        # get the info nce loss, and see if auxiliary loss is needed.
+        if not self.hard_weighted_nce:
+            info_nceloss_fn = info_nce_loss(temperature=temperature).to(device)
+        else:
+            info_nceloss_fn = info_nce_loss_hard_weight(temperature=temperature).to(
+                device
+            )
+
+        model.train()
+        stats = None
+        sum_loss = 0.0
+        total_acc = 0.0
+        if n_cov < 0 or n_cov == 0:
+            raise ValueError("n_cov must be non-negative.")
+
+
+        for i, features in enumerate(dataloader):
+            # data loading differentiation. 
+            contig_features, target_idx, mask = features[:self.view_num], features[self.view_num], features[self.view_num+1]
+            contig_features = torch.cat(contig_features, dim=0).to(device, non_blocking=True)
+            target_idx = target_idx.to(device, non_blocking=True).reshape(-1)
+            mask = mask.to(device, non_blocking=True).reshape(-1).bool()
+            if contig_features.shape[0] % target_idx.shape[0] != 0:
+                raise ValueError(
+                    f"Cannot align target_idx ({target_idx.shape[0]}) with contig_features ({contig_features.shape[0]})."
+                )
+            repeats = contig_features.shape[0] // target_idx.shape[0]
+            target_idx = target_idx.repeat_interleave(repeats=repeats, dim=0)
+            mask = mask.repeat_interleave(repeats=repeats, dim=0)
+
+            optimizer.zero_grad(set_to_none=True)
+
+            actual_batch_size = contig_features.shape[0] // self.view_num
+            enc_feature, cov_emb, tax_emb = model(contig_features, tax_emb=target_idx) 
+            latents, logits = tax_emb["latent"], tax_emb["logits"]
+
+            loss, batch_acc, _ = info_nceloss_fn(
+                enc_feature,
+                batch_size=actual_batch_size,
+                device=device,
+                n_views=self.view_num,
+            )
+
+            tax_hloss = model.taxonomy_encoder.loss(logits, target_idx, mask, weights=None)
+
+            total_loss = loss + tax_hloss
+
+            total_loss.backward()
+            optimizer.step()
+
+            sum_loss += total_loss.item()
+            total_acc += batch_acc
+            last_batch = i == len(dataloader) - 1
+
+            if last_batch:
+                stats = {
+                    "loss": sum_loss / len(dataloader),
+                    "top1_acc": total_acc / len(dataloader),
+                }
+
+        return sum_loss / len(dataloader), stats
 
     def gen_views(
         self,

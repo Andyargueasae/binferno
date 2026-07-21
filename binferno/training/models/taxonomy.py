@@ -6,6 +6,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
+
+# taxonomy_head: optionally one MLP net or a vae encoder+decoder. 
 class TaxonomyHead(nn.Module):
     def __init__(self, in_dim, table_parent: list, tax_nodes: list = None,
                  node_indices: dict = None, hidden=512, dropout=0.2):
@@ -35,17 +37,53 @@ class TaxonomyHead(nn.Module):
     ) -> torch.Tensor:
         return self.net(fused)                # [B, n_leaf] logits
  
-    def loss(self, logits, target_idx, mask):
+    def loss(self, logits, target_idx, mask, weights=None):
         # mask: bool [B], True for contigs that carry a taxonomy label
         if mask.sum() == 0:
             return logits.new_zeros(())
-        return self.loss_fn(logits[mask], target_idx[mask])
+        masked_weights = weights[mask] if weights is not None else None
+        return self.loss_fn(logits[mask], target_idx[mask], weights=masked_weights)
  
     @torch.no_grad()
     def predict(self, logits):
         # [B, n_nodes] probability mass per node (leaf softmax summed up the tree)
         return self.sum_leaf(F.softmax(logits, dim=-1), dim=-1)
+    
+class VAETaxonomyHead(nn.Module):
+    def __init__(self, in_dim, table_parent: list, tax_nodes: list = None,
+                 node_indices: dict = None, hidden=512, latent_dim=32, dropout=0.2):
+        super().__init__()
+        # a VAE encoder+decoder for taxonomy prediction.
 
+    def encode(self, x):
+        # encode the input features into a latent representation
+        pass
+
+    def decode(self, z):
+        # decode the latent representation back to the taxonomy space
+        pass
+
+    def reparameterize(self, mu, logvar):
+        # reparameterization trick to sample from N(mu, var) from N(0,1)
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std).requires_grad_()
+        return mu + eps * std
+    
+    def forward(self, fused: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # forward pass through the VAE
+        mu, logvar = self.encode(fused)
+        z = self.reparameterize(mu, logvar)
+        logits = self.decode(z)
+        return mu, logits
+    
+    def loss(self, logits, target_idx, mask, mu, logvar, weights=None):
+        # compute the VAE loss, including reconstruction loss and KL divergence
+        if mask.sum() == 0:
+            return logits.new_zeros(())
+        masked_weights = weights[mask] if weights is not None else None
+        reconstruction_loss = self.loss_fn(logits[mask], target_idx[mask], weights=masked_weights)
+        kl_divergence = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+        return reconstruction_loss + kl_divergence
     
 class Hierarchy:
     def __init__(self, parents: np.ndarray):
@@ -98,6 +136,10 @@ class FlatSoftmaxNLL(nn.Module):
     full-tree NODE indices (internal nodes allowed). Loss rewards probability
     mass anywhere in the target node's leaf subtree."""
 
+    EPS = 1e-12
+    FAST_PATH_MAX_ELEMENTS_CPU = 64_000_000
+    FAST_PATH_MAX_ELEMENTS_CUDA = 16_000_000
+
     def __init__(self, parents: np.ndarray, reduction: str = "mean"):
         super().__init__()
         assert reduction in ("mean", "none")
@@ -108,14 +150,59 @@ class FlatSoftmaxNLL(nn.Module):
         self.register_buffer("leaf_masks", torch.from_numpy(leaf_masks))
         self.reduction = reduction
 
-    def forward(self, scores: torch.Tensor, target_idx: torch.Tensor) -> torch.Tensor:
-        # scores: [B, n_leaf] logits.  target_idx: [B] node indices in the full tree.
-        logp_leaf = F.log_softmax(scores, dim=-1)              # [B, n_leaf]
-        allowed = self.leaf_masks[target_idx.long()]           # [B, n_leaf] bool
-        neg_inf = torch.tensor(float("-inf"), device=scores.device)
-        logp_allowed = torch.where(allowed, logp_leaf, neg_inf)
-        logp_label = torch.logsumexp(logp_allowed, dim=-1)     # log P(subtree) [B]
-        loss = -logp_label
+    def forward(self, scores: torch.Tensor, target_idx: torch.Tensor, weights: torch.Tensor = None) -> torch.Tensor:
+        # scores: [B, n_leaf] logits. target_idx: [B] node indices in the full tree.
+        if scores.ndim != 2:
+            raise ValueError(f"Expected scores to have shape [B, n_leaf], got {tuple(scores.shape)}")
+
+        target_idx = target_idx.long().reshape(-1)
+        if target_idx.shape[0] != scores.shape[0]:
+            raise ValueError(
+                f"Batch mismatch in taxonomy loss: scores has B={scores.shape[0]} but target_idx has B={target_idx.shape[0]}"
+            )
+
+        if target_idx.numel() > 0:
+            min_target = int(target_idx.min().item())
+            max_target = int(target_idx.max().item())
+            if min_target < 0 or max_target >= self.leaf_masks.shape[0]:
+                raise ValueError(
+                    f"Target index out of range for taxonomy loss: min={min_target}, max={max_target}, n_nodes={self.leaf_masks.shape[0]}"
+                )
+
+        if scores.shape[1] != self.leaf_masks.shape[1]:
+            raise ValueError(
+                f"Leaf dimension mismatch in taxonomy loss: scores has n_leaf={scores.shape[1]} but hierarchy has n_leaf={self.leaf_masks.shape[1]}"
+            )
+
+        # Fast path: fully vectorized and typically much faster on GPU/CPU.
+        # Fallback path: grouped logsumexp to cap temporary tensor sizes for very large batches.
+        max_fast_path_elements = (
+            self.FAST_PATH_MAX_ELEMENTS_CUDA if scores.is_cuda else self.FAST_PATH_MAX_ELEMENTS_CPU
+        )
+        use_fast_path = (scores.shape[0] * scores.shape[1]) <= max_fast_path_elements
+        if use_fast_path:
+            p_leaf = F.softmax(scores, dim=-1)  # [B, n_leaf]
+            target_leaf_masks = self.leaf_masks.index_select(0, target_idx).to(dtype=p_leaf.dtype)
+            target_mass = torch.sum(p_leaf * target_leaf_masks, dim=-1)
+            loss = -torch.log(target_mass.clamp_min(self.EPS))
+        else:
+            logp_leaf = F.log_softmax(scores, dim=-1)  # [B, n_leaf]
+            loss = torch.empty(scores.shape[0], dtype=logp_leaf.dtype, device=scores.device)
+            unique_targets, inverse_indices = torch.unique(target_idx, return_inverse=True)
+            for idx, t in enumerate(unique_targets):
+                row_mask = inverse_indices == idx
+                leaf_mask_t = self.leaf_masks[t]
+                logp_subtree = torch.logsumexp(logp_leaf[row_mask][:, leaf_mask_t], dim=-1)
+                loss[row_mask] = -logp_subtree
+
+        if weights is not None:
+            weights = weights.reshape(-1)
+            if weights.shape[0] != loss.shape[0]:
+                raise ValueError(
+                    f"Batch mismatch in taxonomy loss weights: loss has B={loss.shape[0]} but weights has B={weights.shape[0]}"
+                )
+            loss = loss * weights
+
         return loss.mean() if self.reduction == "mean" else loss
 
 class TaxonomyFusion(nn.Module):
@@ -132,7 +219,7 @@ class TaxonomyFusion(nn.Module):
     """
     def __init__(self, in_dim, table_parent, tax_nodes=None, node_indices=None,
                  hidden=512, dropout=0.2,
-                 tax_emb_dim=64, latent_dim: int=32,
+                 tax_emb_dim=128, latent_dim: int=128,
                  warmup_steps=2000, detach_prediction=True,
                  use_node_probs=True):
         super().__init__()
@@ -150,7 +237,6 @@ class TaxonomyFusion(nn.Module):
             nn.LayerNorm(tax_emb_dim),
             nn.LeakyReLU(),
         )
-        latent_dim = latent_dim or in_dim
         # Fuse trunk + taxonomy embedding -> clustering latent.
         self.fuse = nn.Sequential(
             nn.Linear(in_dim + tax_emb_dim, latent_dim),

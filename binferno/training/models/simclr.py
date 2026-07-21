@@ -1,3 +1,5 @@
+from typing import Dict, Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -52,8 +54,7 @@ class NeuralNetwork(nn.Module):
                 self.tnf_enc_dim += tax_emb_dim
             else:
                 # hierarchical taxonomy.
-                tax_emb_dim += tnf_dim + coverage_dim
-                self.tnf_enc_dim += self.LATENT_DIM
+                tax_emb_dim = output_dim
                 self.taxonomy_encoder = TaxonomyFusion(
                     in_dim=tax_emb_dim,
                     latent_dim=self.LATENT_DIM,
@@ -98,7 +99,7 @@ class NeuralNetwork(nn.Module):
         self, 
         x: torch.Tensor,
         tax_emb: torch.Tensor = None
-    ):
+    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor|None|Dict]]:
         tnf_features = x[:, : self.tnf_dim]
         cov_features = x[:, self.tnf_dim : self.tnf_dim + self.coverage_dim]
         cov_encode = self.coverage_encoder(cov_features)  # not normalized anymore.
@@ -109,11 +110,12 @@ class NeuralNetwork(nn.Module):
                 fused_encode = self.tnf_encoder(
                     torch.cat([tnf_features, F.normalize(cov_encode, dim=-1)], dim=-1)
                 )
-                return fused_encode, cov_encode, tax_emb
+                return fused_encode, cov_encode, tax_emb # here it is a tensor.
             else:
-                fused_emb = torch.cat([tnf_features, cov_features, tax_emb], dim=1)
-                tax_encode = self.taxonomy_encoder(fused_emb)['latent']
-                tnf_features = torch.cat([tnf_features, F.normalize(tax_encode, dim=-1)], dim=-1)
+                fused_encode = self.tnf_encoder(
+                    torch.cat([tnf_features, F.normalize(cov_encode, dim=-1)], dim=-1)
+                )
+                tax_encode = self.taxonomy_encoder(fused_encode)
                 return fused_encode, cov_encode, tax_encode
         else:
             fused_encode = self.tnf_encoder(
