@@ -1,14 +1,14 @@
+# features/coverage.py
 import os
-import glob
 from multiprocessing import Pool
-
 from typing import Dict, List, Set, Tuple, Union, Any
+import glob
 import pandas as pd
+from .base import BaseFeatureBuilder
 import numpy as np
 import pysam
 from tqdm import tqdm
-
-from .base import BaseFeatureBuilder
+from pydantic import Field
 
 FragmentDict = Dict[str, Dict[str, Union[str, List[str]]]]
 CoverageDict = Dict[str, float]
@@ -67,7 +67,6 @@ def _calculate_fragment_stats_vectorized(coverage_array, fragment_coords):
             if len(fragment_coverage) > 0:
                 means[i] = np.mean(fragment_coverage)
                 stds[i] = (
-                    # Here we computed the standard deviation initially using np.std. 
                     np.std(fragment_coverage) if len(fragment_coverage) > 1 else 0.0
                 )
             else:
@@ -118,7 +117,7 @@ def _calculate_fragment_stats_vectorized(coverage_array, fragment_coords):
 
                 # Handle numerical precision issues
                 vars_valid = np.maximum(vars_valid, 0)
-                stds_valid = np.sqrt(vars_valid) # variance got square rooted. 
+                stds_valid = np.sqrt(vars_valid)
 
                 # Map back to full arrays
                 means[valid_mask] = means_valid
@@ -144,8 +143,8 @@ def _calculate_fragment_stats_vectorized(coverage_array, fragment_coords):
 
 def _process_contig_coverage_worker(args):
     bam_contig_name, contig_data_list, total_coverage_per_base, bam_contig_length = args
-    fragment_coverage: Dict[str, float] = {}
-    fragment_coverage_std: Dict[str, float] = {}
+    fragment_coverage = {}
+    fragment_coverage_std = {}
 
     try:
         if total_coverage_per_base is None or bam_contig_length is None:
@@ -469,7 +468,7 @@ def _normalise_coverage_dicts(
             {k: v / factor for k, v in coverage_std.items()},
         )
 
-    elif max_normalize: # change to elif: the rpkm_normalize and max_normalize are mutually exclusive, so we can use elif here.
+    if max_normalize:
         pseudocount = 1e-5
 
         cov = {k: v + pseudocount for k, v in coverage.items()}
@@ -585,7 +584,7 @@ def calculate_bam_cov(
             bam_batch,
             disable_progress=disable_inner_progress,
         )
-        
+
         if max_norm_stacked:
             coverage, coverage_std = _normalise_coverage_dicts(
                 coverage=coverage,
@@ -663,7 +662,15 @@ def max_normalize_stacked_coverage(
 
 
 class CoverageFeatureBuilder(BaseFeatureBuilder):
-    # we will lock in rpkm normalization and discard max normalization.
+    rpkm_normalize: bool = Field(
+        default=True,
+        description=("Whether to apply RPKM normalization for non-SimCLR paths."),
+    )
+    max_normalize: bool = Field(
+        default=False,
+        description=("Whether to apply max normalization."),
+    )
+
     def __call__(
         self,
         fragment_dict: dict,
@@ -681,8 +688,8 @@ class CoverageFeatureBuilder(BaseFeatureBuilder):
             bam_batch=bam_batch,
             fragments_dict=fragment_dict,
             threads=threads,
-            rpkm_normalize=True,
-            max_normalize=False,
+            rpkm_normalize=self.rpkm_normalize,
+            max_normalize=self.max_normalize,
             max_norm_stacked=max_norm_stacked,
         )
         if max_norm_stacked:
@@ -690,3 +697,8 @@ class CoverageFeatureBuilder(BaseFeatureBuilder):
 
         return cov_df
 
+
+# ======= Multisample coverage features. =======
+# class CoverageMultiFeatureBuilder(CoverageFeatureBuilder):
+# def __call__():
+# pass

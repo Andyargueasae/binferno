@@ -5,9 +5,9 @@ import re
 from typing import Any, Tuple
 
 import pandas as pd
+from pydantic import Field
 import loguru
 import numpy as np
-from pydantic import Field
 from sklearn.preprocessing import normalize
 from sklearn.cluster import DBSCAN, Birch
 from sklearn.neighbors import kneighbors_graph
@@ -148,7 +148,6 @@ class DbscanClustering(BaseClustering): # add the choice of HDBSCAN in addition 
             scoring="count",  # Path A; switch to "smooth" to compare
             do_rescue=True,  # long-read singleton + BIRCH rescue
             logger=logger,
-            hdbscan=self.hdbscan
         )
         logger.info(
             f"DBSCAN sweep: {len(best_bins)} bins, score={best_score:.3f}, "
@@ -157,11 +156,7 @@ class DbscanClustering(BaseClustering): # add the choice of HDBSCAN in addition 
 
         # turn best_bins into a dataframe of contig_name -> bin_label, where bin_label is an integer from 0 to len(best_bins)-1.
         best_bin_df = pd.DataFrame(
-            [
-                (namelist[ci], bin_label)
-                for bin_label, bin_indices in enumerate(best_bins)
-                for ci in bin_indices
-            ],
+            [(namelist[ci], bin_label) for bin_label, bin_indices in enumerate(best_bins) for ci in bin_indices],
             columns=["contig_id", "cluster_id"],
         )
         # save a copy of this file for later use in post-processing.
@@ -177,17 +172,13 @@ class DbscanClustering(BaseClustering): # add the choice of HDBSCAN in addition 
 
             pickle.dump(result, f)
 
-        logger.info(
-            "Clustering completed. Saved results and epsilon grid to output directory."
-        )
+        logger.info("Clustering completed. Saved results and epsilon grid to output directory.")
         return result
-
 
 def completeness_contamination(counts: np.ndarray, n_scgs: int) -> Tuple[float, float]:
     n_total = counts.sum()
     n_unique = (counts > 0).sum()
     return n_unique / n_scgs, (n_total - n_unique) / n_scgs
-
 
 def count_markers_saturated(
     contig_indices: list, contig_to_markers: dict, namelist: list, n_scgs: int
@@ -358,7 +349,6 @@ def dbscan_marker_sweep(
     lam: float = 1.0,
     do_rescue: bool = False,  # noise-rescue pass on the winning clustering
     logger: loguru._logger.Logger = None,
-    hdbscan: bool = False,  # Whether to use HDBSCAN instead of DBSCAN
 ):
     graph = build_knn_graph(latent, metric=metric)
     eps_grid = derive_eps_grid(graph, latent.shape[0])

@@ -52,11 +52,9 @@ class BinfernoTrainer(BaseTrainer):
         output_dirs = []
         embeddings = pd.DataFrame()
         if not simclr and not barlow_twins:
-            raise ValueError(
-                "At least one training method must be chosen. \
+            raise ValueError("At least one training method must be chosen. \
                             Please set training_method to (True, False) for SimCLR, \
-                            (False, True) for Barlow Twins, or (True, True) for both."
-            )
+                            (False, True) for Barlow Twins, or (True, True) for both.")
         if simclr:
             output_dirs.append(output_dir / "simclr")
             train_modules.append(self.simclr)

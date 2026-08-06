@@ -1,7 +1,4 @@
 
-.. image:: docs/binferno-banner.jpg
-    :alt: Binferno Banner
-
 =====================================================
 Binferno: Contrastive Barlow-Twins metagenomic binning
 =====================================================
@@ -43,7 +40,7 @@ Check the installation by running:
 
 .. code-block:: bash
 
-    binferno --help
+    Binferno --help
 
 Input features
 ================
@@ -88,5 +85,5 @@ For more details, please refer to the documentation: https://andyargueasae.githu
 Credits
 =====
 
-Binferno is developed by Yuhao Tong and `Robert Turnbull <https://robturnbull.com>`_. 
+Binferno is developed by Yuhao Tong and Robert Turnbull. 
 

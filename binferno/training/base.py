@@ -1,25 +1,16 @@
 import math
 import os
 import random
-from pathlib import Path
-
 import numpy as np
 from pydantic import BaseModel
-import pyfastx
 import pandas as pd
+from pathlib import Path
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from loguru._logger import Logger
-import rich.progress as progress
-from typing import Dict, List, Tuple
+from typing import List, Dict, Tuple
 
 from ..features import BinfernoFeatureBuilder
-
-TAX_NODES = "tax_node"
-TAX_NODE_INDICES = "tax_node_index"
-PARENTAL_ARRAY = "parental_array"
-TAXONOMY_DF="contig_taxonomy_df"
 
 
 class BaseTrainer(BaseModel):
@@ -36,14 +27,8 @@ class BaseTrainer(BaseModel):
         raise NotImplementedError(
             "The __call__ method must be implemented by the subclass."
         )
-    def length_weight(self, contig: str) -> Dict[str, int]:
-        seq_obj = pyfastx.Fastx(contig)
-        contig_length = dict()
-        for name, seq in seq_obj:
-            contig_length[name] = len(seq)
-        return contig_length
 
-    def unify_seeds(self, seed: int):
+    def unify_seeds(self, seed):
         # synchronize random seeds for reproducibility.
         random.seed(seed)
         np.random.seed(seed)
@@ -56,13 +41,13 @@ class BaseTrainer(BaseModel):
             torch.backends.cudnn.benchmark = False
 
     class EarlyStoppingManager:
-        def __init__(self, patience: int = 10):
+        def __init__(self, patience=10):
             self.patience = patience
             self._lowest_loss = float("inf")
             self._saved_state = None
             self._stagnant_epochs = 0
 
-        def check_improvement(self, loss: float, model_state: dict):
+        def check_improvement(self, loss, model_state):
             improved = loss < self._lowest_loss
 
             if improved:
@@ -80,7 +65,7 @@ class BaseTrainer(BaseModel):
             """Return the best checkpoint state and its associated loss."""
             return self._saved_state, self._lowest_loss
 
-    def print_stats(self, stats: dict, epoch: int, method: str = "barlow_twins", logger: Logger = None):
+    def print_stats(self, stats, epoch, method="barlow_twins", logger=None):
         if logger is None:
             raise ValueError(
                 "Logger is not provided for printing stats. Please provide a logger."
@@ -104,7 +89,7 @@ class BaseTrainer(BaseModel):
         warmup: bool = False,
         warmup_epochs: int = 10,
         max_lr_hold_epochs: int = 0,
-        learning_rate: float = 1e-3,
+        learning_rate: float = 2.5e-3,
     ):
         max_lr = learning_rate
         # warmup_start_lr = max_lr * 0.1
@@ -116,13 +101,14 @@ class BaseTrainer(BaseModel):
 
         def lr_lambda(current_epoch):
 
-            if current_epoch < hold_end:
-                if warmup and current_epoch < warmup_epochs:
+            if current_epoch < warmup_epochs:
+                if warmup:
                     # Linear ramp from start_lr to max_lr
                     progress = current_epoch / max(warmup_epochs - 1, 1)
                     lr = start_lr + progress * (max_lr - start_lr)
                 else:
-                    lr = max_lr
+                    if current_epoch < hold_end:
+                        lr = max_lr
 
             else:
                 decay_epochs = epochs - hold_end
@@ -141,12 +127,11 @@ class BaseTrainer(BaseModel):
 
     def get_embeddings(
         self,
-        model: nn.Module,
-        data_df: pd.DataFrame,
-        taxonomy_df: pd.DataFrame,
-        output_path: Path = None,
-        batch_size: int = 1024,
-        save_individual_embs: bool =False,
+        model=None,
+        data_df=None,
+        output_path=None,
+        batch_size=1024,
+        save_individual_embs=False,
     ) -> pd.DataFrame:
 
         if not os.path.exists(os.path.dirname(output_path)):
@@ -161,8 +146,6 @@ class BaseTrainer(BaseModel):
         embeddings = dict()
         kmer_embs = dict()
         cov_embs = dict()
-        tax_embs = dict()
-        
         orig_contigs = data_df[data_df.index.str.endswith(".original")].copy()
         suffix = ".original"
 
@@ -170,55 +153,31 @@ class BaseTrainer(BaseModel):
             # reformat the data_df index by finding those not containing ".", rename them as .original.
             orig_contigs = data_df[data_df.index.str.endswith(".0")].copy()
             suffix = ".0"
-        
-        if taxonomy_df is not None:
-            if model.hierarchical_taxonomy:
-                tax_index = [ind.split(".", 1)[0] for ind in orig_contigs.index]
-                taxonomy_df = taxonomy_df.loc[tax_index].copy()
-            else:
-                taxonomy_df = taxonomy_df.loc[orig_contigs.index].copy()
 
-            assert taxonomy_df.shape[0] == orig_contigs.shape[0], "Mismatch in number of rows between taxonomy_df and orig_contigs."
-        
         with torch.no_grad():
-            for i in progress.track(range(0, len(orig_contigs), batch_size), description="Processing batches"):
+            for i in range(0, len(orig_contigs), batch_size):
                 batch_encode = orig_contigs.iloc[i : i + batch_size]
                 batch_features = torch.tensor(
                     batch_encode.values, dtype=torch.float32
                 ).to(device)
 
-                if taxonomy_df is not None:
-                    batch_taxonomy = taxonomy_df.iloc[i : i + batch_size]
-                    batch_taxonomy = torch.tensor(
-                        batch_taxonomy.values, dtype=torch.float32
-                    ).to(device)
-                else:
-                    batch_taxonomy = None
-                batch_embeddings = model.get_embedding(batch_features, batch_taxonomy)
+                batch_embeddings = model.get_embedding(batch_features)
                 batch_embeddings = F.normalize(batch_embeddings, p=2, dim=1)
                 for j, header in enumerate(batch_encode.index):
                     clean_header = header.replace(suffix, "")
                     embeddings[clean_header] = batch_embeddings[j].cpu().numpy()
 
+                    # Save encoder embeddings if requested
                     if save_individual_embs:
-                        if taxonomy_df is not None:
-                            kmer_emb, cov_emb, tax_emb = model.get_separate_modality_embs(
-                                batch_features, batch_taxonomy
-                            )
-                            kmer_embs[clean_header] = kmer_emb[j].cpu().numpy()
-                            cov_embs[clean_header] = cov_emb[j].cpu().numpy()
-                            tax_embs[clean_header] = tax_emb[j].cpu().numpy()
-                        else:
-                            kmer_emb, cov_emb = model.get_separate_modality_embs(
-                                batch_features
-                            )
-                            kmer_embs[clean_header] = kmer_emb[j].cpu().numpy()
-                            cov_embs[clean_header] = cov_emb[j].cpu().numpy()
+                        kmer_emb, cov_emb = model.get_separate_modality_embs(
+                            batch_features
+                        )
+                        kmer_embs[clean_header] = kmer_emb[j].cpu().numpy()
+                        cov_embs[clean_header] = cov_emb[j].cpu().numpy()
 
         embeddings_df = pd.DataFrame.from_dict(embeddings, orient="index")
         embeddings_df.to_csv(str(embeddings_path), sep="\t")
 
-        # note: if architecture changes, this save_individual_embs may no longer be compatible.
         if save_individual_embs:
             kmer_embeddings = os.path.join(
                 os.path.dirname(output_path), "tnf_embeddings.tsv"
@@ -231,12 +190,6 @@ class BaseTrainer(BaseModel):
 
             kmer_emb_df.to_csv(kmer_embeddings, sep="\t")
             cov_emb_df.to_csv(coverage_embeddings, sep="\t")
-            if taxonomy_df is not None:
-                tax_embeddings = os.path.join(
-                    os.path.dirname(output_path), "tax_embeddings.tsv"
-                )
-                tax_emb_df = pd.DataFrame.from_dict(tax_embs, orient="index")
-                tax_emb_df.to_csv(tax_embeddings, sep="\t")
 
         return embeddings_df
 

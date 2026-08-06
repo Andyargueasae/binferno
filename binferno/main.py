@@ -1,8 +1,8 @@
 from pathlib import Path
 
 import tyro
-from loguru import logger
 from typing_extensions import Annotated
+from loguru import logger
 
 from binferno.training import BinfernoTrainer
 from binferno.clustering import BinfernoClustering
@@ -11,30 +11,12 @@ from binferno.features import BinfernoFeatureBuilder
 
 
 def binferno(
-    contigs: Annotated[
-        Path,
-        tyro.conf.arg(
-            name="contigs",
-            metavar="CONTIGS",
-            help="Path to the input contigs in fasta format.",
-        ),
-    ],
-    bam_dir: Annotated[
-        Path,
-        tyro.conf.arg(
-            name="bam_dir",
-            metavar="BAM_DIR",
-            help="Path to the input directory of BAM files, must be paired with contigs. Used for calculating coverage mean and std.",
-        ),
-    ],
-    output_dir: Annotated[
-        Path,
-        tyro.conf.arg(
-            name="output_dir",
-            metavar="OUTPUT_DIR",
-            help="Path to the output directory to store all results, including intermediate results and final bins.",
-        ),
-    ],
+    # Input contigs in fasta format.
+    contigs: Path,
+    # Input bam file for the contigs, used for coverage estimation.
+    bam: Path,
+    # Output directory to store all results, including intermediate results and final bins.
+    output_dir: Path,
     features: BinfernoFeatureBuilder,
     training: BinfernoTrainer,
     clustering: BinfernoClustering,
@@ -64,13 +46,12 @@ def binferno(
         ),
     ] = False,
 ) -> None:
-
     output_dir.mkdir(parents=True, exist_ok=True)
     logger.add(f"{output_dir}/binferno.log", rotation="1 MB", retention="10 days")
 
     embeddings = training(
         contigs=contigs,
-        bam=bam_dir,
+        bam=bam,
         output_dir=output_dir,
         features=features,
         threads=threads,
