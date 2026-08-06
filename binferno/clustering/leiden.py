@@ -123,7 +123,7 @@ class LeidenClustering(BaseClustering):
 
         num_workers = max(1, int(threads or 1))
 
-        parameter_list = [0.5, 1, 5, 10]
+        parameter_list = [0.5, 1, 10]
         bandwidth_list = [0.05, 0.1, 0.2, 0.3]
         partgraph_ratio_list = [50, 80, 100]
         max_edges_list = [15, 100]
@@ -149,22 +149,18 @@ class LeidenClustering(BaseClustering):
         # after the last two runs, update clustering. Also, debug the "both" mode, and add-corgi mode.
         with mp.Pool(processes=num_workers) as pool:
             for max_edges in max_edges_list:
-                n = norm_embeddings.shape[0]
-                k = min(max_edges + 1, n)
-                ef = max(max_edges * 10, k * 4, 50)
-
                 index = self.fit_hnsw_index(
                     logger=logger,
                     features=norm_embeddings,
                     num_threads=num_workers,
-                    ef=ef,
+                    ef=max_edges * 10,
                     M=16,
                     space="l2",
                 )
 
                 ann_neighbor_indices, ann_distances = index.knn_query(
                     norm_embeddings,
-                    k=k,
+                    k=max_edges + 1,
                     num_threads=num_workers,
                 )
 

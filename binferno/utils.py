@@ -10,7 +10,6 @@ import pyfastx
 import pyhmmer
 import pyrodigal
 
-
 def run_hmmsearch_pyhmmer(
     hmm_path: Path,
     faa_path: Path,
@@ -144,10 +143,10 @@ def gen_seed(
     :param quarter: The quarter identifier (default: "3quarter").
     :return: The number of candidate seeds generated.
     """
-    # fragScanURL = "run_FragGeneScan.pl"
-    # fragResult_prefix = output_dir / (Path(contig_file).name + ".frag")
-    # # hmmer: try rewriting this cmd-based run to pyhmmer api.
-    # hmmExeURL = "hmmsearch"
+    fragScanURL = "run_FragGeneScan.pl"
+    fragResult_prefix = output_dir / (Path(contig_file).name + ".frag")
+    # hmmer: try rewriting this cmd-based run to pyhmmer api.
+    hmmExeURL = "hmmsearch"
     markerExeURL = Path(__file__).parent / "auxiliary" / f"getmarker_{quarter}.py"
     markerURL = Path(__file__).parent / "auxiliary" / f"{marker_name}.hmm"
     hmmResultURL = output_dir / (Path(contig_file).name + "." + marker_name + ".hmmout")

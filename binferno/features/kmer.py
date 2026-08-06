@@ -1,13 +1,18 @@
-import itertools
-
 from typing import Tuple, List
+from itertools import product
+from pathlib import Path
+import itertools
+import os
+from .base import BaseFeatureBuilder
 import pandas as pd
 import numpy as np
 from pydantic import Field
 
-from .base import BaseFeatureBuilder
-
 KMER_LEN = 4
+KERNEL = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "kernel.npz"
+)  # give the actual path of the kernel.npz.
+
 
 def validate_input_array(array: np.ndarray) -> np.ndarray:
     "Returns array similar to input array but C-contiguous and with own data. Derived from VAMB."
@@ -108,6 +113,47 @@ def _calculate_kmer_composition(
         columns=[str(i) for i in range(n_features)],
     )
 
+
+def generate_kmer_projection(contigs: dict) -> Tuple[np.ndarray, List[str]]:
+
+    # load kernel first.
+    npz = np.load(KERNEL)
+    array = validate_input_array(npz["arr_0"])
+    npz.close()
+    assert array.shape == (256, 103)
+    kmer_dict = {
+        "".join(kmer): idx for idx, kmer in enumerate(product("ACGT", repeat=KMER_LEN))
+    }
+    num_contigs = sum([1 for i, _ in enumerate(contigs)])
+    projection_matrix = np.zeros(
+        (num_contigs, 103), dtype=np.float32
+    )  # We knew that the resulting projection will be 103-dimensional, from the 2009 paper.
+    identifiers = []
+
+    raw_mat = np.zeros((num_contigs, 4**KMER_LEN), dtype=np.float32)
+    for i, (name, seq) in enumerate(contigs):
+        identifiers.append(name)
+        kmer_counts = np.zeros(4**KMER_LEN, dtype=np.float32)
+
+        for j in range(len(seq) - KMER_LEN + 1):
+            kmer = seq[j : j + KMER_LEN]
+            if all(base in "ACGT" for base in kmer):
+                kmer_counts[kmer_dict[kmer]] += 1
+        raw_mat[i, :] = (
+            kmer_counts  # store the 256-size kmer count for the iterating sequence.
+        )
+
+    s = raw_mat.sum(axis=1).reshape(-1, 1)
+    s[s == 0] = 1.0
+    raw_mat *= 1 / s  # normalized by summed frequencies.
+    raw_mat -= 1 / 256  # add pseudocount 1/256.
+    projection_matrix = np.dot(raw_mat, array)  # TL = P.
+    assert (
+        projection_matrix.shape[1] == 103
+    ), "Projection matrix should have 103 features as per the kernel dimensions."
+    return projection_matrix, identifiers
+
+
 class KmerFeatureBuilder(BaseFeatureBuilder):
     pseudocount: int = Field(
         1,
@@ -124,5 +170,6 @@ class KmerFeatureBuilder(BaseFeatureBuilder):
             fragments, kmer_len=self.kmer_len, pseudocount=self.pseudocount
         )
         return kmer_df
+
 
 # ======= Multisample kmer features. =======

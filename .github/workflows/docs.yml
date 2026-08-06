@@ -2,7 +2,7 @@ name: docs
 
 on:
   push:
-    branches: main
+    branches: classes
 
   # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
@@ -30,11 +30,11 @@ jobs:
       matrix:
         python-version: ["3.10"]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
       - name: Install poetry
         run: pipx install poetry
       - name: Install dependencies for Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v4
         with:
           python-version: ${{ matrix.python-version }}
           cache: 'poetry'
@@ -45,9 +45,9 @@ jobs:
         run: |
           cd docs && poetry run sphinx-build -b html -E source ../gh-pages
       - name: Setup Pages
-        uses: actions/configure-pages@v6
+        uses: actions/configure-pages@v4
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v5
+        uses: actions/upload-pages-artifact@v3
         with:
           path: 'gh-pages'
           name: 'github-pages'
@@ -59,8 +59,9 @@ jobs:
           ls -R gh-pages
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v5
+        uses: actions/deploy-pages@v4
       - name: Verify built site
         run: |
           ls -la gh-pages
           test -f gh-pages/index.html && echo "index.html exists" || (echo "index.html missing" && exit 1)
+          
