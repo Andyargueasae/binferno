@@ -80,10 +80,6 @@ class DnaBertSFeatureBuilder(BaseFeatureBuilder):
 
         # form a ndarray first.
         features = np.asarray(features)
-        assert (
-            self.n_components < features.shape[1]
-        ), f"n_components ({self.n_components}) must be less than feature dimension ({features.shape[1]})."
-
         df = pd.DataFrame(features, index=names)
         end_time = time.time()
         logger.info(f"Feature extraction completed in {end_time - start_time:.2f} seconds.")

@@ -113,6 +113,7 @@ class KmerFeatureBuilder(BaseFeatureBuilder):
         1,
         description="Pseudocount to add to k-mer counts before normalization. Default is 1.",
     )
+    # TODO: think of using larger k.
     kmer_len: int = Field(
         KMER_LEN,
         description=f"Length of k-mers to compute. Default is {KMER_LEN}.",

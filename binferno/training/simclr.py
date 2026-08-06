@@ -22,7 +22,7 @@ from .models.simclr import NeuralNetwork
 from .InfoNCEloss import info_nce_loss, info_nce_loss_hard_weight
 from .base import (
     BaseTrainer, 
-    label_augmented_views, build_mask, 
+    label_augmented_views, build_mask,
     TAXONOMY_DF, TAX_NODES, TAX_NODE_INDICES, PARENTAL_ARRAY
 )
 

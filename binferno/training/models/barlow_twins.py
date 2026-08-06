@@ -85,7 +85,7 @@ class NeuralNetwork(nn.Module):
             dropout=0.0,
         )
 
-        if self.tax_emb_dim is not None:
+        if self.tax_emb_dim > 0:
             self.fuse_tax_fusion = nn.Sequential(
                 nn.Linear(self.representation_dim + self.output_dim, self.representation_dim),
                 nn.BatchNorm1d(self.representation_dim),
@@ -149,7 +149,10 @@ class NeuralNetwork(nn.Module):
     ):
         z1, tax_emb1 = self.forward_one(x1, tax_emb1)
         z2, tax_emb2 = self.forward_one(x2, tax_emb2)
-        return z1, z2, tax_emb1, tax_emb2
+        if tax_emb1 is not None and tax_emb2 is not None:
+            return z1, z2, tax_emb1, tax_emb2
+        else:
+            return z1, z2
 
 def _build_bt_projector(in_dim, proj_dim=768, n_layers=3, dropout=0.0):
     """

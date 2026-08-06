@@ -36,6 +36,7 @@ class BinfernoClustering(BaseClustering):
         output_path: Path = None,
         logger: loguru._logger.Logger = None,  # type: ignore
         threads: int = 1,
+        longread: bool = False,
     ) -> ClusterResult:
         match self.cluster_method:
             case ClusterMethod.leiden:
@@ -46,6 +47,7 @@ class BinfernoClustering(BaseClustering):
                     logger=logger,
                     threads=threads,
                     plastid=self.plastid,
+                    longread=longread,
                 )
             case ClusterMethod.dbscan:
                 result = self.dbscan(
@@ -55,5 +57,6 @@ class BinfernoClustering(BaseClustering):
                     logger=logger,
                     threads=threads,
                     plastid=self.plastid,
+                    longread=longread,
                 )
         return result

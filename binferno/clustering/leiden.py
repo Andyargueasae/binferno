@@ -12,6 +12,7 @@ import time
 import hnswlib
 import loguru
 import multiprocessing as mp
+from pydantic import Field
 
 from ..utils import gen_seed, calc_n50
 from .base import BaseClustering, ClusterResult
@@ -23,9 +24,10 @@ from .cluster_utils import (
     apply_dimension_reduction,
 )
 
-
 class LeidenClustering(BaseClustering):
     seed: int = 42
+    mutual: bool = Field(False, description="Whether to use mutual kNN filtering in Leiden clustering.")
+    cluster_min_length: int = Field(1000, description="Minimum contig length for phase-1 clustering.")
 
     def __call__(
         self,
@@ -35,6 +37,7 @@ class LeidenClustering(BaseClustering):
         logger: loguru._logger.Logger,
         threads: int = 1,
         plastid: bool = False,
+        longread: bool = False,
     ) -> ClusterResult:
         np.random.seed(self.seed)
 
@@ -86,7 +89,7 @@ class LeidenClustering(BaseClustering):
         emb_mat, namelist, length_weight = _filter_embeddings_by_length(
             emb_df=embeddings,
             contig_file=contigs,
-            contig_len=self.contig_len,
+            contig_len=self.cluster_min_length,
         )
 
         if len(namelist) == 0:
@@ -100,6 +103,15 @@ class LeidenClustering(BaseClustering):
         # check if to apply dimension reduction.
         if self.dimension_reduction:
             norm_embeddings = apply_dimension_reduction(norm_embeddings)
+
+        # Two-phase clustering will incorporate shorter contigs below 2500 bp. We can first try with mutual KNN, and then decide what to do. 
+        # seed_thresh = 2500  # or self.seed_len, a new param
+        # length_arr = np.asarray(length_weight)          # note: length_weight is per-contig length here
+        # long_idx = np.flatnonzero(length_arr >= seed_thresh)
+        # short_idx = np.flatnonzero(length_arr < seed_thresh)
+
+        # emb_long = norm_embeddings[long_idx]
+        # namelist_long = [namelist[i] for i in long_idx]
 
         seed_num = _read_seed_count(seed_file)
         mode = f"weight_seed_kmeans"
@@ -123,10 +135,10 @@ class LeidenClustering(BaseClustering):
 
         num_workers = max(1, int(threads or 1))
 
-        parameter_list = [0.5, 1, 5, 10]
-        bandwidth_list = [0.05, 0.1, 0.2, 0.3]
+        parameter_list = [0.5, 1, 5, 10, 30, 50, 70, 90, 100]
+        bandwidth_list = [0.05, 0.1, 0.2, 0.3] # we may have to replace this by actual-data driven sweeping.
         partgraph_ratio_list = [50, 80, 100]
-        max_edges_list = [15, 100]
+        max_edges_list = [100] # [15 may not always be optimal]
 
         seed_indices = gen_seed_idx(seed_file, contig_id_list=namelist)
         initial_list = list(np.arange(len(namelist), dtype=int))
@@ -253,6 +265,7 @@ class LeidenClustering(BaseClustering):
             bandwidth=bandwidth,
             lmode=lmode,
             partgraph_ratio=partgraph_ratio,
+            mutual=self.mutual,
         )
 
         vcount = len(namelist)
@@ -294,12 +307,12 @@ class LeidenClustering(BaseClustering):
         bandwidth: float,
         lmode: str,
         partgraph_ratio: float,
+        mutual: bool = True,          # NEW, mutual-KNN filter.
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Build a sparsified undirected edge list and transformed weights from ANN output.
-        """
         if bandwidth <= 0:
             raise ValueError("bandwidth must be > 0")
+
+        bandwidth_weight = [0.5, 1.0, 2.0]
 
         neighbor_targets = ann_neighbor_indices[:, 1:]
         neighbor_distances = ann_distances[:, 1:]
@@ -309,23 +322,28 @@ class LeidenClustering(BaseClustering):
         targets = neighbor_targets.reshape(-1)
         distances = neighbor_distances.reshape(-1)
 
+        # global distance prune (existing behaviour)
         dist_cutoff = np.percentile(distances, partgraph_ratio)
         keep = distances <= dist_cutoff
-
-        sources = sources[keep]
-        targets = targets[keep]
-        distances = distances[keep]
+        sources, targets, distances = sources[keep], targets[keep], distances[keep]
 
         non_self = sources != targets
-        sources = sources[non_self]
-        targets = targets[non_self]
-        distances = distances[non_self]
+        sources, targets, distances = sources[non_self], targets[non_self], distances[non_self]
 
+        # ---- NEW: mutual-kNN filter, before the upper-triangle collapse ----
+        if mutual:
+            directed = set(zip(sources.tolist(), targets.tolist()))
+            is_mutual = np.fromiter(
+                ((t, s) in directed for s, t in zip(sources.tolist(), targets.tolist())),
+                dtype=bool, count=len(sources),
+            ) # this line of code checks if the reverse edge (t, s) exists in the directed set of edges (s, t). If it does, then the edge is mutual and is kept; otherwise, it is filtered out.
+            sources, targets, distances = sources[is_mutual], targets[is_mutual], distances[is_mutual] # update the sources, targets, and distances arrays to only include mutual edges
+
+        # collapse to undirected upper triangle (existing, will reduce the number of edges by half)
         upper = sources < targets
-        sources = sources[upper]
-        targets = targets[upper]
-        distances = distances[upper]
+        sources, targets, distances = sources[upper], targets[upper], distances[upper]
 
+        # the similarity weighting scheme.
         if lmode == "l1":
             weights = np.exp(-np.sqrt(distances) / bandwidth)
         elif lmode == "l2":
@@ -333,11 +351,7 @@ class LeidenClustering(BaseClustering):
         else:
             raise ValueError(f"Unsupported lmode: {lmode}")
 
-        return (
-            sources.astype(np.int32),
-            targets.astype(np.int32),
-            weights.astype(np.float64),
-        )
+        return sources.astype(np.int32), targets.astype(np.int32), weights.astype(np.float64)
 
     def fit_hnsw_index(
         self,
@@ -404,3 +418,18 @@ class LeidenClustering(BaseClustering):
             resolution_parameter=resolution_parameter,
             partgraph_ratio=partgraph_ratio,
         )
+
+    def recruit_short(self, index_long, emb_short, short_names, long_assignments,
+                  namelist_long, k=15, agreement=0.6, num_threads=1):
+        """Assign each short contig to the majority community among its long-contig
+        neighbours, if agreement clears the floor; else leave unbinned."""
+        nbr_idx, _ = index_long.knn_query(emb_short, k=k, num_threads=num_threads)
+        out = {}
+        for i, name in enumerate(short_names):
+            labels = [long_assignments[namelist_long[j]] for j in nbr_idx[i]]
+            vals, counts = np.unique(labels, return_counts=True)
+            top = counts.argmax()
+            if counts[top] / counts.sum() >= agreement:
+                out[name] = vals[top]
+            # else: unbinned, deliberately omitted
+        return out

@@ -47,6 +47,14 @@ def binferno(
             help="Number of threads to use for parallel processing.",
         ),
     ] = 4,
+    longread: Annotated[
+            bool,
+            tyro.conf.arg(
+                name="longread",
+                metavar="LONGREAD",
+                help="True: input contigs are from long-read assembly, False: input contigs are from short-read assembly.",
+            ),
+        ]=False,
     train_only: Annotated[
         bool,
         tyro.conf.arg(
@@ -88,6 +96,7 @@ def binferno(
         output_path=cluster_output_dir,
         threads=threads,
         logger=logger,
+        longread=longread,
     )
 
     with open(cluster_output_dir / "cluster_results.pkl", "wb") as f:

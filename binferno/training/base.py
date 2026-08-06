@@ -333,24 +333,24 @@ def label_augmented_views(
     return augmented_taxonomy_df.astype(int) # ensure the index order matches the order of the features dataframe after sorting by method.
 
 # # TODO: next step: refactor this function, without any vamb-style coding. Intuitive. 
-# def build_mask( 
-#     contig_names: List[str], 
-#     contig_taxonomy: Dict[str, int], 
-#     node_indices: Dict) -> Tuple[torch.Tensor, torch.Tensor]:
-#     """
-#     contig_names    : list[str], in the SAME order as your feature matrix rows
-#     contig_taxonomy : dict name -> ContigTaxonomy (or missing/None if unlabeled)
-#     node_indices    : dict taxon_name -> node index   (from make_graph's ind_nodes)
-#     """
-#     n = len(contig_names)
-#     mask = np.zeros(n, dtype=bool) # default False
-#     for i, name in enumerate(contig_names): # i index is with same order of contig_names.
-#         name = name.rsplit(".", 1)[0] # remove any suffices.
-#         tax = contig_taxonomy.get(name, None)
-#         if tax is None:
-#             raise ValueError(f"Warning: Contig {name} not found in taxonomy. Assigning root index and mask False.")
-#         if tax == node_indices.get("root", -1): # back in feature module, all unclassified contigs are assigned to root.
-#             continue
-#         mask[i] = True
+def build_mask( 
+    contig_names: List[str], 
+    contig_taxonomy: Dict[str, int], 
+    node_indices: Dict) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    contig_names    : list[str], in the SAME order as your feature matrix rows
+    contig_taxonomy : dict name -> ContigTaxonomy (or missing/None if unlabeled)
+    node_indices    : dict taxon_name -> node index   (from make_graph's ind_nodes)
+    """
+    n = len(contig_names)
+    mask = np.zeros(n, dtype=bool) # default False
+    for i, name in enumerate(contig_names): # i index is with same order of contig_names.
+        name = name.rsplit(".", 1)[0] # remove any suffices.
+        tax = contig_taxonomy.get(name, None)
+        if tax is None:
+            raise ValueError(f"Warning: Contig {name} not found in taxonomy. Assigning root index and mask False.")
+        if tax == node_indices.get("root", -1): # back in feature module, all unclassified contigs are assigned to root.
+            continue
+        mask[i] = True
 
-#     return torch.from_numpy(mask)
+    return torch.from_numpy(mask)

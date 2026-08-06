@@ -27,6 +27,7 @@ from .base import (
     TAXONOMY_DF, TAX_NODES, TAX_NODE_INDICES, PARENTAL_ARRAY
 )
 
+# TODO: implement the length-aware Barlow Twins loss calculations. 
 class BarlowTwinsTrainer(BaseTrainer):
 
     learning_rate: float = Field(
@@ -40,7 +41,7 @@ class BarlowTwinsTrainer(BaseTrainer):
     )
     contig_length: int = Field(
         default=1000, description="Minimum contig length to be included in training."
-    )
+    ) # additional length-weighted loss: filter out noises in clustering. 
     view_num: int = Field(
         default=8, description="Number of augmented views to generate for each contig."
     )
@@ -644,7 +645,7 @@ class BarlowTwinsTrainer(BaseTrainer):
                 
                 total_loss.backward()
 
-            except ValueError:
+            except:
                 features1, features2, base_ids = batch_data
                 features1 = features1.to(device, non_blocking=True)
                 features2 = features2.to(device, non_blocking=True)

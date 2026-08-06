@@ -20,7 +20,7 @@ from .cluster_utils import (
     _read_seed_count,
 )
 
-
+# Particularly for long-read metagenomes, use DBSCAN to finish the clustering. The idea is to sweep over eps values, scoring each clustering by the number of near-complete, low-contamination bins it produces. The best eps is then used to assign contigs to bins, and any contigs that DBSCAN labeled as noise are re-evaluated for possible rescue..
 class DbscanClustering(BaseClustering): # add the choice of HDBSCAN in addition to DBSCAN.
     hdbscan: bool = Field(
         default=False,
@@ -34,6 +34,7 @@ class DbscanClustering(BaseClustering): # add the choice of HDBSCAN in addition 
         logger: loguru._logger.Logger,
         threads: int = 1,
         plastid: bool = False,
+        longread: bool = False,
     ) -> ClusterResult:
 
         result = ClusterResult(
