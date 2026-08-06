@@ -7,11 +7,16 @@ import pandas as pd
 from pathlib import Path
 import torch
 import torch.nn.functional as F
+import torch.nn as nn
 from loguru._logger import Logger
 from typing import List, Dict, Tuple
 
 from ..features import BinfernoFeatureBuilder
 
+TAX_NODES = "tax_node"
+TAX_NODE_INDICES = "tax_node_index"
+PARENTAL_ARRAY = "parental_array"
+TAXONOMY_DF="contig_taxonomy_df"
 
 class BaseTrainer(BaseModel):
 

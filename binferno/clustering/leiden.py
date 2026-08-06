@@ -138,7 +138,7 @@ class LeidenClustering(BaseClustering):
         parameter_list = [0.5, 1, 5, 10, 30, 50, 70, 90, 100]
         bandwidth_list = [0.05, 0.1, 0.2, 0.3] # we may have to replace this by actual-data driven sweeping.
         partgraph_ratio_list = [50, 80, 100]
-        max_edges_list = [100] # [15 may not always be optimal]
+        max_edges_list = [15, 100] # [15 may not always be optimal]
 
         seed_indices = gen_seed_idx(seed_file, contig_id_list=namelist)
         initial_list = list(np.arange(len(namelist), dtype=int))
