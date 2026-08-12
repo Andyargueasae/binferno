@@ -28,6 +28,7 @@ class LeidenClustering(BaseClustering):
     seed: int = 42
     mutual: bool = Field(False, description="Whether to use mutual kNN filtering in Leiden clustering.")
     cluster_min_length: int = Field(1000, description="Minimum contig length for phase-1 clustering.")
+    CPM: bool = Field(False, description="Whether to use CPM (Constant Potts Model) for Leiden clustering instead of RBER (Reichardt-Bornholdt).")
 
     def __call__(
         self,
@@ -135,7 +136,10 @@ class LeidenClustering(BaseClustering):
 
         num_workers = max(1, int(threads or 1))
 
-        parameter_list = [0.5, 1, 5, 10, 30, 50, 70, 90, 100]
+        if not self.CPM:
+            parameter_list = [0.5, 1, 5, 10, 30, 50, 70, 90, 100]
+        else:
+            parameter_list = [0.001, 0.005, 0.01, 0.05, 0.1, 0.2]
         bandwidth_list = [0.05, 0.1, 0.2, 0.3] # we may have to replace this by actual-data driven sweeping.
         partgraph_ratio_list = [50, 80, 100]
         max_edges_list = [15, 100] # [15 may not always be optimal]
@@ -271,18 +275,27 @@ class LeidenClustering(BaseClustering):
             directed=False,
         )
 
-        partition = leidenalg.RBERVertexPartition(
-            graph,
-            weights=weights.tolist(),
-            initial_membership=initial_list,
-            resolution_parameter=resolution_parameter,
-            node_sizes=list(length_weight),
-        )
+        if not self.CPM:
+            partition = leidenalg.RBERVertexPartition(
+                graph,
+                weights=weights.tolist(),
+                initial_membership=initial_list,
+                resolution_parameter=resolution_parameter,
+                node_sizes=list(length_weight),
+            )
+        else:
+            partition = leidenalg.CPMVertexPartition(
+                graph,
+                weights=weights.tolist(),
+                initial_membership=initial_list,
+                resolution_parameter=resolution_parameter,
+                # node_sizes=list(length_weight),
+            ) 
 
         optimiser = leidenalg.Optimiser()
         optimiser.optimise_partition(
             partition,
-            is_membership_fixed=is_membership_fixed,
+            is_membership_fixed=is_membership_fixed, # OK, this one should also be looked for. Run once on and once off. 
             n_iterations=-1,
         )
 

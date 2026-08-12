@@ -167,7 +167,7 @@ class BaseTrainer(BaseModel):
                 ).to(device)
 
                 batch_embeddings = model.get_embedding(batch_features)
-                batch_embeddings = F.normalize(batch_embeddings, p=2, dim=1)
+                batch_embeddings = F.normalize(batch_embeddings, p=2, dim=-1)
                 for j, header in enumerate(batch_encode.index):
                     clean_header = header.replace(suffix, "")
                     embeddings[clean_header] = batch_embeddings[j].cpu().numpy()

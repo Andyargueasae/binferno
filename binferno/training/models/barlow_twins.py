@@ -13,7 +13,9 @@ class NeuralNetwork(nn.Module):
         corgi_dim=0,
         dense_mode=False,
         kmer_dim=136,
+        tax_emb_dim=0,
         proj_head_dim=512,
+        h_tax=False,
     ):
         super(NeuralNetwork, self).__init__()
         self.coverage_dim = coverage_dim  # by default we ask users to provide coverage.
@@ -23,6 +25,8 @@ class NeuralNetwork(nn.Module):
         self.tnf_dim = tnf_dim
         self.tnf_enc_dim = kmer_dim
         self.corgi_dim = corgi_dim
+        self.tax_emb_dim = tax_emb_dim
+        self.hierarchical_taxonomy = h_tax
 
         if corgi_dim > 0:  # concat kmer with corgi and run single encoder.
             self.tnf_enc_dim += corgi_dim
@@ -115,18 +119,15 @@ class NeuralNetwork(nn.Module):
 
     # TODO: incorporate taxonomy embedding vectors and hierarchical taxonomy.
     def _encode(self, x: torch.Tensor, tax_emb: torch.Tensor = None) -> tuple[torch.Tensor, Optional[None|Dict]]:
-        tnf_features = x[:, :self.tnf_dim]
-        cov_features = x[:, self.tnf_dim:]
-        cov_encode = self.coverage_encoder(cov_features)
-        
-        tnf_encode = self.tnf_encoder(tnf_features)
+        tnf_features = x[:, : self.tnf_enc_dim]
         cov_features = x[:, self.tnf_enc_dim :]
+        tnf_encode = self.tnf_encoder(tnf_features)
         cov_encode = self.coverage_encoder(cov_features)
         fused_encode = self.fusion_network(tnf_encode, cov_encode)  # 128
-        return fused_encode, tnf_encode, cov_encode
+        return fused_encode
 
     def get_embedding(self, x):
-        return self._encode(x)[0]
+        return self._encode(x)
 
     def get_separate_modality_embs(self, x):
         kmer_features = x[:, : self.tnf_enc_dim]
@@ -137,9 +138,9 @@ class NeuralNetwork(nn.Module):
 
     # keep unchanged for forward functions.
     def forward_one(self, x: torch.Tensor, tax_emb: torch.Tensor = None):
-        fused_emb, tax_emb = self._encode(x, tax_emb)
+        fused_emb = self._encode(x, tax_emb)
         proj_emb = self.proj_head(fused_emb)
-        return proj_emb, tax_emb
+        return proj_emb
     
     def forward(
         self,
@@ -148,17 +149,19 @@ class NeuralNetwork(nn.Module):
         tax_emb1: torch.Tensor = None,
         tax_emb2: torch.Tensor = None,
     ):
-        z1, tax_emb1 = self.forward_one(x1, tax_emb1)
-        z2, tax_emb2 = self.forward_one(x2, tax_emb2)
-        if tax_emb1 is not None and tax_emb2 is not None:
-            return z1, z2, tax_emb1, tax_emb2
-        else:
-            return z1, z2
+        z1 = self.forward_one(x1, tax_emb1)
+        z2 = self.forward_one(x2, tax_emb2)
+        return z1, z2
 
-    def forward(self, x1, x2):
-        z1, kmer_z1, cov_z1 = self.forward_one(x1)
-        z2, kmer_z2, cov_z2 = self.forward_one(x2)
-        return z1, z2, kmer_z1, kmer_z2, cov_z1, cov_z2
+    def forward_htax(self, x1: torch.Tensor, x2: torch.Tensor, tax_emb1: torch.Tensor, tax_emb2: torch.Tensor):
+        z1 = self.forward_one(x1, tax_emb1)
+        z2 = self.forward_one(x2, tax_emb2)
+        return z1, z2
+
+    def forward_with_embs(self, x1: torch.Tensor, x2: torch.Tensor, tax_emb1: torch.Tensor = None, tax_emb2: torch.Tensor = None):
+        z1 = self.forward_one(x1, tax_emb1)
+        z2 = self.forward_one(x2, tax_emb2)
+        return z1, z2
 
 
 # The projection head: which directly gives barlow twin loss the projected embeddings, should be looked with careful caution.

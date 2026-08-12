@@ -4,7 +4,7 @@ import os
 from collections import OrderedDict
 from pathlib import Path
 
-from typing import Dict, Tuple
+from typing import Dict, Tuple, List, Optional
 from pydantic import Field
 import torch
 import torch.nn as nn
@@ -21,7 +21,7 @@ import loguru
 
 from .models.barlow_twins import NeuralNetwork
 from ..features import BinfernoFeatureBuilder
-from .base import BaseTrainer
+from .base import BaseTrainer, TAX_NODES, TAX_NODE_INDICES, PARENTAL_ARRAY, TAXONOMY_DF, label_augmented_views
 
 
 # TODO: implement the length-aware Barlow Twins loss calculations. 
@@ -60,10 +60,6 @@ class BarlowTwinsTrainer(BaseTrainer):
     get_individual_embs: bool = Field(
         default=False,
         description="Whether to save individual embeddings for each view separately. If False, only the final embeddings after fusion are saved.",
-    )
-    auxiliary_loss: bool = Field(
-        default=False,
-        description="Whether to include an auxiliary loss term that encourages the model to produce similar embeddings for the original and augmented views of the same contig. This can help improve the quality of the learned embeddings by providing an additional training signal that reinforces the relationship between the original and augmented data.",
     )
     proj_head_dim: int = Field(
         default=2048,
@@ -124,6 +120,8 @@ class BarlowTwinsTrainer(BaseTrainer):
                 kmer_dim = features._get_kmer_dim()
             else:
                 kmer_dim = 0
+        
+        feature_df, taxonomy_df = feature_df
 
         feature_df = self.sort_features_by_method(
             feature_df,
@@ -144,7 +142,15 @@ class BarlowTwinsTrainer(BaseTrainer):
         composition_dim = feature_df.shape[1] - cov_dim
 
         corgi_dim = composition_dim - kmer_dim
+
+        if isinstance(taxonomy_df, pd.DataFrame):
+            h_tax = False
+        else:
+            # otherwise a dictionary for taxonomy_df is given.
+            h_tax = True
+
         model = NeuralNetwork(
+            h_tax=h_tax,
             tnf_dim=composition_dim,
             coverage_dim=cov_dim,
             kmer_dim=kmer_dim,
@@ -176,7 +182,6 @@ class BarlowTwinsTrainer(BaseTrainer):
                 model=model,
                 output_dir=output_train_dir,
                 logger=logger,
-                auxiliary_loss=self.auxiliary_loss,
             )
         else:
             logger.info(
@@ -209,6 +214,27 @@ class BarlowTwinsTrainer(BaseTrainer):
         np.random.seed(worker_seed)
         random.seed(worker_seed)
 
+    # def weighted_barlow_twins(z1, z2, w, lambd=5e-3, eps=1e-6):
+    #     """
+    #     z1, z2: (B, D) projector outputs
+    #     w:      (B,) non-negative weights, e.g. log(length)
+    #     """
+    #     w = w / w.sum()
+    #     w_ = w.unsqueeze(1)
+
+    #     mu1 = (w_ * z1).sum(0, keepdim=True)
+    #     mu2 = (w_ * z2).sum(0, keepdim=True)
+    #     v1 = (w_ * (z1 - mu1) ** 2).sum(0, keepdim=True)
+    #     v2 = (w_ * (z2 - mu2) ** 2).sum(0, keepdim=True)
+
+    #     z1n = (z1 - mu1) / (v1.sqrt() + eps)
+    #     z2n = (z2 - mu2) / (v2.sqrt() + eps)
+
+    #     c = (w_ * z1n).T @ z2n            # (D, D), already normalized by sum(w)=1
+
+    #     on = torch.diagonal(c).add_(-1).pow_(2).sum()
+    #     off = c.pow(2).sum() - torch.diagonal(c).pow(2).sum()
+    #     return on + lambd * off
     class BT_loss(nn.Module):
         def __init__(self, lambda_bt=5e-3, alpha=1.0, eps=1e-6):
             super().__init__()
@@ -221,7 +247,12 @@ class BarlowTwinsTrainer(BaseTrainer):
             # )
             self._cache = {}
 
-        def forward(self, feature1, feature2, return_stats=False):
+        def forward(self, 
+            feature1, 
+            feature2,
+            # w: Optional[torch.Tensor] = None, 
+            return_stats=False
+        ):
             N, D = feature1.size()
             device = feature1.device
             cache_key = (D, str(device))
@@ -278,43 +309,19 @@ class BarlowTwinsTrainer(BaseTrainer):
 
             return loss
 
-    class modality_BT_loss(nn.Module):
-        def __init__(self, lambda_bt=5e-3, alpha=1.0, eps=1e-6):
-            super().__init__()
-            self.lambda_bt = lambda_bt  # lambda barlow twins tunes the importance of the redundancy reduction term relative to the invariance term. A higher lambda_bt encourages the model to produce more decorrelated features, while a lower lambda_bt allows for more redundancy in the features.
-            self.alpha = alpha  # alpha tunes the importance of the invariance loss relative to the redundancy loss. A higher alpha emphasizes the importance of making the diagonal elements of the correlation matrix close to 1, while a lower alpha allows for more flexibility in the diagonal elements.
-            self.eps = eps
-            self._cache = {}
-
-        def forward(self, feature1, feature2):
-            N, D = feature1.size()
-            device = feature1.device
-            cache_key = (D, str(device))
-            if cache_key not in self._cache:
-                self._cache[cache_key] = torch.eye(D, device=device)
-
-            z1 = (feature1 - feature1.mean(dim=0)) / (
-                feature1.std(dim=0, unbiased=False) + self.eps
-            )
-            z2 = (feature2 - feature2.mean(dim=0)) / (
-                feature2.std(dim=0, unbiased=False) + self.eps
-            )
-
-            C = torch.mm(z1.T, z2) / N
-
-            loss_matrix = C.pow(2)
-            diag = torch.diagonal(C)
-            invariance_loss = (diag - 1.0).pow(2).sum()
-
-            redundancy_loss = loss_matrix.sum() - torch.diagonal(loss_matrix).sum()
-            loss = self.alpha * invariance_loss + self.lambda_bt * redundancy_loss
-            return loss
-
     class BuildDataset:
-        def __init__(self, data_df, max_positive_pairs=700000):
+        def __init__(self,
+            data_df: pd.DataFrame, 
+            max_positive_pairs=700000,
+            taxonomy_features: Optional[pd.DataFrame|Dict|None] = None,
+            namelist: Optional[list[str]] = None
+        ):
             self.data_df = data_df
             self.max_positive_pairs = max_positive_pairs
             self.fragment_contig_ids = list(data_df.index)
+            self.taxonomy_features = taxonomy_features
+            self.namelist = namelist
+            self.h_tax = False
 
             grouped = self._group_fragments_by_contig()
             self.base_name_to_id = {
@@ -388,19 +395,6 @@ class BarlowTwinsTrainer(BaseTrainer):
                 return list(candidate_pairs)
 
             return random.sample(candidate_pairs, max_cap)
-
-        def form_positive_pairs(self):
-            """
-            Kept for compatibility with the original interface.
-            """
-            return self._build_all_positive_pairs()
-
-        def _select_positive_pairs(self, all_potential_pairs, max_cap):
-            """
-            Kept for compatibility with the original interface.
-            """
-            return self._cap_positive_pairs(all_potential_pairs, max_cap)
-
         def pair_frgs_to_contigs(self) -> dict:
             """
             Kept for compatibility with the original interface.
@@ -413,24 +407,22 @@ class BarlowTwinsTrainer(BaseTrainer):
                 (feature1, feature2, base_id)
             """
             X = self.data_df.to_numpy(dtype=np.float32, copy=False)
-
-            if not np.isfinite(X).all():
-                bad_rows, bad_cols = np.where(~np.isfinite(X))
-                print("First bad entries:")
-                for r, c in zip(bad_rows[:20], bad_cols[:20]):
-                    print(
-                        "row:",
-                        r,
-                        "index:",
-                        self.data_df.index[r],
-                        "col:",
-                        self.data_df.columns[c],
-                        "value:",
-                        self.data_df.iloc[r, c],
-                    )
-                raise ValueError(
-                    "data_df contains NaN or Inf before TensorDataset construction."
+            if isinstance(self.taxonomy_features, pd.DataFrame):
+                tax_X = self.taxonomy_features.to_numpy(dtype=np.float32, copy=False)
+            elif isinstance(self.taxonomy_features, dict):
+                self.h_tax = True
+                tax_X = label_augmented_views(self.taxonomy_features[TAXONOMY_DF], 
+                    self.data_df.index.tolist(),
+                    node_indices=self.taxonomy_features[TAX_NODE_INDICES],
                 )
+                taxonomy_df = self.taxonomy_features[TAXONOMY_DF]
+                node_indices = self.taxonomy_features[TAX_NODE_INDICES]
+                tax_X = tax_X.to_numpy(dtype=np.float32, copy=False)
+            else:
+                tax_X = None
+
+            assert not np.isnan(X).any(), "data_df contains NaN values before TensorDataset construction."
+            assert not np.isinf(X).any(), "data_df contains Inf values before TensorDataset construction."
 
             pair_indices = np.asarray(self.training_pairs, dtype=np.int64)
             idx1 = pair_indices[:, 0]
@@ -445,8 +437,22 @@ class BarlowTwinsTrainer(BaseTrainer):
                 count=len(idx1),
             )
             base_ids = torch.from_numpy(base_ids_np)
-
-            return TensorDataset(features1, features2, base_ids)
+            if tax_X is not None:
+                tax_features1 = torch.from_numpy(tax_X[idx1].copy())
+                tax_features2 = torch.from_numpy(tax_X[idx2].copy())
+                if not self.h_tax:
+                    return TensorDataset(features1, features2, tax_features1, tax_features2, base_ids)
+                else:
+                    # turn idx1 to base name, and then reindex base names to get mask. 
+                    mask = torch.zeros(len(idx1), dtype=torch.bool)
+                    for i, idx in enumerate(idx1): # idx1 is the index 
+                        base_name = self._extract_base_name(self.data_df.index[idx])
+                        tax = taxonomy_df.loc[base_name]["tax_node_idx"] if base_name in taxonomy_df.index else node_indices.get("root", -1)
+                        if tax != node_indices.get("root", -1):
+                            mask[i] = True
+                    return TensorDataset(features1, features2, tax_features1, tax_features2, mask, base_ids)
+            else:
+                return TensorDataset(features1, features2, base_ids)
 
     def prepare_trainer(
         self,
@@ -515,7 +521,6 @@ class BarlowTwinsTrainer(BaseTrainer):
         epochs: int = 300,
         model=None,
         output_dir: Path = None,
-        auxiliary_loss=False,
         logger=loguru._logger.Logger,
     ):
         self.unify_seeds(
@@ -536,7 +541,6 @@ class BarlowTwinsTrainer(BaseTrainer):
                 dataloader=dataloader,
                 optimizer=optimizer,
                 device=device,
-                auxiliary_loss=auxiliary_loss,
             )
 
             scheduler.step()
@@ -571,84 +575,134 @@ class BarlowTwinsTrainer(BaseTrainer):
         return model
 
     def train_an_epoch(
-        self, model, dataloader, optimizer, device, auxiliary_loss=False
+        self,
+        model: nn.Module, 
+        dataloader: torch.utils.data.DataLoader, 
+        optimizer: torch.optim.Optimizer, 
+        device: torch.device, 
     ):
         criterion = self.BT_loss(lambda_bt=5e-3, alpha=1.0).to(device)
-        # if using kmer or coverage.
-        auxiliary_criterion = self.modality_BT_loss(lambda_bt=5e-3, alpha=1.0).to(
-            device
-        )
         model.train()
-        total_loss = 0.0
+        
+        sum_loss = 0.0
         stats = None
+        is_htax = model.hierarchical_taxonomy
+        num_batches = len(dataloader)
 
         for batch_i, batch_data in enumerate(dataloader): # here it determines taxonomy data to be yes or no.
-            is_htax = model.hierarchical_taxonomy
-            last_batch = batch_i == len(dataloader) - 1
-            try:
-                if not is_htax:
-                    features1, features2, tax_1, tax_2, base_ids = batch_data 
-                    features1 = features1.to(device, non_blocking=True)
-                    features2 = features2.to(device, non_blocking=True)
-                    tax_1 = tax_1.to(device, non_blocking=True)
-                    tax_2 = tax_2.to(device, non_blocking=True)
-                    optimizer.zero_grad(set_to_none=True)
-                    total_loss, stats = self.calculate_loss(
-                        model=model,
-                        features1=features1,
-                        features2=features2,
-                        tax_1=tax_1,
-                        tax_2=tax_2,
-                        mask=None,
-                        last_batch=last_batch
-                    )
+            last_batch = batch_i == num_batches - 1
 
-                else:
-                    feature1, feature2, label1, label2, mask, base_ids = batch_data
-                    feature1 = feature1.to(device)
-                    feature2 = feature2.to(device)
-                    label1 = label1.to(device)
-                    label2 = label2.to(device)
-                    mask = mask.to(device)
-                    optimizer.zero_grad(set_to_none=True)
-                    total_loss, stats = self.calculate_loss(
-                        model=model,
-                        features1=feature1,
-                        features2=feature2,
-                        tax_1=label1,
-                        tax_2=label2,
-                        mask=mask,
-                        last_batch=last_batch
-                    )
-                
-                total_loss.backward()
-
-            except:
+            if len(batch_data) == 3:
                 features1, features2, base_ids = batch_data
                 features1 = features1.to(device, non_blocking=True)
                 features2 = features2.to(device, non_blocking=True)
-
                 optimizer.zero_grad(set_to_none=True)
                 total_loss, stats = self.calculate_loss(
+                    criterion=criterion,
                     model=model,
                     features1=features1,
                     features2=features2,
                     tax_1=None,
                     tax_2=None,
                     mask=None,
-                    last_batch=last_batch
+                    last_batch=last_batch,
                 )
-                total_loss.backward()
+            elif not is_htax:
+                features1, features2, tax_1, tax_2, base_ids = batch_data
+                features1 = features1.to(device, non_blocking=True)
+                features2 = features2.to(device, non_blocking=True)
+                tax_1 = tax_1.to(device, non_blocking=True)
+                tax_2 = tax_2.to(device, non_blocking=True)
+                optimizer.zero_grad(set_to_none=True)
+                total_loss, stats = self.calculate_loss(
+                    criterion=criterion,
+                    model=model,
+                    features1=features1,
+                    features2=features2,
+                    tax_1=tax_1,
+                    tax_2=tax_2,
+                    mask=None,
+                    last_batch=last_batch,
+                )
+            else:
+                feature1, feature2, label1, label2, mask, base_ids = batch_data
+                feature1 = feature1.to(device, non_blocking=True)
+                feature2 = feature2.to(device, non_blocking=True)
+                label1 = label1.to(device, non_blocking=True)
+                label2 = label2.to(device, non_blocking=True)
+                mask = mask.to(device, non_blocking=True)
+                optimizer.zero_grad(set_to_none=True)
+                total_loss, stats = self.calculate_loss(
+                    criterion=criterion,
+                    model=model,
+                    features1=feature1,
+                    features2=feature2,
+                    tax_1=label1,
+                    tax_2=label2,
+                    mask=mask,
+                    last_batch=last_batch,
+                )
+
+            total_loss.backward()
 
             torch.nn.utils.clip_grad_norm_(
                 model.parameters(), max_norm=1.0
             )  # prevent the exploding gradient.
 
             optimizer.step()
-            total_loss += fuse_loss.item()  # sum loss.
+            sum_loss += total_loss.item()  # sum loss.
 
-        avg_loss = total_loss / len(dataloader)
+        avg_loss = sum_loss / len(dataloader)
         return avg_loss, stats
+
+    def calculate_loss(self, criterion, model, features1, features2, tax_1=None, tax_2=None, mask=None, last_batch=False):
+        is_htax = model.hierarchical_taxonomy
+
+        if tax_1 is not None or tax_2 is not None:
+            if not is_htax:
+                output1, output2, tax_enc1, tax_enc2 = model(
+                    features1, features2, tax_1, tax_2
+                )
+                if last_batch:
+                    loss, stats = criterion(feature1=output1, feature2=output2, return_stats=True)
+                    tax_vec_loss, tax_stats = criterion(feature1=tax_enc1, feature2=tax_enc2, return_stats=True)
+                    loss = loss + tax_vec_loss
+
+                    # merge stats from both losses
+                    stats = {**stats, **{f"tax_{k}": v for k, v in tax_stats.items()}}
+                    return loss, stats
+                else:
+                    loss = criterion(feature1=output1, feature2=output2)
+                    tax_vec_loss = criterion(feature1=tax_enc1, feature2=tax_enc2)
+                    loss = loss + tax_vec_loss
+                    return loss, None
+
+            else:
+                output1, output2, tax_feature1, tax_feature2 = model(
+                    features1, features2, tax_emb1=tax_1, tax_emb2=tax_2
+                )
+                logit1, logit2 = tax_feature1["logits"], tax_feature2["logits"]
+                tax_hloss1 = model.taxonomy_encoder.loss(logit1, tax_1, mask, weights=None)
+                tax_hloss2 = model.taxonomy_encoder.loss(logit2, tax_2, mask, weights=None)
+                tax_hloss = (tax_hloss1 + tax_hloss2) / 2
+                if last_batch:
+                    loss, stats = criterion(feature1=output1, feature2=output2, return_stats=True)
+                    total_loss = loss + tax_hloss
+                    return total_loss, stats
+                else:
+                    loss = criterion(feature1=output1, feature2=output2)
+                    total_loss = loss + tax_hloss
+                    return total_loss, None
+        else:
+            output1, output2 = model(
+                features1, features2
+            )
+            if last_batch:
+                loss, stats = criterion(feature1=output1, feature2=output2, return_stats=True)
+                return loss, stats
+            else:
+                loss = criterion(feature1=output1, feature2=output2)
+                return loss, None
 
     def barlow_twins_augmentation(
         self,
