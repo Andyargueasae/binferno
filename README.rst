@@ -87,3 +87,7 @@ Credits
 
 Binferno is developed by Yuhao Tong and Robert Turnbull. 
 
+Current worklog:
+1. SimCLR rescue: rescue SimCLR branch by borrowing insights from other tools.
+2. Pytesting: Make unitary and reproducible tests for the codebase, boost coverage of codes.
+3. Insights into applying UMAP of the embeddings before clustering.
