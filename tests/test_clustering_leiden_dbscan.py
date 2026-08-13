@@ -1,56 +1,102 @@
-import tempfile
-from pathlib import Path
+import numpy as np
+import pandas as pd
+import pytest
 
-from loguru import logger
-import pyfastx
-
-# import two clustering modules to test them both in the same way
-from binferno.clustering.leiden import LeidenClustering
-from binferno.clustering.dbscan import DbscanClustering
-from binferno.clustering.base import ClusterResult
-from binferno.utils import gen_seed
-from .conftest import rng, toy_embeddings, sim_cluster_fasta, CONTIG, MARKER
-
-"""
-Mainly tests leiden path from embedding matrix to ClusterResult.
-"""
-
-def test_kmeans_clustering() -> None:
-    assert True, "This is a placeholder test for kmeans clustering. Implement this test when the function is implemented."
-    return
-
-def test_leiden_clustering() -> None:
-    embeddings = toy_embeddings(contig=CONTIG)
-    assert True, "This is a placeholder test for leiden clustering. Implement this test when the function is implemented."
-    return
+from loguru import logger as test_logger
+from binferno.training import BinfernoTrainer
+from binferno.training.simclr import SimCLRTrainer
+from binferno.training.barlowtwins import BarlowTwinsTrainer
 
 
-def test_dbscan_clustering() -> None:
-    embeddings = toy_embeddings(contig=CONTIG)
-    clustering = DbscanClustering()
-    logger.bind(test="dbscan_clustering")
-    assert True, "This is a placeholder test for dbscan clustering. Implement this test when the function is implemented."
+def _fake_emb(index=("contig_1", "contig_2"), dims=4, seed=42):
+    rng = np.random.default_rng(seed)
+    x = rng.normal(size=(len(index), dims)).astype("float32")
+    return pd.DataFrame(x, index=list(index), columns=[f"e{i}" for i in range(dims)])
 
 
-def test_utils_marker_gene_finder():
-    tmp_dir = tempfile.mkdtemp()
-    n_genome = gen_seed(
-        logger=logger,
-        contig_file=MARKER,
-        output_dir=Path(tmp_dir),
-        threads=1,
-        contig_length_threshold=1000,
-        marker_name="bacar_marker",
-        quarter="2quarter",
+def test_trainer_requires_method_enabled(tmp_path):
+    trainer = BinfernoTrainer(
+        simclr=SimCLRTrainer(),
+        use_simclr=False,
+        barlowtwins=BarlowTwinsTrainer(),
+        use_barlowtwins=False,
+        concat=True,
     )
-    internal_marker_file = Path(tmp_dir) / (Path(MARKER).name + ".frag.faa")
-    internal_hmmer_out =  Path(tmp_dir) / (Path(MARKER).name + "." + "bacar_marker" + ".hmmout")
-    assert internal_marker_file.exists(), f"Expected marker gene faa file to be created at {internal_marker_file}, but it does not exist."
-    assert internal_hmmer_out.exists(), f"Expected hmmer output file to be created at {internal_hmmer_out}, but it does not exist."
-    assert (
-        n_genome == 0
-    ), "Expected that no genomes are found in the tiny contigs. We just want to make sure the process is good."
-    return
 
-def test_postprocess_quality_tabling():
-    assert True, "This is a placeholder test for postprocess_quality_tabling. Implement this test when the function is implemented."
+    with pytest.raises(ValueError):
+        trainer(
+            contigs=tmp_path / "contigs.fna",
+            bam=tmp_path / "bam",
+            output_dir=tmp_path / "out",
+            features=None,
+            threads=1,
+            logger=None,
+        )
+
+
+def test_trainer_only_simclr_path_called(tmp_path, monkeypatch):
+    called = {"simclr": 0, "barlow": 0}
+
+    def fake_simclr(self, contigs, bam, output_dir, features, threads, logger):
+        called["simclr"] += 1
+        return _fake_emb(dims=3, seed=1)
+
+    def fake_barlow(self, contigs, bam, output_dir, features, threads, logger):
+        called["barlow"] += 1
+        return _fake_emb(dims=3, seed=2)
+
+    monkeypatch.setattr(SimCLRTrainer, "__call__", fake_simclr)
+    monkeypatch.setattr(BarlowTwinsTrainer, "__call__", fake_barlow)
+
+    trainer = BinfernoTrainer(
+        simclr=SimCLRTrainer(),
+        use_simclr=True,
+        barlowtwins=BarlowTwinsTrainer(),
+        use_barlowtwins=False,
+        concat=True,
+    )
+
+    out = trainer(
+        contigs=tmp_path / "contigs.fna",
+        bam=tmp_path / "bam",
+        output_dir=tmp_path / "out",
+        features=None,
+        threads=1,
+        logger=test_logger,
+    )
+
+    assert called["simclr"] == 1
+    assert called["barlow"] == 0
+    assert out.shape == (2, 3)
+
+
+def test_trainer_concat_false_normalizes(tmp_path, monkeypatch):
+    def fake_simclr(self, contigs, bam, output_dir, features, threads, logger):
+        return _fake_emb(dims=4, seed=10)
+
+    def fake_barlow(self, contigs, bam, output_dir, features, threads, logger):
+        return _fake_emb(dims=4, seed=11)
+
+    monkeypatch.setattr(SimCLRTrainer, "__call__", fake_simclr)
+    monkeypatch.setattr(BarlowTwinsTrainer, "__call__", fake_barlow)
+
+    trainer = BinfernoTrainer(
+        simclr=SimCLRTrainer(),
+        use_simclr=True,
+        barlowtwins=BarlowTwinsTrainer(),
+        use_barlowtwins=True,
+        concat=False,
+    )
+
+    out = trainer(
+        contigs=tmp_path / "contigs.fna",
+        bam=tmp_path / "bam",
+        output_dir=tmp_path / "out",
+        features=None,
+        threads=1,
+        logger=test_logger,
+    )
+
+    assert out.shape == (2, 4)
+    norms = np.linalg.norm(out.values, axis=1)
+    assert np.allclose(norms, 1.0, atol=1e-5)

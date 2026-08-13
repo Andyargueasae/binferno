@@ -12,6 +12,7 @@ from .conftest import (
     dummy_train_simclr, dummy_train_barlowtwins_args,
     toy_features
 )
+import pytest
 
 '''
 Mainly tests the SimCLR path: from embeddings to dataloading to training and encoding. 
@@ -40,6 +41,8 @@ def prep_model_barlowtwins():
         ).to(DEVICE)
     return model
 
+
+@pytest.mark.long
 def test_simclr_train_an_epoch():
     args = dummy_train_simclr()
     trainer = SimCLRTrainer(learning_rate=args.get("learning_rate", 1e-3),
@@ -123,6 +126,7 @@ def test_simclr_train_an_epoch():
     print(f"Finished pytest getting embeddings for {model}.")
 
 
+@pytest.mark.long
 def test_barlowtwins_train_an_epoch():
     args = dummy_train_barlowtwins_args()
     trainer = BarlowTwinsTrainer(

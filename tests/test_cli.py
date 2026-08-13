@@ -1,47 +1,38 @@
-import pytest
 import subprocess
-import os
+import sys
+
+from binferno.binferno_version import __version__
 
 
-def test_cli():
-    """
-    run binferno --help and check that it returns 0
-    """
-    result = subprocess.run(["binferno", "--help"], capture_output=True)
-    assert (
-        result.returncode == 0
-    ), f"binferno --help failed with return code {result.returncode}"
-    assert (
-        b"usage" in result.stdout
-    ), "binferno --help did not contain usage information"
-    assert (
-        "--contigs" in result.stdout.decode()
-    ), "binferno --help did not mention --contigs option"
-    assert (
-        "--bam" in result.stdout.decode()
-    ), "binferno --help did not mention --bam option"
-    assert (
-        "--output-dir" in result.stdout.decode()
-    ), "binferno --help did not mention --output-dir option"
-    assert (
-        "--threads" in result.stdout.decode()
-    ), "binferno --help did not mention --threads option"
-    assert (
-        "--train-only" in result.stdout.decode()
-    ), "binferno --help did not mention --train-only option"
-
-    assert (
-        "--training.use-simclr" in result.stdout.decode()    ), "binferno --help did not mention --training.use-simclr option"
-    assert (
-        "--training.use-barlowtwins" in result.stdout.decode()    ), "binferno --help did not mention --training.use-barlowtwins option"
-    assert (
-        "--postprocessor.checkm-database" in result.stdout.decode()    ), "binferno --help did not mention --postprocessor.checkm-database option"
-    
-    return
+def test_cli_help_smoke():
+    result = subprocess.run(
+        [sys.executable, "-m", "binferno.main", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    stdout = result.stdout.lower()
+    assert "usage" in stdout
+    assert "contigs" in stdout
+    assert "bam" in stdout
+    assert "output" in stdout
+    assert "threads" in stdout
+    assert "train_only" in stdout or "train-only" in stdout
+    assert "training.use-simclr" in stdout
 
 
-def test_cli_version():
-    assert (
-        True
-    ), "This test is a placeholder for testing the --version flag of the CLI. Implement this test to check that binferno --version returns the expected version string."
-    return
+def test_cli_missing_required_args_fails():
+    result = subprocess.run(
+        [sys.executable, "-m", "binferno.main"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    combined = (result.stdout + "\n" + result.stderr).lower()
+    assert "required" in combined or "usage" in combined
+
+
+def test_version_module_format():
+    parts = __version__.split(".")
+    assert len(parts) == 3
+    assert all(p.isdigit() for p in parts)

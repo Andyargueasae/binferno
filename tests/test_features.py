@@ -1,153 +1,433 @@
-import tempfile
-import sys
-import logging
 from pathlib import Path
-import os
-
-import numpy as np
-
-try:
-    from loguru import logger
-except ImportError:
-    logger = logging.getLogger(__name__)
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-from .conftest import tiny_fasta, CONTIG, BAM
-
+import tempfile
+from binferno.features import BinfernoFeatureBuilder
 from binferno.features.kmer import KmerFeatureBuilder
 from binferno.features.coverage import CoverageFeatureBuilder
+from binferno.features.corgi import CorgiFeatureBuilder
+from binferno.features.dnabert_s import DnaBertSFeatureBuilder
+from binferno.features.taxonomy import TaxonomyFeatureBuilder
+import pandas as pd
+
+import numpy as np
+import pytest
+from loguru import logger
+
+from .conftest import CONTIG, BAM
+from binferno.features.kmer import (
+    KmerFeatureBuilder,
+    _calculate_kmer_composition,
+    generate_feature_mapping,
+)
+from binferno.features.coverage import (
+    CoverageFeatureBuilder,
+    _map_fasta_to_bam_refs,
+    _normalise_coverage_dicts,
+)
 from binferno.training.simclr import SimCLRTrainer
-from binferno.training.barlowtwins import BarlowTwinsTrainer
-
-"""
-Mainly tests for feature building, including kmer composition features, coverage mean and std, and Corgi features.
-Will assess whether values are of correct shape, non-negative, and non-zero where applicable.
-"""
 
 
-def dummy_kmer_args():
-    return {
-        "k": 4,
-        "pseudocount": 1,
-    }
+def test_generate_feature_mapping_k4_dim():
+    mapping, dim = generate_feature_mapping(4)
+    assert dim == 136
+    assert isinstance(mapping, dict)
+    assert len(mapping) == 256
 
 
-def gen_simclr_fragments():
-    tempdir = tempfile.TemporaryDirectory()
-    contigs = tiny_fasta(tempdir)
-    output_dir = tempdir
+def test_kmer_composition_short_and_ambiguous_sequences():
+    seqs = [
+        ("contig_short", "AT"),      # shorter than k
+        ("contig_ambig", "ATGCNNN"), # contains ambiguous chars
+        ("contig_ok", "ATGCATGC"),
+    ]
+    df = _calculate_kmer_composition(seqs, kmer_len=4, pseudocount=1.0)
 
-    num_view = 6
-    trainer = SimCLRTrainer()
-    fragment_dict, all_fragments, namelist = trainer.gen_views(
-        contigs=contigs,
-        output_dir=output_dir,
-        view_num=num_view,
-    )
-
-    assert isinstance(fragment_dict, dict)
-    assert isinstance(all_fragments, list)
-    assert isinstance(namelist, list)
-    assert (
-        len(all_fragments) == len(namelist) * num_view
-    ), f"Expected {len(namelist)*num_view} fragments, but got {len(all_fragments)}."
-
-    # assert if each contig is reprersented num_view times.
-    for contig in namelist:
-        count = sum([1 for name in namelist if name.startswith(contig)])
-        assert (
-            count == num_view
-        ), f"Contig {contig} should have {num_view} fragments, but got {count}."
-    return
-
-
-def gen_barlowtwins_fragments():
-    # Then the test would be barlow twins.
-
-    tempdir = tempfile.TemporaryDirectory()
-    contigs = tiny_fasta(tempdir)
-    output_dir = tempdir
-    num_view = 8
-
-    trainer = BarlowTwinsTrainer()
-    fragment_dict, all_fragments, namelist = trainer.gen_views(
-        contigs=contigs,
-        output_dir=output_dir,
-        view_num=num_view,
-    )
-
-    assert isinstance(fragment_dict, dict)
-    assert isinstance(all_fragments, list)
-    assert isinstance(namelist, list)
-
-    assert (
-        len(namelist) <= len(all_fragments) <= len(namelist) * num_view
-    ), f"Expected at most {len(namelist)*num_view} fragments, but got {len(all_fragments)}."
+    assert df.shape[0] == 3
+    assert df.shape[1] == 136
+    row_sums = df.sum(axis=1).to_numpy()
+    assert np.allclose(row_sums, 1.0, atol=1e-6)
+    assert np.isfinite(df.values).all()
 
 
 def test_kmer_features(dummy_all_fragments):
-    kmer_args = dummy_kmer_args()
-    _, dummy_all_frags, _ = dummy_all_fragments
-    builder = KmerFeatureBuilder(
-        k=kmer_args.get("k"), pseudocount=kmer_args.get("pseudocount")
-    )
-    features = builder(dummy_all_frags).values
-    assert features.shape == (
-        len(dummy_all_frags),
-        136,
-    ), f"Expected feature shape ({len(dummy_all_frags)}, 136), but got {features.shape}."
+    _, all_frags, _ = dummy_all_fragments
+    builder = KmerFeatureBuilder(kmer_len=4, pseudocount=1)
+    features = builder(all_frags).values
+
+    assert features.shape == (len(all_frags), 136)
     assert np.all(np.linalg.norm(features, axis=1) > 0)
-    return
+    assert np.isfinite(features).all()
 
 
-def test_coverage_features(bam_dir, dummy_all_fragments):
+def test_coverage_features_empty_bam(bam_dir, dummy_all_fragments):
     builder = CoverageFeatureBuilder()
-    bams = bam_dir
-    dummy_frags_dict, all_frags, _ = dummy_all_fragments
+    fragment_dict, all_frags, _ = dummy_all_fragments
 
-    logger.info(f"Generated {len(dummy_frags_dict)} fragments for testing.")
     cov_df = builder(
-        fragment_dict=dummy_frags_dict, bam_path=bams, threads=1, logger=logger
+        fragment_dict=fragment_dict,
+        bam_path=str(bam_dir),
+        threads=1,
+        logger=logger,
     )
-    assert cov_df.shape[0] == len(
-        all_frags
-    ), f"Expected {len(all_frags)} rows, but got {cov_df.shape[0]}."
-    assert np.all(cov_df.values >= 0), "Coverage values should be non-negative."
-    # current bam is empty, so coverage should be all zeros.
-    assert np.all(
-        cov_df.values == 0
-    ), "Coverage values should be zero for an empty BAM file."
 
-    # now try to get a pair of contigs and bams with actual non-zero coverage.
-    contigs = CONTIG
+    assert cov_df.shape[0] == len(all_frags)
+    assert np.all(cov_df.values >= 0)
+    assert np.all(cov_df.values == 0.0)
 
+
+def test_coverage_features_nonnegative_with_tiny_real_bam():
+    builder = CoverageFeatureBuilder()
     trainer = SimCLRTrainer()
+
     fragments_dict, all_frags, _ = trainer.gen_views(
-        contigs=contigs,
+        contigs=CONTIG,
         output_dir=Path(tempfile.mkdtemp()),
         view_num=6,
-    )  # get all fragments.
-
-    assert os.path.exists(BAM), f"BAM file {BAM} does not exist."
-    cov_df = builder(
-        fragment_dict=fragments_dict, bam_path=BAM, threads=1, logger=logger
     )
-    assert cov_df.shape[0] == len(
-        all_frags
-    ), f"Expected {len(all_frags)} rows, but got {cov_df.shape[0]}."
-    assert (
-        cov_df.shape[1] == 2
-    ), f"Expected 2 columns (mean and std) for one sample, but got {cov_df.shape[1]}."
-    assert np.all(cov_df.values >= 0), "Coverage values should be non-negative."
 
-def test_corgi_features():
-    assert True, "Corgi features are currently not implemented, so this test is a placeholder."
+    assert BAM.exists()
+    cov_df = builder(
+        fragment_dict=fragments_dict,
+        bam_path=str(BAM),
+        threads=1,
+        logger=logger,
+    )
 
-def test_taxonomy_features():
-    assert True, "Taxonomy features are currently not implemented, so this test is a placeholder."
+    assert cov_df.shape[0] == len(all_frags)
+    assert cov_df.shape[1] == 2  # one BAM => mean/std
+    assert np.all(cov_df.values >= 0)
+    assert np.isfinite(cov_df.values).all()
 
-def test_dnabert_s_features():
-    assert True, "DNABERT features are currently not implemented, so this test is a placeholder."
+
+def test_map_fasta_to_bam_refs_match_variants():
+    fragments_dict = {
+        "contigA": {"fragments": [], "fragment_info": {}},
+        "contigB some extra": {"fragments": [], "fragment_info": {}},
+        "contigC.1": {"fragments": [], "fragment_info": {}},
+        "contigD": {"fragments": [], "fragment_info": {}},
+    }
+    bam_refs = {"contigA", "contigB", "contigC", "other"}
+
+    ref_map, unmapped = _map_fasta_to_bam_refs(
+        fragments_dict=fragments_dict,
+        bam_references=bam_refs,
+        disable_progress=True,
+    )
+
+    assert ref_map["contigA"] == "contigA"
+    assert ref_map["contigB some extra"] == "contigB"
+    assert ref_map["contigC.1"] == "contigC"
+    assert ref_map["contigD"] is None
+    assert "contigD" in unmapped
+
+
+def test_normalise_coverage_dicts_zero_total_mapped():
+    coverage = {"f1": 10.0, "f2": 20.0}
+    coverage_std = {"f1": 1.0, "f2": 2.0}
+    headers = ["f1", "f2"]
+
+    cov, std = _normalise_coverage_dicts(
+        coverage=coverage,
+        coverage_std=coverage_std,
+        all_fragment_headers=headers,
+        total_mapped=0,
+        rpkm_normalize=True,
+        max_normalize=False,
+    )
+
+    assert cov == {"f1": 0.0, "f2": 0.0}
+    assert std == {"f1": 0.0, "f2": 0.0}
+
+
+def test_normalise_coverage_dicts_rpkm():
+    coverage = {"f1": 100.0, "f2": 50.0}
+    coverage_std = {"f1": 10.0, "f2": 5.0}
+    headers = ["f1", "f2"]
+
+    cov, std = _normalise_coverage_dicts(
+        coverage=coverage,
+        coverage_std=coverage_std,
+        all_fragment_headers=headers,
+        total_mapped=2_000_000,  # factor=2
+        rpkm_normalize=True,
+        max_normalize=False,
+    )
+
+    assert cov["f1"] == pytest.approx(50.0)
+    assert cov["f2"] == pytest.approx(25.0)
+    assert std["f1"] == pytest.approx(5.0)
+    assert std["f2"] == pytest.approx(2.5)
+
+
+def test_normalise_coverage_dicts_max():
+    coverage = {"f1": 2.0, "f2": 4.0}
+    coverage_std = {"f1": 1.0, "f2": 2.0}
+    headers = ["f1", "f2"]
+
+    cov, std = _normalise_coverage_dicts(
+        coverage=coverage,
+        coverage_std=coverage_std,
+        all_fragment_headers=headers,
+        total_mapped=100,
+        rpkm_normalize=False,
+        max_normalize=True,
+    )
+
+    assert cov["f2"] == pytest.approx(1.0, abs=1e-6)
+    assert std["f2"] == pytest.approx(1.0, abs=1e-6)
+    assert 0.0 < cov["f1"] < 1.0
+    assert 0.0 < std["f1"] < 1.0
+
+import pickle
+
+def _make_feature_builder(
+    use_kmer=True,
+    use_coverage=True,
+    use_corgi=False,
+    use_dnabert_s=False,
+    use_taxonomy=False,
+):
+    return BinfernoFeatureBuilder(
+        use_kmer=use_kmer,
+        kmer=KmerFeatureBuilder(),
+        use_coverage=use_coverage,
+        coverage=CoverageFeatureBuilder(),
+        use_corgi=use_corgi,
+        corgi=CorgiFeatureBuilder(),
+        use_dnabert_s=use_dnabert_s,
+        dnabert_s=DnaBertSFeatureBuilder(),
+        use_taxonomy=use_taxonomy,
+        taxonomy=TaxonomyFeatureBuilder(),
+        save_features=True,
+    )
+
+
+def test_feature_builder_requires_at_least_one_modality(tmp_path):
+    builder = _make_feature_builder(
+        use_kmer=False,
+        use_coverage=False,
+        use_corgi=False,
+        use_dnabert_s=False,
+        use_taxonomy=False,
+    )
+
+    with pytest.raises(ValueError):
+        builder(
+            FragMent_Dict={},
+            All_Fragments=[],
+            contigs=CONTIG,
+            bam_path=BAM,
+            threads=1,
+            logger=logger,
+            output_dir=tmp_path,
+        )
+
+
+def test_feature_builder_kmer_coverage_success(monkeypatch, tmp_path):
+    builder = _make_feature_builder(
+        use_kmer=True,
+        use_coverage=True,
+        use_corgi=False,
+        use_dnabert_s=False,
+        use_taxonomy=False,
+    )
+
+    all_frags = [("f1", "ATGCATGC"), ("f2", "ATGCATGC")]
+    frag_dict = {
+        "contig_1": {
+            "fragments": ["f1"],
+            "fragment_info": {"f1": {"start_pos": 0, "length": 8}},
+            "sequence": "ATGCATGC",
+        },
+        "contig_2": {
+            "fragments": ["f2"],
+            "fragment_info": {"f2": {"start_pos": 0, "length": 8}},
+            "sequence": "ATGCATGC",
+        },
+    }
+
+    fake_kmer = pd.DataFrame(
+        [[0.5] * 136, [0.5] * 136],
+        index=["f1", "f2"],
+        columns=[str(i) for i in range(136)],
+    )
+    fake_cov = pd.DataFrame(
+        [[1.0, 0.1], [2.0, 0.2]],
+        index=["f1", "f2"],
+        columns=["sample_coverage", "sample_coverage_std"],
+    )
+
+    monkeypatch.setattr(builder.kmer, "__call__", lambda fragments: fake_kmer)
+    monkeypatch.setattr(
+        builder.coverage,
+        "__call__",
+        lambda fragment_dict, bam_path, threads, logger, max_norm_stacked=False: fake_cov,
+    )
+
+    (features, taxonomy), kmer_dim = builder(
+        FragMent_Dict=frag_dict,
+        All_Fragments=all_frags,
+        contigs=CONTIG,
+        bam_path=BAM,
+        threads=1,
+        logger=logger,
+        output_dir=tmp_path,
+    )
+
+    assert features.shape == (2, 138)
+    assert taxonomy is None
+    assert kmer_dim == 136
+    assert (tmp_path / "features.tsv").exists()
+
+
+def test_feature_builder_coverage_row_mismatch_raises(monkeypatch, tmp_path):
+    builder = _make_feature_builder(
+        use_kmer=True,
+        use_coverage=True,
+        use_corgi=False,
+        use_dnabert_s=False,
+        use_taxonomy=False,
+    )
+
+    all_frags = [("f1", "ATGCATGC"), ("f2", "ATGCATGC")]
+    frag_dict = {
+        "contig_1": {
+            "fragments": ["f1"],
+            "fragment_info": {"f1": {"start_pos": 0, "length": 8}},
+            "sequence": "ATGCATGC",
+        },
+        "contig_2": {
+            "fragments": ["f2"],
+            "fragment_info": {"f2": {"start_pos": 0, "length": 8}},
+            "sequence": "ATGCATGC",
+        },
+    }
+
+    fake_kmer = pd.DataFrame(
+        [[0.5] * 136, [0.5] * 136],
+        index=["f1", "f2"],
+        columns=[str(i) for i in range(136)],
+    )
+    bad_cov = pd.DataFrame(
+        [[1.0, 0.1]],
+        index=["f1"],
+        columns=["sample_coverage", "sample_coverage_std"],
+    )
+
+    monkeypatch.setattr(builder.kmer, "__call__", lambda fragments: fake_kmer)
+    monkeypatch.setattr(
+        builder.coverage,
+        "__call__",
+        lambda fragment_dict, bam_path, threads, logger, max_norm_stacked=False: bad_cov,
+    )
+
+    with pytest.raises(ValueError):
+        builder(
+            FragMent_Dict=frag_dict,
+            All_Fragments=all_frags,
+            contigs=CONTIG,
+            bam_path=BAM,
+            threads=1,
+            logger=logger,
+            output_dir=tmp_path,
+        )
+
+
+def test_feature_builder_loads_cached_features_without_recompute(monkeypatch, tmp_path):
+    builder = _make_feature_builder(
+        use_kmer=True,
+        use_coverage=True,
+        use_corgi=False,
+        use_dnabert_s=False,
+        use_taxonomy=False,
+    )
+
+    cached_df = pd.DataFrame(
+        [[1.0, 2.0], [3.0, 4.0]],
+        index=["f1", "f2"],
+        columns=["a", "b"],
+    )
+    cached_df.to_csv(tmp_path / "features.tsv", sep="\t")
+    with open(tmp_path / "taxonomy_features.pkl", "wb") as handle:
+        pickle.dump({"dummy": 1}, handle)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("Feature branch should not be recomputed when cache exists")
+
+    monkeypatch.setattr(builder.kmer, "__call__", fail_if_called)
+    monkeypatch.setattr(builder.coverage, "__call__", fail_if_called)
+
+    (features, taxonomy), _ = builder(
+        FragMent_Dict={},
+        All_Fragments=[],
+        contigs=CONTIG,
+        bam_path=BAM,
+        threads=1,
+        logger=logger,
+        output_dir=tmp_path,
+    )
+
+    assert features.equals(cached_df)
+    assert taxonomy == {"dummy": 1}
+
+
+def test_feature_builder_taxonomy_branch(monkeypatch, tmp_path):
+    builder = _make_feature_builder(
+        use_kmer=True,
+        use_coverage=False,
+        use_corgi=False,
+        use_dnabert_s=False,
+        use_taxonomy=True,
+    )
+
+    all_frags = [("f1", "ATGCATGC"), ("f2", "ATGCATGC")]
+    frag_dict = {
+        "contig_1": {
+            "fragments": ["f1"],
+            "fragment_info": {"f1": {"start_pos": 0, "length": 8}},
+            "sequence": "ATGCATGC",
+        },
+        "contig_2": {
+            "fragments": ["f2"],
+            "fragment_info": {"f2": {"start_pos": 0, "length": 8}},
+            "sequence": "ATGCATGC",
+        },
+    }
+
+    fake_kmer = pd.DataFrame(
+        [[0.5] * 136, [0.5] * 136],
+        index=["f1", "f2"],
+        columns=[str(i) for i in range(136)],
+    )
+    fake_tax_df = pd.DataFrame(
+        {
+            "contig_id": ["contig_1", "contig_2"],
+            "taxonomy": ["A", "B"],
+        }
+    )
+
+    monkeypatch.setattr(builder.kmer, "__call__", lambda fragments: fake_kmer)
+    monkeypatch.setattr(
+        builder.taxonomy,
+        "__call__",
+        lambda contigs, logger: (
+            ["root", "A", "B"],
+            {"root": 0, "A": 1, "B": 2},
+            np.array([-1, 0, 0], dtype=np.int64),
+            fake_tax_df,
+        ),
+    )
+
+    (features, taxonomy), _ = builder(
+        FragMent_Dict=frag_dict,
+        All_Fragments=all_frags,
+        contigs=CONTIG,
+        bam_path=BAM,
+        threads=1,
+        logger=logger,
+        output_dir=tmp_path,
+    )
+
+    assert features.shape[0] == 2
+    assert isinstance(taxonomy, dict)
+    assert "tax_node_index" in taxonomy
+    assert "contig_taxonomy_df" in taxonomy

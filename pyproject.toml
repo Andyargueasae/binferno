@@ -67,3 +67,14 @@ coverage = ">=7.12.0" # coverage - the reporting of pytests.
 
 [tool.poetry.scripts]
 binferno = "binferno.main:main"
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = "-q -ra --strict-markers --strict-config"
+markers = [
+  "long: long-running tests (run with --long)"
+]
+filterwarnings = [
+  "ignore::DeprecationWarning",
+]
