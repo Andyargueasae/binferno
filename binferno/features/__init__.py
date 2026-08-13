@@ -108,7 +108,7 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
         if self.use_taxonomy:
             logger.info("Generating taxonomy features...")
             tax_nodes, tax_node_indices, parental_array, contig_taxonomy_df = (
-                self.taxonomy(
+                self.taxonomy.__call__(
                     contigs=contigs,
                     logger=logger,
                 )
@@ -165,7 +165,7 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
                     coverage_data, sep="\t", index_col=0, header=0
                 )
             else:
-                coverage_df = self.coverage(
+                coverage_df = self.coverage.__call__(
                     FragMent_Dict,
                     bam_path,
                     threads,
@@ -198,20 +198,6 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
             Canonical features: k-mer: {kmer_dim}, Coverage: {coverage_dim},  \
             The third modality: Corgi: {corgi_dim} | Taxonomy: {taxonomy_dim} | DNABERT-S: {dnabert_s_dim}."
         )
-
-        del (
-            FragMent_Dict,
-            All_Fragments,
-        )
-        del (
-            kmer_df,
-            coverage_df,
-        )
-
-        if self.use_corgi:
-            del corgi_df
-        if self.use_dnabert_s:
-            del dnabert_s_df
 
         # Final feature looks like:
         # [kmer, coverage]

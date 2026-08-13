@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 from loguru import logger
+from unittest.mock import patch
 
 from binferno.features.coverage import (
     _calculate_fragment_stats_vectorized,
@@ -195,3 +196,39 @@ def test_max_normalize_stacked_coverage_basic():
     assert np.all(out.values > 0.0)
     assert np.isclose(out["s1_cov"].max(), 1.0)
     assert np.isclose(out["s1_std"].max(), 1.0)
+
+
+def test_process_contig_worker_inner_exception_fallback():
+    """Forces the inner except-Exception block (coverage.py lines 217-238) by
+    injecting a RuntimeError from _calculate_fragment_stats_vectorized."""
+
+    def _raise(*args, **kwargs):
+        raise RuntimeError("injected error to exercise fallback path")
+
+    coverage_array = np.arange(50, dtype=np.float64)
+    contig_data_list = [
+        (
+            "contig_1",
+            {
+                "fragments": ["frag_a", "frag_b"],
+                "fragment_info": {
+                    "frag_a": {"start_pos": 0, "length": 10},
+                    "frag_b": {"start_pos": 10, "length": 10},
+                },
+            },
+        )
+    ]
+
+    with patch(
+        "binferno.features.coverage._calculate_fragment_stats_vectorized", _raise
+    ):
+        frag_cov, frag_cov_std, _ = _process_contig_coverage_worker(
+            ("contig_1", contig_data_list, coverage_array, 50)
+        )
+
+    assert "frag_a" in frag_cov
+    assert "frag_b" in frag_cov
+    assert np.isclose(frag_cov["frag_a"], np.mean(np.arange(10, dtype=np.float64)))
+    assert np.isclose(frag_cov["frag_b"], np.mean(np.arange(10, 20, dtype=np.float64)))
+    assert frag_cov_std["frag_a"] >= 0.0
+    assert frag_cov_std["frag_b"] >= 0.0

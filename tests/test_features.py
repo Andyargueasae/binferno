@@ -431,3 +431,130 @@ def test_feature_builder_taxonomy_branch(monkeypatch, tmp_path):
     assert isinstance(taxonomy, dict)
     assert "tax_node_index" in taxonomy
     assert "contig_taxonomy_df" in taxonomy
+
+def test_feature_builder_taxonomy_only_no_coverage_no_kmer(monkeypatch, tmp_path):
+    """Regression: no UnboundLocalError when use_coverage=False and use_kmer=False."""
+    builder = _make_feature_builder(
+        use_kmer=False,
+        use_coverage=False,
+        use_corgi=False,
+        use_dnabert_s=False,
+        use_taxonomy=True,
+    )
+
+    frag_dict = {
+        "contig_1": {
+            "fragments": ["f1"],
+            "fragment_info": {"f1": {"start_pos": 0, "length": 8}},
+            "sequence": "ATGCATGC",
+        },
+        "contig_2": {
+            "fragments": ["f2"],
+            "fragment_info": {"f2": {"start_pos": 0, "length": 8}},
+            "sequence": "ATGCATGC",
+        },
+    }
+
+    fake_tax_df = pd.DataFrame(
+        {"contig_id": ["contig_1", "contig_2"], "tax_node_idx": [1, 2]}
+    )
+
+    monkeypatch.setattr(
+        builder.taxonomy,
+        "__call__",
+        lambda contigs, logger: (
+            ["root", "A", "B"],
+            {"root": 0, "A": 1, "B": 2},
+            np.array([-1, 0, 0], dtype=np.int64),
+            fake_tax_df,
+        ),
+    )
+
+    (features, taxonomy), kmer_dim = builder(
+        FragMent_Dict=frag_dict,
+        All_Fragments=[("f1", "ATGCATGC"), ("f2", "ATGCATGC")],
+        contigs=CONTIG,
+        bam_path=BAM,
+        threads=1,
+        logger=logger,
+        output_dir=tmp_path,
+    )
+
+    assert isinstance(taxonomy, dict)
+    assert "tax_node_index" in taxonomy
+    assert kmer_dim == 0
+    assert features.shape[1] == 0  # no kmer, no coverage columns
+
+
+def test_feature_builder_corgi_branch(monkeypatch, tmp_path):
+    """Exercises the corgi-only branch, covering lines missed by existing tests."""
+    builder = _make_feature_builder(
+        use_kmer=False,
+        use_coverage=False,
+        use_corgi=True,
+        use_dnabert_s=False,
+        use_taxonomy=False,
+    )
+
+    fake_corgi = pd.DataFrame(
+        [[0.1] * 4, [0.2] * 4],
+        index=["contig_1", "contig_2"],
+        columns=["dim0", "dim1", "dim2", "dim3"],
+    )
+
+    monkeypatch.setattr(
+        builder.corgi,
+        "__call__",
+        lambda output_dir, contigs, min_length: fake_corgi,
+    )
+
+    (features, taxonomy), kmer_dim = builder(
+        FragMent_Dict={},
+        All_Fragments=[],
+        contigs=CONTIG,
+        bam_path=BAM,
+        threads=1,
+        logger=logger,
+        output_dir=tmp_path,
+    )
+
+    assert isinstance(taxonomy, pd.DataFrame)
+    assert taxonomy.shape == (2, 4)
+    assert kmer_dim == 0
+    assert (tmp_path / "corgi_features.tsv").exists()
+
+
+def test_feature_builder_corgi_branch_loads_cached(monkeypatch, tmp_path):
+    """Exercises the cached-corgi code path (corgi_data.exists() branch)."""
+    builder = _make_feature_builder(
+        use_kmer=False,
+        use_coverage=False,
+        use_corgi=True,
+        use_dnabert_s=False,
+        use_taxonomy=False,
+    )
+
+    cached_corgi = pd.DataFrame(
+        [[0.5] * 3, [0.6] * 3],
+        index=["contig_1", "contig_2"],
+        columns=["d0", "d1", "d2"],
+    )
+    cached_corgi.to_csv(tmp_path / "corgi_features.tsv", sep="\t")
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("Corgi model should not be called when cache exists")
+
+    monkeypatch.setattr(builder.corgi, "__call__", fail_if_called)
+
+    (features, taxonomy), _ = builder(
+        FragMent_Dict={},
+        All_Fragments=[],
+        contigs=CONTIG,
+        bam_path=BAM,
+        threads=1,
+        logger=logger,
+        output_dir=tmp_path,
+    )
+
+    assert isinstance(taxonomy, pd.DataFrame)
+    assert taxonomy.shape[0] == 2
