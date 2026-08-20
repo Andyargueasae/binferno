@@ -3,12 +3,12 @@ import pandas as pd
 from loguru import logger
 from unittest.mock import patch
 
-from binferno.features.coverage import (
+from binferno.features.COMEBin_coverage import (
     _calculate_fragment_stats_vectorized,
     _process_contig_coverage_worker,
+    _normalise_coverage_dicts,
     calculate_bam_cov,
     calculate_fragment_coverage,
-    max_normalize_stacked_coverage,
 )
 
 
@@ -25,9 +25,9 @@ def _tiny_fragment_dict():
     }
 
 
-def test_calculate_fragment_stats_vectorized_small_branch():
+def test_comebin_calculate_fragment_stats_vectorized_small_branch():
     coverage = np.array([1, 2, 3, 4, 5], dtype=np.float64)
-    coords = [(0, 2), (2, 5)]  # n_fragments < 10 triggers small-fragment branch
+    coords = [(0, 2), (2, 5)]
 
     means, stds = _calculate_fragment_stats_vectorized(coverage, coords)
 
@@ -35,12 +35,12 @@ def test_calculate_fragment_stats_vectorized_small_branch():
     assert stds.shape == (2,)
     assert np.isclose(means[0], 1.5)
     assert np.isclose(means[1], 4.0)
-    assert np.all(stds >= 0)
+    assert np.all(stds >= 0.0)
 
 
-def test_calculate_fragment_stats_vectorized_large_branch():
+def test_comebin_calculate_fragment_stats_vectorized_large_branch():
     coverage = np.arange(100, dtype=np.float64)
-    coords = [(i, i + 5) for i in range(0, 50, 5)] + [(50, 60), (60, 70)]  # 12 fragments
+    coords = [(i, i + 5) for i in range(0, 50, 5)] + [(50, 60), (60, 70)]
 
     means, stds = _calculate_fragment_stats_vectorized(coverage, coords)
 
@@ -48,13 +48,13 @@ def test_calculate_fragment_stats_vectorized_large_branch():
     assert stds.shape == (12,)
     assert np.all(np.isfinite(means))
     assert np.all(np.isfinite(stds))
-    assert np.all(stds >= 0)
+    assert np.all(stds >= 0.0)
 
 
-def test_calculate_fragment_stats_vectorized_fallback_on_bad_indices():
+def test_comebin_calculate_fragment_stats_vectorized_fallback_on_bad_indices():
     coverage = np.arange(20, dtype=np.float64)
     coords = [(0, 5)] * 10
-    coords[3] = (1000, 1005)  # out-of-bounds triggers vectorized try/except fallback
+    coords[3] = (1000, 1005)
 
     means, stds = _calculate_fragment_stats_vectorized(coverage, coords)
 
@@ -66,7 +66,7 @@ def test_calculate_fragment_stats_vectorized_fallback_on_bad_indices():
     assert stds[3] == 0.0
 
 
-def test_process_contig_worker_none_coverage_returns_zeros():
+def test_comebin_process_contig_worker_none_coverage_returns_zeros():
     contig_data_list = [
         (
             "contig_1",
@@ -78,7 +78,7 @@ def test_process_contig_worker_none_coverage_returns_zeros():
     ]
 
     cov, cov_std, extra = _process_contig_coverage_worker(
-        ("contig_1", contig_data_list, None, None)
+        ("contig_1", contig_data_list, None, None, False)
     )
 
     assert cov == {"frag_a": 0.0, "frag_b": 0.0}
@@ -86,7 +86,7 @@ def test_process_contig_worker_none_coverage_returns_zeros():
     assert extra == []
 
 
-def test_process_contig_worker_handles_bad_fragment_positions():
+def test_comebin_process_contig_worker_handles_bad_fragment_positions():
     contig_data_list = [
         (
             "contig_1",
@@ -104,7 +104,7 @@ def test_process_contig_worker_handles_bad_fragment_positions():
     total_coverage = np.ones(20, dtype=np.float64)
 
     cov, cov_std, _ = _process_contig_coverage_worker(
-        ("contig_1", contig_data_list, total_coverage, 20)
+        ("contig_1", contig_data_list, total_coverage, 20, False)
     )
 
     assert cov["missing_info"] == 0.0
@@ -116,95 +116,7 @@ def test_process_contig_worker_handles_bad_fragment_positions():
     assert cov_std["ok"] >= 0.0
 
 
-def test_calculate_fragment_coverage_corrupt_bam_returns_empty(tmp_path):
-    bad_bam = tmp_path / "bad.bam"
-    bad_bam.write_text("not-a-bam")
-
-    cov, cov_std = calculate_fragment_coverage(
-        bam_file=str(bad_bam),
-        fragments_dict=_tiny_fragment_dict(),
-        cores=1,
-        disable_progress=True,
-    )
-
-    assert cov == {}
-    assert cov_std == {}
-
-
-def test_calculate_bam_cov_no_bams_returns_empty_df(tmp_path):
-    fragments = _tiny_fragment_dict()
-    df = calculate_bam_cov(
-        bam_files=str(tmp_path),  # directory with no *.bam
-        fragments_dict=fragments,
-        threads=1,
-    )
-
-    assert isinstance(df, pd.DataFrame)
-    assert df.empty
-
-
-def test_calculate_bam_cov_empty_bam_returns_zero_df(tmp_path):
-    bam_dir = tmp_path / "bam"
-    bam_dir.mkdir()
-    (bam_dir / "sample1.bam").write_text("")
-
-    fragments = _tiny_fragment_dict()
-    df = calculate_bam_cov(
-        bam_files=str(bam_dir),
-        fragments_dict=fragments,
-        threads=1,
-    )
-
-    assert df.shape == (2, 2)
-    assert list(df.columns) == ["sample1_coverage", "sample1_coverage_std"]
-    assert np.all(df.values == 0.0)
-
-
-def test_coverage_builder_max_norm_stacked_on_empty_bam_returns_ones(tmp_path):
-    bam_dir = tmp_path / "bam"
-    bam_dir.mkdir()
-    (bam_dir / "sample1.bam").write_text("")
-
-    from binferno.features.coverage import CoverageFeatureBuilder
-
-    builder = CoverageFeatureBuilder()
-    df = builder(
-        fragment_dict=_tiny_fragment_dict(),
-        bam_path=str(bam_dir),
-        threads=1,
-        logger=logger,
-        max_norm_stacked=True,
-    )
-
-    assert df.shape == (2, 2)
-    # zeros -> +pseudocount -> divide by max => 1.0
-    assert np.allclose(df.values, 1.0, atol=1e-8)
-
-
-def test_max_normalize_stacked_coverage_basic():
-    df = pd.DataFrame(
-        {
-            "s1_cov": [0.0, 2.0, 4.0],
-            "s1_std": [0.0, 1.0, 2.0],
-        },
-        index=["f1", "f2", "f3"],
-    )
-
-    out = max_normalize_stacked_coverage(df)
-
-    assert out.shape == df.shape
-    assert np.all(out.values > 0.0)
-    assert np.isclose(out["s1_cov"].max(), 1.0)
-    assert np.isclose(out["s1_std"].max(), 1.0)
-
-
-def test_process_contig_worker_inner_exception_fallback():
-    """Forces the inner except-Exception block (coverage.py lines 217-238) by
-    injecting a RuntimeError from _calculate_fragment_stats_vectorized."""
-
-    def _raise(*args, **kwargs):
-        raise RuntimeError("injected error to exercise fallback path")
-
+def test_comebin_process_contig_worker_inner_exception_fallback():
     coverage_array = np.arange(50, dtype=np.float64)
     contig_data_list = [
         (
@@ -219,11 +131,15 @@ def test_process_contig_worker_inner_exception_fallback():
         )
     ]
 
+    def _raise(*args, **kwargs):
+        raise RuntimeError("injected error to exercise fallback path")
+
     with patch(
-        "binferno.features.coverage._calculate_fragment_stats_vectorized", _raise
+        "binferno.features.COMEBin_coverage._calculate_fragment_stats_vectorized",
+        _raise,
     ):
         frag_cov, frag_cov_std, _ = _process_contig_coverage_worker(
-            ("contig_1", contig_data_list, coverage_array, 50)
+            ("contig_1", contig_data_list, coverage_array, 50, False)
         )
 
     assert "frag_a" in frag_cov
@@ -232,3 +148,92 @@ def test_process_contig_worker_inner_exception_fallback():
     assert np.isclose(frag_cov["frag_b"], np.mean(np.arange(10, 20, dtype=np.float64)))
     assert frag_cov_std["frag_a"] >= 0.0
     assert frag_cov_std["frag_b"] >= 0.0
+
+
+def test_comebin_calculate_fragment_coverage_corrupt_bam_returns_empty(tmp_path):
+    bad_bam = tmp_path / "bad.bam"
+    bad_bam.write_text("not-a-bam")
+
+    cov, cov_std = calculate_fragment_coverage(
+        bam_file=str(bad_bam),
+        fragments_dict=_tiny_fragment_dict(),
+        cores=1,
+        disable_progress=True,
+    )
+
+    assert cov == {}
+    assert cov_std == {}
+
+
+def test_comebin_calculate_bam_cov_no_bams_returns_empty_df(tmp_path):
+    df = calculate_bam_cov(
+        bam_files=str(tmp_path),
+        fragments_dict=_tiny_fragment_dict(),
+        threads=1,
+    )
+
+    assert isinstance(df, pd.DataFrame)
+    assert df.empty
+
+
+def test_comebin_calculate_bam_cov_empty_bam_returns_zero_df(tmp_path):
+    bam_dir = tmp_path / "bam"
+    bam_dir.mkdir()
+    (bam_dir / "sample1.bam").write_text("")
+
+    df = calculate_bam_cov(
+        bam_files=str(bam_dir),
+        fragments_dict=_tiny_fragment_dict(),
+        threads=1,
+    )
+
+    assert df.shape == (2, 2)
+    assert list(df.columns) == ["sample1_coverage", "sample1_coverage_std"]
+    assert np.all(df.values == 0.0)
+
+
+def test_comebin_calculate_bam_cov_mode_comebin_column_order(tmp_path):
+    bam_dir = tmp_path / "bam"
+    bam_dir.mkdir()
+    (bam_dir / "sample1.bam").write_text("")
+
+    df = calculate_bam_cov(
+        bam_files=str(bam_dir),
+        fragments_dict=_tiny_fragment_dict(),
+        threads=1,
+        mode="comebin",
+    )
+
+    assert list(df.columns) == ["sample1_coverage_var", "sample1_coverage"]
+
+
+def test_comebin_normalise_coverage_dicts_zero_total_mapped():
+    cov = {"frag_1": 3.0, "frag_2": 4.0}
+    std = {"frag_1": 1.0, "frag_2": 2.0}
+
+    out_cov, out_std = _normalise_coverage_dicts(
+        coverage=cov,
+        coverage_std=std,
+        all_fragment_headers=["frag_1", "frag_2"],
+        total_mapped=0,
+        rpkm_normalize=True,
+    )
+
+    assert out_cov == {"frag_1": 0.0, "frag_2": 0.0}
+    assert out_std == {"frag_1": 0.0, "frag_2": 0.0}
+
+
+def test_comebin_normalise_coverage_dicts_skips_rpkm_when_disabled():
+    cov = {"frag_1": 3.0, "frag_2": 4.0}
+    std = {"frag_1": 1.0, "frag_2": 2.0}
+
+    out_cov, out_std = _normalise_coverage_dicts(
+        coverage=cov,
+        coverage_std=std,
+        all_fragment_headers=["frag_1", "frag_2"],
+        total_mapped=10,
+        rpkm_normalize=False,
+    )
+
+    assert out_cov == cov
+    assert out_std == std

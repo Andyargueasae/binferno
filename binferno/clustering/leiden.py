@@ -99,7 +99,7 @@ class LeidenClustering(BaseClustering):
         logger.info(f"N50:\t{calc_n50(contigs)}")
         logger.info(f"Contigs retained after length filter: {len(namelist)}")
 
-        norm_embeddings = normalize(emb_mat).astype(np.float32, copy=False)
+        norm_embeddings = normalize(emb_mat).astype(np.float32, copy=False) # only normalize once before clustering.
 
         # check if to apply dimension reduction.
         if self.dimension_reduction:

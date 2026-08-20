@@ -1,7 +1,7 @@
 # features/coverage.py
 import os
 from multiprocessing import Pool
-from typing import Dict, List, Set, Tuple, Union, Any
+from typing import Dict, List, Set, Tuple, Union, Any, Literal
 import glob
 import pandas as pd
 from .base import BaseFeatureBuilder
@@ -10,51 +10,12 @@ import pysam
 from tqdm import tqdm
 from pydantic import Field
 
-FragmentDict = Dict[str, Dict[str, Union[str, List[str]]]]
-CoverageDict = Dict[str, float]
-
-
-def _map_fasta_to_bam_refs(
-    fragments_dict: FragmentDict,
-    bam_references: Set[str],
-    disable_progress: bool = False,
-) -> Tuple[Dict[str, str], List[str]]:
-    bam_ref_map = {}
-    unmapped_fasta_headers = []
-
-    iterator = (
-        fragments_dict.keys()
-        if disable_progress
-        else tqdm(fragments_dict.keys(), desc="Mapping headers")
-    )
-
-    for original_header in iterator:
-        fasta_key = original_header  # key id.
-
-        # Try direct match
-        if fasta_key in bam_references:
-            bam_ref_map[original_header] = (
-                fasta_key  # key as orig header and fasta_key as value.
-            )
-            continue
-
-        # Try matching after splitting on space
-        base_name_space = fasta_key.split(" ")[0]
-        if base_name_space in bam_references:
-            bam_ref_map[original_header] = base_name_space
-            continue
-
-        # Try matching after splitting on last dot
-        base_name_dot = fasta_key.rsplit(".", 1)[0] if "." in fasta_key else None
-        if base_name_dot and base_name_dot in bam_references:
-            bam_ref_map[original_header] = base_name_dot
-            continue
-
-        bam_ref_map[original_header] = None
-        unmapped_fasta_headers.append(original_header)
-
-    return bam_ref_map, unmapped_fasta_headers
-
+from .coverage_utils import (
+    _normalise_coverage_dicts,
+    _map_fasta_to_bam_refs,
+    FragmentDict,
+    CoverageDict,
+)
 
 def _calculate_fragment_stats_vectorized(coverage_array, fragment_coords):
     n_fragments = len(fragment_coords)
@@ -436,70 +397,12 @@ def calculate_fragment_coverage(
     return fragment_coverage, fragment_coverage_std
 
 
-def _normalise_coverage_dicts(
-    coverage: dict,
-    coverage_std: dict,
-    all_fragment_headers: list,
-    total_mapped: int,
-    rpkm_normalize: bool = True,
-    max_normalize: bool = False,
-) -> tuple[dict, dict]:
-    """
-    Supports:
-    - none: raw mean/std
-    - rpm/rpkm: divide mean/std by total_mapped / 1e6
-    - max: add 1e-5, then divide mean/std separately by their own max
-    """
-    if total_mapped <= 0:
-        zero = {fh: 0.0 for fh in all_fragment_headers}
-        return zero, zero
-
-    if not rpkm_normalize and not max_normalize:
-        return coverage, coverage_std
-
-    if rpkm_normalize:
-        factor = total_mapped / 1_000_000
-        if factor <= 0:
-            zero = {fh: 0.0 for fh in all_fragment_headers}
-            return zero, zero
-
-        return (
-            {k: v / factor for k, v in coverage.items()},
-            {k: v / factor for k, v in coverage_std.items()},
-        )
-
-    if max_normalize:
-        pseudocount = 1e-5
-
-        cov = {k: v + pseudocount for k, v in coverage.items()}
-        std = {k: v + pseudocount for k, v in coverage_std.items()}
-
-        cov_max = max(cov.values()) if cov else 1.0
-        std_max = max(std.values()) if std else 1.0
-
-        if cov_max <= 0:
-            cov_max = 1.0
-        if std_max <= 0:
-            std_max = 1.0
-
-        return (
-            {k: v / cov_max for k, v in cov.items()},
-            {k: v / std_max for k, v in std.items()},
-        )
-
-    raise ValueError(
-        f"Unsupported normalization method: rpkm_normalize={rpkm_normalize}, max_normalize={max_normalize}"
-    )
-
-
 def calculate_bam_cov(
     bam_files: str,
     bam_batch: int = 100000,
     fragments_dict: dict = None,
     threads: int = 16,
     rpkm_normalize: bool = True,
-    max_normalize: bool = False,
-    max_norm_stacked: bool = False,
 ) -> pd.DataFrame:
     """
     Calculate coverage mean and std for all BAMs.
@@ -585,24 +488,13 @@ def calculate_bam_cov(
             disable_progress=disable_inner_progress,
         )
 
-        if max_norm_stacked:
-            coverage, coverage_std = _normalise_coverage_dicts(
-                coverage=coverage,
-                coverage_std=coverage_std,
-                all_fragment_headers=all_fragment_headers,
-                total_mapped=total_mapped,
-                rpkm_normalize=False,
-                max_normalize=False,
-            )
-        else:
-            coverage, coverage_std = _normalise_coverage_dicts(
-                coverage=coverage,
-                coverage_std=coverage_std,
-                all_fragment_headers=all_fragment_headers,
-                total_mapped=total_mapped,
-                rpkm_normalize=rpkm_normalize,
-                max_normalize=max_normalize,
-            )
+        coverage, coverage_std = _normalise_coverage_dicts(
+            coverage=coverage,
+            coverage_std=coverage_std,
+            all_fragment_headers=all_fragment_headers,
+            total_mapped=total_mapped,
+            rpkm_normalize=rpkm_normalize
+        )
 
         sample_name = sample_names_map[bam_file]
 
@@ -666,9 +558,13 @@ class CoverageFeatureBuilder(BaseFeatureBuilder):
         default=True,
         description=("Whether to apply RPKM normalization for non-SimCLR paths."),
     )
-    max_normalize: bool = Field(
+    comebin: bool = Field(
         default=False,
-        description=("Whether to apply max normalization."),
+        description=("Whether to use COMEBin-like normalization for SimCLR."),
+    )
+    max_norm_stacked: bool = Field(
+        default=False,
+        description=("Whether to apply max normalization for stacked coverage."),
     )
 
     def __call__(
@@ -677,28 +573,33 @@ class CoverageFeatureBuilder(BaseFeatureBuilder):
         bam_path: str,
         threads: int,
         logger: Any,
-        max_norm_stacked: bool = False,
     ) -> pd.DataFrame:
         bam_batch = 100_000
 
         logger.info(f"Extracting coverage for single fragment dict.")
         # retain rpm/rpkm/max/none immediate normalization.
-        cov_df = calculate_bam_cov(
-            bam_path,
-            bam_batch=bam_batch,
-            fragments_dict=fragment_dict,
-            threads=threads,
-            rpkm_normalize=self.rpkm_normalize,
-            max_normalize=self.max_normalize,
-            max_norm_stacked=max_norm_stacked,
-        )
-        if max_norm_stacked:
+        if not self.comebin:
+            cov_df = calculate_bam_cov(
+                bam_path,
+                bam_batch=bam_batch,
+                fragments_dict=fragment_dict,
+                threads=threads,
+                rpkm_normalize=self.rpkm_normalize,
+            )
+
+            if self.max_norm_stacked:
+                cov_df = max_normalize_stacked_coverage(cov_df)
+        else:
+            from .COMEBin_coverage import calculate_bam_cov as comebin_calculate_bam_cov
+
+            cov_df = comebin_calculate_bam_cov(
+                bam_path,
+                bam_batch=bam_batch,
+                fragments_dict=fragment_dict,
+                threads=threads,
+                rpkm_normalize=False,
+                mode="comebin",
+            )
+            # by default we apply a max normalization after stacking all views. 
             cov_df = max_normalize_stacked_coverage(cov_df)
-
         return cov_df
-
-
-# ======= Multisample coverage features. =======
-# class CoverageMultiFeatureBuilder(CoverageFeatureBuilder):
-# def __call__():
-# pass

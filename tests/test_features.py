@@ -130,8 +130,7 @@ def test_normalise_coverage_dicts_zero_total_mapped():
         coverage_std=coverage_std,
         all_fragment_headers=headers,
         total_mapped=0,
-        rpkm_normalize=True,
-        max_normalize=False,
+        rpkm_normalize=True
     )
 
     assert cov == {"f1": 0.0, "f2": 0.0}
@@ -149,7 +148,6 @@ def test_normalise_coverage_dicts_rpkm():
         all_fragment_headers=headers,
         total_mapped=2_000_000,  # factor=2
         rpkm_normalize=True,
-        max_normalize=False,
     )
 
     assert cov["f1"] == pytest.approx(50.0)
@@ -157,25 +155,6 @@ def test_normalise_coverage_dicts_rpkm():
     assert std["f1"] == pytest.approx(5.0)
     assert std["f2"] == pytest.approx(2.5)
 
-
-def test_normalise_coverage_dicts_max():
-    coverage = {"f1": 2.0, "f2": 4.0}
-    coverage_std = {"f1": 1.0, "f2": 2.0}
-    headers = ["f1", "f2"]
-
-    cov, std = _normalise_coverage_dicts(
-        coverage=coverage,
-        coverage_std=coverage_std,
-        all_fragment_headers=headers,
-        total_mapped=100,
-        rpkm_normalize=False,
-        max_normalize=True,
-    )
-
-    assert cov["f2"] == pytest.approx(1.0, abs=1e-6)
-    assert std["f2"] == pytest.approx(1.0, abs=1e-6)
-    assert 0.0 < cov["f1"] < 1.0
-    assert 0.0 < std["f1"] < 1.0
 
 import pickle
 
@@ -502,10 +481,18 @@ def test_feature_builder_corgi_branch(monkeypatch, tmp_path):
         columns=["dim0", "dim1", "dim2", "dim3"],
     )
 
+    # The builder calls the CorgiFeatureBuilder instance, so we patch the class method
+    # and seed the expected augmented FASTA files the code checks for before reading outputs.
+    (tmp_path / "augmented_fragments_view0.fasta").write_text(
+        ">contig_1\nATGC\n>contig_2\nATGC\n"
+    )
+    (tmp_path / "augmented_fragments_view1.fasta").write_text(
+        ">contig_1\nATGC\n>contig_2\nATGC\n"
+    )
     monkeypatch.setattr(
-        builder.corgi,
+        CorgiFeatureBuilder,
         "__call__",
-        lambda output_dir, contigs, min_length: fake_corgi,
+        lambda self, seq_dir, contigs, min_length=1000: fake_corgi,
     )
 
     (features, taxonomy), kmer_dim = builder(

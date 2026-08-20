@@ -65,7 +65,9 @@ class TaxonomyFeatureBuilder(BaseFeatureBuilder):
         contig_taxonomy_df = pd.DataFrame(
             {
                 "contig_id": list(contig_to_tax_node.keys()),
-                "tax_node_idx": list(contig_to_tax_node.values()), # it already maps conitgs to the finest tax_node index.
+                "tax_node_idx": list(
+                    contig_to_tax_node.values()
+                ),  # it already maps conitgs to the finest tax_node index.
             }
         )
         return tax_nodes, tax_node_indices, parental_array, contig_taxonomy_df
@@ -90,7 +92,9 @@ class TaxonomyFeatureBuilder(BaseFeatureBuilder):
             contig_id, taxonomy_str = row["contigs"], row["predictions"]
             if not taxonomy_str:
                 continue
-            taxonomy_levels = taxonomy_str.split(";")  # assume in "domain;phylum;class;order;family;genus;species" format, by having --tax-lineage 1 in mmseqs2.
+            taxonomy_levels = taxonomy_str.split(
+                ";"
+            )  # assume in "domain;phylum;class;order;family;genus;species" format, by having --tax-lineage 1 in mmseqs2.
             G.add_edge(root, taxonomy_levels[0])
             for i in range(1, len(taxonomy_levels)):
                 parent_taxon = taxonomy_levels[i - 1]

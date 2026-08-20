@@ -2,174 +2,77 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch
 
-
-class info_nce_loss_hard_weight(nn.Module):
-    def __init__(self, temperature=0.15):
-        super().__init__()
-        self.temperature = temperature
-        self._cache = {}
-
-    def forward(self, features, device, batch_size=1024, n_views=6):
-        """
-        Ultra-fast multi-view InfoNCE loss matching the 'comebin' style.
-        Computes (n_views - 1) independent losses per anchor view against all negatives,
-        leveraging fused mathematical operators and memory-bound optimizations.
-        """
-        total = batch_size * n_views
-        cache_key = (batch_size, n_views, str(device))
-
-        # --- Efficient Persistent Caching ---
-        if cache_key not in self._cache:
-            sample_ids = torch.arange(batch_size, device=device).repeat(n_views)
-
-            # Construct masks for structured extraction
-            pos_mask = sample_ids.unsqueeze(0).eq(sample_ids.unsqueeze(1))
-            diag_mask = torch.eye(total, dtype=torch.bool, device=device)
-            pos_mask_no_diag = pos_mask & ~diag_mask
-
-            # Fast index matrix for gathering positive scores: [total, n_views - 1]
-            pos_indices = pos_mask_no_diag.nonzero()[:, 1].view(total, n_views - 1)
-
-            # Complete negative mask to isolate true negative elements
-            neg_mask = pos_mask
-
-            self._cache[cache_key] = (pos_indices, neg_mask, sample_ids)
-
-        pos_indices, neg_mask, sample_ids = self._cache[cache_key]
-
-        # 1. High-speed Matrix Multiplication
-        features = F.normalize(features, dim=1)
-        sim = torch.matmul(features, features.T) / self.temperature
-
-        # 2. Extract Positives and Flatten: Shape [total * (n_views - 1), 1]
-        # This gathers exactly the 5 positive pairs per row
-        positives = torch.gather(sim, dim=1, index=pos_indices).view(-1, 1)
-
-        # 3. Mask out true positives and self-diagonal targets to isolate negatives
-        negatives_only = sim.masked_fill(neg_mask, float("-inf"))
-
-        # Virtual repetition to pair each row's negatives against each individual positive view
-        # Shape: [total * (n_views - 1), total]
-        negatives_repeated = torch.repeat_interleave(negatives_only, n_views - 1, dim=0)
-
-        # 4. Fused Mathematical Log-Sum-Exp Reduction (Avoids huge torch.cat calls)
-        max_val = torch.clamp(positives, min=0.0)
-        pos_exp = torch.exp(positives - max_val)
-        neg_sum_exp = torch.sum(
-            torch.exp(negatives_repeated - max_val), dim=1, keepdim=True
-        )
-
-        # Final objective calculation matching comebin's multi-view behavior
-        loss = -(positives - max_val - torch.log(pos_exp + neg_sum_exp)).mean()
-
-        # 5. Optimized Metric Computation (Top-1 and Top-5 Accuracy)
-        with torch.no_grad():
-            # Extract pure negative scores across the batch
-            # Shape: [total, total] -> max negative per row: [total, 1]
-            max_negatives = negatives_only.max(dim=1, keepdim=True).values
-            max_negatives_repeated = torch.repeat_interleave(
-                max_negatives, n_views - 1, dim=0
-            )
-
-            # Top-1: Check if the individual positive view score beats the best negative score
-            top1_acc = (
-                positives > max_negatives_repeated
-            ).float().mean().item() * 100.0
-
-            # Top-5: Sort or partition the negative space to find the 5th highest negative baseline
-            # topk(5) returns sorted negative tensor of shape [total, 5]. The 5th item (index 4) is our threshold.
-            top5_neg_threshold = torch.topk(negatives_only, k=5, dim=1).values[:, 4:5]
-            top5_neg_repeated = torch.repeat_interleave(
-                top5_neg_threshold, n_views - 1, dim=0
-            )
-
-            # Top-5: True if the positive score beats the 5th highest negative score
-            top5_acc = (positives > top5_neg_repeated).float().mean().item() * 100.0
-
-        return loss, top1_acc, top5_acc
-
-
 class info_nce_loss(nn.Module):
-    def __init__(self, temperature=0.15):
+    def __init__(self, temperature: float = 0.15):
         super().__init__()
         self.temperature = temperature
         self._cache = {}
 
-    def forward(self, features, device, batch_size=1024, n_views=6):
-        """
-        Ultra-fast multi-view InfoNCE loss matching the 'comebin' style.
-        Computes (n_views - 1) independent losses per anchor view against all negatives,
-        leveraging fused mathematical operators and memory-bound optimizations.
-        """
-        total = batch_size * n_views
-        cache_key = (batch_size, n_views, str(device))
-
-        # --- Efficient Persistent Caching ---
-        if cache_key not in self._cache:
+    def _masks(self, batch_size: int, n_views: int, device):
+        key = (batch_size, n_views, str(device))
+        if key not in self._cache:
+            total = batch_size * n_views
             sample_ids = torch.arange(batch_size, device=device).repeat(n_views)
+            same_contig = sample_ids.unsqueeze(0).eq(sample_ids.unsqueeze(1))
+            diag = torch.eye(total, dtype=torch.bool, device=device)
+            pos_idx = (same_contig & ~diag).nonzero()[:, 1].view(total, n_views - 1)
+            self._cache[key] = (pos_idx, same_contig)
+        return self._cache[key]
 
-            # Construct masks for structured extraction
-            pos_mask = sample_ids.unsqueeze(0).eq(sample_ids.unsqueeze(1))
-            diag_mask = torch.eye(total, dtype=torch.bool, device=device)
-            pos_mask_no_diag = pos_mask & ~diag_mask
+    def _neg_logpartition(self, neg, n_views):
+        """log sum_k exp(s_k) over the negatives of each row -> [total, 1]."""
+        return torch.logsumexp(neg, dim=1, keepdim=True)
 
-            # Fast index matrix for gathering positive scores: [total, n_views - 1]
-            pos_indices = pos_mask_no_diag.nonzero()[:, 1].view(total, n_views - 1)
+    def forward(self, features, device=None, batch_size: int = 1024, n_views: int = 6):
+        device = features.device if device is None else device
+        pos_idx, same_contig = self._masks(batch_size, n_views, device)
 
-            # Complete negative mask to isolate true negative elements
-            neg_mask = pos_mask
+        # Always score in fp32 even if the caller is inside autocast.
+        features = F.normalize(features.float(), dim=1)
+        sim = (features @ features.T) / self.temperature
 
-            self._cache[cache_key] = (pos_indices, neg_mask, sample_ids)
+        # [total * (n_views - 1), 1]
+        positives = torch.gather(sim, 1, pos_idx).reshape(-1, 1)
 
-        pos_indices, neg_mask, sample_ids = self._cache[cache_key]
+        neg = sim.masked_fill(same_contig, float("-inf"))
+        neg_lse = self._neg_logpartition(neg, n_views)              # [total, 1]
+        neg_lse = neg_lse.repeat_interleave(n_views - 1, dim=0)     # [total*(V-1), 1]
 
-        # 1. High-speed Matrix Multiplication
-        features = F.normalize(features, dim=1)
-        sim = torch.matmul(features, features.T) / self.temperature
+        # -log( exp(pos) / (exp(pos) + sum_k exp(neg_k)) )
+        loss = (torch.logaddexp(positives, neg_lse) - positives).mean()
 
-        # 2. Extract Positives and Flatten: Shape [total * (n_views - 1), 1]
-        # This gathers exactly the 5 positive pairs per row
-        positives = torch.gather(sim, dim=1, index=pos_indices).view(-1, 1)
+        with torch.no_grad():
+            max_neg = neg.max(dim=1, keepdim=True).values
+            max_neg = max_neg.repeat_interleave(n_views - 1, dim=0)
+            top1 = (positives > max_neg).float().mean().item() * 100.0
 
-        # 3. Mask out true positives and self-diagonal targets to isolate negatives
-        negatives_only = sim.masked_fill(neg_mask, float("-inf"))
+        return loss, top1
 
-        # Virtual repetition to pair each row's negatives against each individual positive view
-        # Shape: [total * (n_views - 1), total]
-        negatives_repeated = torch.repeat_interleave(negatives_only, n_views - 1, dim=0)
+class InfoNCEHardNegative(info_nce_loss):
+    """Actual hard-negative reweighting (Robinson et al., ICLR 2021).
 
-        # 4. Fused Mathematical Log-Sum-Exp Reduction (Avoids huge torch.cat calls)
-        max_val = torch.clamp(positives, min=0.0)
-        pos_exp = torch.exp(positives - max_val)
-        neg_sum_exp = torch.sum(
-            torch.exp(negatives_repeated - max_val), dim=1, keepdim=True
+    Your previous `info_nce_loss_hard_weight` was a byte-for-byte copy of
+    `info_nce_loss`, so `hard_weighted_nce=True` was a no-op. Here negatives
+    are reweighted by w_k ∝ exp(beta * s_k), normalised to sum to N_neg:
+
+        log Z_hard = logsumexp((1+beta) * s) - logsumexp(beta * s) + log(N_neg)
+
+    beta=0 recovers the plain loss. beta in [0.5, 1.0] is a sensible range;
+    be careful in metagenomics, where the hardest negatives are frequently
+    contigs from the *same* genome (i.e. false negatives).
+    """
+
+    def __init__(self, temperature: float = 0.15, beta: float = 0.5):
+        super().__init__(temperature=temperature)
+        self.beta = beta
+
+    def _neg_logpartition(self, neg, n_views):
+        if self.beta == 0.0:
+            return torch.logsumexp(neg, dim=1, keepdim=True)
+        n_neg = neg.shape[1] - n_views  # -inf entries are the same-contig block
+        num = torch.logsumexp((1.0 + self.beta) * neg, dim=1, keepdim=True)
+        den = torch.logsumexp(self.beta * neg, dim=1, keepdim=True)
+        return num - den + torch.log(
+            torch.tensor(float(n_neg), device=neg.device, dtype=neg.dtype)
         )
 
-        # Final objective calculation matching comebin's multi-view behavior
-        loss = -(positives - max_val - torch.log(pos_exp + neg_sum_exp)).mean()
-
-        # 5. Optimized Metric Computation (Top-1 and Top-5 Accuracy)
-        with torch.no_grad():
-            # Extract pure negative scores across the batch
-            # Shape: [total, total] -> max negative per row: [total, 1]
-            max_negatives = negatives_only.max(dim=1, keepdim=True).values
-            max_negatives_repeated = torch.repeat_interleave(
-                max_negatives, n_views - 1, dim=0
-            )
-
-            # Top-1: Check if the individual positive view score beats the best negative score
-            top1_acc = (
-                positives > max_negatives_repeated
-            ).float().mean().item() * 100.0
-
-            # Top-5: Sort or partition the negative space to find the 5th highest negative baseline
-            # topk(5) returns sorted negative tensor of shape [total, 5]. The 5th item (index 4) is our threshold.
-            top5_neg_threshold = torch.topk(negatives_only, k=5, dim=1).values[:, 4:5]
-            top5_neg_repeated = torch.repeat_interleave(
-                top5_neg_threshold, n_views - 1, dim=0
-            )
-
-            # Top-5: True if the positive score beats the 5th highest negative score
-            top5_acc = (positives > top5_neg_repeated).float().mean().item() * 100.0
-
-        return loss, top1_acc, top5_acc

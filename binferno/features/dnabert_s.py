@@ -82,8 +82,10 @@ class DnaBertSFeatureBuilder(BaseFeatureBuilder):
         features = np.asarray(features)
         df = pd.DataFrame(features, index=names)
         end_time = time.time()
-        logger.info(f"Feature extraction completed in {end_time - start_time:.2f} seconds.")
-        
+        logger.info(
+            f"Feature extraction completed in {end_time - start_time:.2f} seconds."
+        )
+
         return df
 
     def embed_sequence(self, seq, tokenizer, model, device, max_len=512, stride=256):

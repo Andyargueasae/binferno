@@ -20,8 +20,9 @@ from typing import Dict, List, Tuple
 from ..utils import calc_n50
 from .base import BaseTrainer
 from ..features import BinfernoFeatureBuilder
-from .models.simclr import SimCLRNet, EmbeddingNet, NeuralNetwork, EmbNet2
-from .InfoNCEloss import info_nce_loss, info_nce_loss_hard_weight
+from .models.COMEBin_models import SimCLRNet, EmbeddingNet
+from .models.simclr import NeuralNetwork
+from .InfoNCEloss import info_nce_loss, InfoNCEHardNegative
 from .base import (
     BaseTrainer, 
     label_augmented_views, build_mask,
@@ -33,7 +34,7 @@ KMER_DIM = 136
 
 class SimCLRTrainer(BaseTrainer):
     simclrnet: bool = Field(
-        default=False,
+        default=True,
         description="Whether to use SimCLRNet architecture for training. If False, use a simpler MLP architecture.",
     )
     proj: bool = Field(
@@ -41,7 +42,7 @@ class SimCLRTrainer(BaseTrainer):
         description="Whether to use a projection head in the NeuralNetwork architecture.",
     )
     learning_rate: float = Field(
-        default=2.5e-3, description="Learning rate for training."
+        default=1e-3, description="Learning rate for training."
     )
     batch_size: int = Field(default=1024, description="Batch size for training.")
     epochs: int = Field(default=300, description="Number of epochs for training.")
@@ -58,10 +59,6 @@ class SimCLRTrainer(BaseTrainer):
     seed: int = Field(
         default=42, description="Random seed for training and augmentation."
     )
-    gated: bool = Field(
-        default=False,
-        description="Whether to use gated fusion in the Fusion module instead of attention fusion.",
-    )
     attention: bool = Field(
         default=False,
         description="Whether to use attention fusion in the Fusion module instead of gated fusion.",
@@ -71,10 +68,6 @@ class SimCLRTrainer(BaseTrainer):
         description="Temperature parameter for the InfoNCE loss. "
         "By default, it is set based on the N50 of the input contigs. "
         "If the N50 is greater than 10,000, the temperature is set to 0.07; otherwise, it is set to 0.15.",
-    )
-    embnet: bool = Field(
-        default=False,
-        description="Whether to use the EmbNet2 architecture for training instead of SimCLRNet or NeuralNetwork.",
     )
     max_lr_epochs: int = Field(
         default=10,
@@ -91,10 +84,6 @@ class SimCLRTrainer(BaseTrainer):
     auxiliary_loss: bool = Field(
         default=False,
         description="Whether to include an auxiliary loss on the individual view embeddings in addition to the main InfoNCE loss on the fused embeddings. This can help encourage the model to learn useful representations in each view before fusion.",
-    )
-    dense_mode: bool = Field(
-        default=False,
-        description="Whether to use dense mode in the NeuralNetwork architecture, which adds additional fully connected layers after concatenating the kmer and coverage embeddings. If False, the model will directly output the final embedding after fusion without additional layers.",
     )
 
     def __call__(
@@ -117,9 +106,9 @@ class SimCLRTrainer(BaseTrainer):
         else:
             N_50 = calc_n50(contigs)
             logger.info(f"N50 of the input contigs: {N_50}")
-            temperature = 0.15
+            temperature = 0.12 # 0.15
             if N_50 > 10000:
-                temperature = 0.07
+                temperature = 0.10 # 0.07
 
         # the first step is to generate the augmented views and then turn views into vectors.
         output_aug_dir = output_dir / "augmentation"
@@ -151,18 +140,11 @@ class SimCLRTrainer(BaseTrainer):
             threads=threads,
             logger=logger,
             output_dir=output_aug_dir,
-            max_norm_stacked=True,  # for simclr, we found that normalizing the coverage features before feeding into the model can lead to better performance, so we set std_first to True.
         )
 
-        if isinstance(feature_result, tuple):
-            feature_df, kmer_dim = feature_result
-        else:
-            feature_df = feature_result
-            if hasattr(features, "_get_kmer_dim"):
-                kmer_dim = features._get_kmer_dim()
-            else:
-                kmer_dim = 0
-
+        feature_data, kmer_dim = feature_result
+        feature_df, tax_df = feature_data
+        
         # after getting the features, sort the features by method to ensure integrity before training.
         feature_df = self.sort_features_by_method(
             feature_df,
@@ -205,24 +187,15 @@ class SimCLRTrainer(BaseTrainer):
                 actn=nn.LeakyReLU(),
                 cov_model=cov_model,
             ).to(device)
-        elif self.embnet:
-            model = EmbNet2(
-                tnf_dim=composition_dim,
-                coverage_dim=cov_dim,
-                output_dim=self.output_dim,
-                kmer_dim=kmer_dim,
-            ).to(device)
         else:
             model = NeuralNetwork(
                 tnf_dim=composition_dim,
                 coverage_dim=cov_dim,
                 output_dim=self.output_dim,
                 kmer_dim=kmer_dim,
-                gated=self.gated,
                 attention=self.attention,
                 corgi_dim=corgi_dim,
                 proj=self.proj,
-                dense_mode=self.dense_mode,
             ).to(device)
 
         logger.info(f"Model architecture:\n{model}")
@@ -252,7 +225,7 @@ class SimCLRTrainer(BaseTrainer):
                 device=device,
                 epochs=self.epochs,
                 model=model,
-                n_cov=cov_dim,
+                kmer_dim=kmer_dim,
                 n_views=self.view_num,
                 temperature=temperature,
                 output_dir=output_train_dir,
@@ -287,29 +260,12 @@ class SimCLRTrainer(BaseTrainer):
                 temperature=temperature,
             )
 
-        if self.gated:
-            with torch.no_grad():
-                sample_batch = next(iter(train_loader))
-                x = sample_batch[0][:32].to(device)
-                tnf = x[:, : model.tnf_enc_dim]
-                cov = x[:, model.tnf_enc_dim :]
-                kmer_emb = model.tnf_encoder(tnf)
-                cov_emb = model.coverage_encoder(cov)
-                cat = torch.cat([kmer_emb, cov_emb], dim=1)
-                kg = model.fusion_network.kmer_gate(cat)
-                cg = model.fusion_network.coverage_gate(cat)
-                logger.info(
-                    f"kmer_gate mean: {kg.mean():.3f}, coverage_gate mean: {cg.mean():.3f}"
-                )
-                logger.info(
-                    f"kmer_emb norm: {kmer_emb.norm(dim=1).mean():.3f}, cov_emb norm: {cov_emb.norm(dim=1).mean():.3f}"
-                )
-
         # in case embeddings isn't exist, get embeddings from the trained model and save to file.
         if self.simclrnet:
             embeddings = self.simclr_get_embs(
                 model=model,
                 data=dataset,
+                namelist=namelist,
                 output_path=embedding_path,
                 device=device,
                 kmer_len=kmer_dim,
@@ -322,13 +278,6 @@ class SimCLRTrainer(BaseTrainer):
                 batch_size=self.batch_size,
                 save_individual_embs=self.get_individual_embs,
             )
-
-        # normalize embeddings, but here the embedding is pd.dataframe, so we can use F.normalize from torch after converting the dataframe to tensor, then convert back to dataframe.
-        embeddings = pd.DataFrame(
-            F.normalize(torch.from_numpy(embeddings.values).float(), dim=1).numpy(),
-            index=embeddings.index,
-            columns=embeddings.columns,
-        )
 
         return embeddings
 
@@ -349,8 +298,9 @@ class SimCLRTrainer(BaseTrainer):
             return features_df
         else:
             # for simclr, group by view, stack the features of same view together, then concatenate the features.
+            index_ = features_df.index.tolist()
             features_df["view"] = (
-                features_df.index.str.rsplit(".", n=1).str[-1].astype(str)
+                [ind.rsplit(".", 1)[-1] for ind in index_]
             )
             # replace "original" as "0".
             # features_df["view"] = features_df["view"].replace("original", "0")
@@ -390,7 +340,7 @@ class SimCLRTrainer(BaseTrainer):
         **kwargs,
     ):
         # determine the namelist for the dataset.
-        orig_df = data_df[data_df.index.str.endswith("0")]
+        orig_df = data_df[data_df.index.str.rsplit(".", n=1).str[-1] == "0"] # strictly matching once and only the original view as view 0.
         namelist = [index.rsplit(".", 1)[0] for index in orig_df.index]
         # slice the data_df by the length of namelist, make sure to assert length for sliced data to be same.
         dataset = list(
@@ -408,7 +358,6 @@ class SimCLRTrainer(BaseTrainer):
                 "Length weight is empty. Please check the contigs input and the length_weight function."
             )
 
-        # breakpoint()
         train_dataset = torch.utils.data.TensorDataset(
             *[
                 dataset[i][
@@ -447,7 +396,7 @@ class SimCLRTrainer(BaseTrainer):
 
         if simclrnet:
             optimizer = torch.optim.AdamW(
-                model.parameters(), lr=1e-3, weight_decay=1e-4
+                model.parameters(), lr=self.learning_rate, weight_decay=1e-4
             )
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                 optimizer, T_max=epochs, eta_min=0, last_epoch=-1
@@ -484,10 +433,31 @@ class SimCLRTrainer(BaseTrainer):
             return res
 
     def length_weight(self, contig: str):
-        seq_obj = pyfastx.Fastx(contig)
+        if contig is None:
+            raise ValueError(
+                "Length weight is empty. Please check the contigs input and the length_weight function."
+            )
+
+        contig_path = Path(contig)
+        if not contig_path.exists():
+            raise ValueError(
+                "Length weight is empty. Please check the contigs input and the length_weight function."
+            )
+
+        try:
+            seq_obj = pyfastx.Fastx(str(contig_path))
+        except Exception as exc:  # pragma: no cover - defensive guard for invalid FASTA paths
+            raise ValueError(
+                "Length weight is empty. Please check the contigs input and the length_weight function."
+            ) from exc
+
         contig_length = dict()
         for name, seq in seq_obj:
             contig_length[name] = len(seq)
+        if not contig_length:
+            raise ValueError(
+                "Length weight is empty. Please check the contigs input and the length_weight function."
+            )
         return contig_length
 
     def train(
@@ -497,7 +467,7 @@ class SimCLRTrainer(BaseTrainer):
         scheduler: torch.optim.lr_scheduler._LRScheduler,
         device: torch.device,
         logger: loguru._logger.Logger,
-        method: str = "barlow_twins",
+        method: str = "simclr",
         epochs: int = 300,
         model=None,
         n_cov: int = 0,
@@ -594,7 +564,7 @@ class SimCLRTrainer(BaseTrainer):
             optimizer.zero_grad(set_to_none=True)
             actual_batch_size = contig_features.shape[0] // self.view_num
             enc_feature, kmer_emb, cov_emb = model.forward_one(contig_features)
-            loss, batch_acc, _ = info_nceloss_fn(
+            loss, batch_acc = info_nceloss_fn(
                 enc_feature,
                 batch_size=actual_batch_size,
                 device=device,
@@ -604,13 +574,13 @@ class SimCLRTrainer(BaseTrainer):
             if auxiliary_loss:
                 L_kmer = 1.0
                 L_cov = 1.0
-                kmer_loss, _, _ = info_nceloss_fn(
+                kmer_loss, _ = info_nceloss_fn(
                     kmer_emb,
                     batch_size=actual_batch_size,
                     device=device,
                     n_views=self.view_num,
                 )
-                cov_loss, _, _ = info_nceloss_fn(
+                cov_loss, _ = info_nceloss_fn(
                     cov_emb,
                     batch_size=actual_batch_size,
                     device=device,
@@ -635,123 +605,207 @@ class SimCLRTrainer(BaseTrainer):
 
     def simclrnet_train(
         self,
-        dataloader: torch.utils.data.DataLoader,
-        optimizer: torch.optim.Optimizer,
-        scheduler: torch.optim.lr_scheduler._LRScheduler,
-        device: torch.device,
+        dataloader,
+        optimizer,
+        scheduler,
+        device,
         epochs: int = 300,
         model=None,
-        n_cov: int = 0,
+        kmer_dim: int = 136,
         n_views: int = 6,
         temperature: float = 0.15,
         output_dir: str = None,
+        amp_dtype: torch.dtype = torch.bfloat16,
+        max_skip_fraction: float = 0.02,
         **kwargs,
     ):
-        self.unify_seeds(
-            self.seed
-        )  # ensure reproducibility by unifying seeds across random, numpy, and torch.
-        info_nceloss_fn = self.info_nce_loss(temperature=temperature).to(device)
-        if n_cov <= 0:
-            raise ValueError(
-                "n_cov must be a positive integer representing the number of coverage features in the input data."
-            )
-
-        scaler = GradScaler(enabled=device.type == "cuda")
+        self.unify_seeds(self.seed)
         logger = kwargs.get("logger", None)
         if logger is None:
-            raise ValueError(
-                "Logger is not provided for training. Please provide a logger in the kwargs with key 'logger'."
-            )
+            raise ValueError("Logger is not provided for training.")
+        # if n_cov <= 0:
+        #     raise ValueError("n_cov must be a positive integer.")
 
-        logger.info("Starting SimCLR training with {} epochs.".format(epochs))
+        output_dir = Path(output_dir)
+        model_path = output_dir / "best_model.pt"
+
+        info_nceloss_fn = info_nce_loss(temperature=temperature).to(device)
+
+        use_cuda = device.type == "cuda"
+        use_fp16 = use_cuda and amp_dtype == torch.float16
+        scaler = GradScaler(enabled=use_fp16)
+
+        logger.info(
+            f"Starting SimCLR training: {epochs} epochs, T={temperature}, "
+            f"amp={'off' if not use_cuda else str(amp_dtype)}"
+        )
+
+        # ---- state that must survive across epochs -------------------------
+        best_loss = float("inf")
+        best_acc = 0.0
+        best_state = None
+        best_epoch = -1
+        bad_epochs = 0
         earlystop_epoch = 0
+        probed = False
+        # --------------------------------------------------------------------
+
         for epoch_counter in tqdm(range(epochs), desc="SimCLR Training Epochs"):
+            model.train()
             total_loss = 0.0
             total_acc1 = 0.0
-            for _, contig_features in enumerate(dataloader):
-                contig_features = torch.cat(contig_features, dim=0)
-                contig_features = contig_features.to(device, non_blocking=True)
+            num_steps = 0
+            num_skipped = 0
 
+            for contig_features in dataloader:
+                contig_features = torch.cat(contig_features, dim=0).to(
+                    device, non_blocking=True
+                )
+                x_comp = contig_features[:, :kmer_dim] # composition features
+                x_cov = contig_features[:, kmer_dim:] # coverage features
                 optimizer.zero_grad(set_to_none=True)
 
                 with torch.amp.autocast(
-                    enabled=device.type == "cuda", device_type=device.type
+                    enabled=use_cuda, device_type=device.type, dtype=amp_dtype
                 ):
-                    features, _ = model(
-                        contig_features[:, :-n_cov], contig_features[:, -n_cov:]
-                    )
-                    actual_batch_size = contig_features.shape[0] // n_views
-                    loss, batch_acc = info_nceloss_fn(
-                        features,
-                        batch_size=actual_batch_size,
-                        device=device,
-                        n_views=n_views,
-                    )
-                    total_loss += loss.item()
-                    total_acc1 += batch_acc
+                    features, _ = model(x_comp, x_cov)
 
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
+                actual_batch_size = contig_features.shape[0] // n_views
+                loss, batch_acc = info_nceloss_fn(
+                    features.float(),
+                    batch_size=actual_batch_size,
+                    device=device,
+                    n_views=n_views,
+                )
 
-            if epoch_counter >= 10:
-                scheduler.step()
-            avg_loss = total_loss / len(dataloader)
-            avg_acc1 = total_acc1 / len(dataloader)
+                if not torch.isfinite(loss):
+                    num_skipped += 1
+                    if not probed:
+                        probed = True
+                        logger.warning(
+                            f"First non-finite InfoNCE loss at epoch {epoch_counter + 1}; probing:"
+                        )
+                        _first_nonfinite_report(model, x_comp, x_cov, logger)
+                    optimizer.zero_grad(set_to_none=True)
+                    continue
+
+                if use_fp16:
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                    optimizer.step()
+
+                total_loss += loss.item()
+                total_acc1 += batch_acc
+                num_steps += 1
+
+            scheduler.step()
+
+            total_batches = num_steps + num_skipped
+            skip_frac = num_skipped / max(total_batches, 1)
+
+            if num_steps == 0:
+                logger.error(
+                    f"Epoch {epoch_counter + 1}: every batch was non-finite. Aborting."
+                )
+                break
+
+            avg_loss = total_loss / num_steps
+            avg_acc1 = total_acc1 / num_steps
+
             logger.info(
-                f"Epoch {epoch_counter+1}/{epochs} - SimCLR Loss: {avg_loss:.4f}, Top-1 Accuracy: {avg_acc1:.2f}%, LR: {optimizer.param_groups[0]['lr']:.2e}"
+                f"Epoch {epoch_counter + 1}/{epochs} - SimCLR Loss: {avg_loss:.4f}, "
+                f"Top-1: {avg_acc1:.2f}%, LR: {optimizer.param_groups[0]['lr']:.2e}, "
+                f"skipped {num_skipped}/{total_batches} ({skip_frac:.1%})"
             )
+
+            # Reported loss/acc are averages over surviving batches only. Once a
+            # non-trivial fraction is dropped, the curve is a survivorship
+            # artifact and must not be read as healthy training.
+            if skip_frac > max_skip_fraction:
+                logger.error(
+                    f"Epoch {epoch_counter + 1}: {skip_frac:.1%} of batches non-finite "
+                    f"(> {max_skip_fraction:.1%}). The reported loss is computed only over "
+                    f"surviving batches and is not trustworthy. Stopping."
+                )
+                break
+
+            improved = avg_loss < best_loss - 1e-4 or avg_acc1 > best_acc + 0.05
+            if improved:
+                best_loss = min(best_loss, avg_loss)
+                best_acc = max(best_acc, avg_acc1)
+                best_state = {
+                    k: v.detach().cpu().clone() for k, v in model.state_dict().items()
+                }
+                best_epoch = epoch_counter + 1
+                bad_epochs = 0
+            else:
+                bad_epochs += 1
+
+            if avg_loss > best_loss * 1.4 and avg_acc1 < best_acc - 8.0:
+                logger.warning(
+                    f"Collapse detected at epoch {epoch_counter + 1}: "
+                    f"loss {avg_loss:.4f} vs best {best_loss:.4f}, "
+                    f"acc {avg_acc1:.2f} vs best {best_acc:.2f}. Rewinding + halving LR."
+                )
+                if best_state is not None:
+                    model.load_state_dict(
+                        {k: v.to(device) for k, v in best_state.items()}
+                    )
+                    for g in optimizer.param_groups:
+                        g["lr"] = max(g["lr"] * 0.5, 1e-5)
+                bad_epochs = 0
 
             if epoch_counter >= 10 and avg_acc1 >= 99.0:
                 earlystop_epoch += 1
             else:
                 earlystop_epoch = 0
-
             if earlystop_epoch >= 5:
-                logger.info(
-                    f"Early stopping at epoch {epoch_counter+1} with top-1 accuracy: {avg_acc1:.2f}%"
-                )
+                logger.info(f"Early stopping at epoch {epoch_counter + 1} (acc {avg_acc1:.2f}%).")
                 break
-        logger.info("Finished SimCLR training.")
-        # save model.
-        torch.save(model.state_dict(), os.path.join(output_dir, "simclr_model.pt"))
-        return model
 
-    def embnet_get_embs(self, model, data, namelist, output_path, device):
-        with torch.no_grad():
-            model.eval()
-            bs_ = 1024
-
-            print(len(data))
-
-            out = np.concatenate(
-                [
-                    model(
-                        data[0][i : i + bs_, :].to(device),
-                    )[0]
-                    .to("cpu")
-                    .numpy()
-                    for i in range(0, len(data[0]), bs_)
-                ],
-                axis=0,
+        if best_state is not None:
+            model.load_state_dict({k: v.to(device) for k, v in best_state.items()})
+            logger.info(
+                f"Restored best checkpoint from epoch {best_epoch} "
+                f"(loss {best_loss:.4f}, top-1 {best_acc:.2f}%)."
             )
-            embeddings_df = pd.DataFrame(out, index=namelist)
 
-            embeddings_df.to_csv(str(output_path), sep="\t", header=True, index=True)
-        return embeddings_df
+        # BN running stats are updated on every forward, including the ones whose
+        # loss was discarded. If any of them overflowed, eval-mode embeddings are
+        # silently NaN.
+        bad_bn = [
+            name
+            for name, buf in model.named_buffers()
+            if buf.dtype.is_floating_point and not torch.isfinite(buf).all()
+        ]
+        if bad_bn:
+            logger.error(
+                f"Non-finite BatchNorm buffers after training: {bad_bn[:5]}"
+                f"{' ...' if len(bad_bn) > 5 else ''}. Eval-mode embeddings will be NaN."
+            )
+
+        torch.save(model.state_dict(), model_path)
+        logger.info(f"Model saved to {model_path}")
+        return model
 
     def simclr_get_embs(self, model, data, namelist, output_path, device, kmer_len):
         with torch.no_grad():
             model.eval()
             bs_ = 1024
 
-            print(len(data))
+            print(f"length of original dataset: {len(data)}")
 
             out = np.concatenate(
                 [
                     model(
-                        data[0][i : i + bs_, -kmer_len:].to(device),
-                        data[0][i : i + bs_, :-kmer_len].to(device),
+                        data[0][i : i + bs_, :kmer_len].to(device),
+                        data[0][i : i + bs_, kmer_len:].to(device),
                     )[0]
                     .to("cpu")
                     .numpy()
@@ -766,8 +820,8 @@ class SimCLRTrainer(BaseTrainer):
             covout = np.concatenate(
                 [
                     model(
-                        data[0][i : i + bs_, -kmer_len:].to(device),
-                        data[0][i : i + bs_, :-kmer_len].to(device),
+                        data[0][i : i + bs_, :kmer_len].to(device), # kmer features
+                        data[0][i : i + bs_, kmer_len:].to(device), # coverage features
                     )[1]
                     .to("cpu")
                     .numpy()
@@ -775,9 +829,9 @@ class SimCLRTrainer(BaseTrainer):
                 ],
                 axis=0,
             )
-            embeddings_df = pd.DataFrame(covout, index=namelist)
+            cov_embeddings_df = pd.DataFrame(covout, index=namelist)
             outfile = output_path.parent / "cov_embeddings.tsv"
-            embeddings_df.to_csv(str(outfile), sep="\t", header=True, index=True)
+            cov_embeddings_df.to_csv(str(outfile), sep="\t", header=True, index=True)
         return embeddings_df
 
     def gen_views(
@@ -954,3 +1008,27 @@ class EarlyStoppingManagerSimCLR:
     def get_best_state(self):
         """Return the best checkpoint state and its associated loss and top accuracy."""
         return self._saved_state, self._lowest_loss, self._top_acc
+
+    def _first_nonfinite_report(self, model, x_comp, x_cov, logger):
+        """Run the forward again in fp32 and in the training dtype, and report
+        where the first non-finite value appears. Cheap: called at most once."""
+        with torch.no_grad():
+            stats = {}
+            h = model.cov_model(x_cov)
+            stats["cov_model_out"] = h
+            feats, cov_out = model(x_comp, x_cov)
+            stats["backbone_out"] = feats
+            stats["cov_out"] = cov_out
+            for name, t in stats.items():
+                finite = torch.isfinite(t).all().item()
+                amax = t.abs()[torch.isfinite(t)].max().item() if t.numel() else float("nan")
+                logger.warning(
+                    f"  [nan-probe] {name}: all_finite={finite}, max|x| (finite)={amax:.4e}, "
+                    f"dtype={t.dtype}"
+                )
+            logger.warning(
+                f"  [nan-probe] inputs: comp max|x|={x_comp.abs().max().item():.4e}, "
+                f"cov max|x|={x_cov.abs().max().item():.4e}, "
+                f"comp finite={torch.isfinite(x_comp).all().item()}, "
+                f"cov finite={torch.isfinite(x_cov).all().item()}"
+            )
