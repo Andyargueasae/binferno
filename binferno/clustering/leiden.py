@@ -27,6 +27,7 @@ from .cluster_utils import (
 class LeidenClustering(BaseClustering):
     seed: int = 42
     mutual: bool = Field(False, description="Whether to use mutual kNN filtering in Leiden clustering.")
+    contig_len: int = Field(1000, description="Minimum contig length for seed generation.")
     cluster_min_length: int = Field(1000, description="Minimum contig length for phase-1 clustering.")
     CPM: bool = Field(False, description="Whether to use CPM (Constant Potts Model) for Leiden clustering instead of RBER (Reichardt-Bornholdt).")
 
@@ -103,7 +104,11 @@ class LeidenClustering(BaseClustering):
 
         # check if to apply dimension reduction.
         if self.dimension_reduction:
-            norm_embeddings = apply_dimension_reduction(norm_embeddings)
+            norm_embeddings = apply_dimension_reduction(norm_embeddings,
+                pca=self.pca,
+                umap=self.umap,
+                default_dim=self.default_dim,
+            )
 
         # Two-phase clustering will incorporate shorter contigs below 2500 bp. We can first try with mutual KNN, and then decide what to do. 
         # seed_thresh = 2500  # or self.seed_len, a new param

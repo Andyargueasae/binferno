@@ -152,6 +152,12 @@ class SimCLRTrainer(BaseTrainer):
             simclr=True,
         )
 
+        tax_df = self.sort_features_by_method(
+            tax_df,
+            contig_ids=namelist,
+            simclr=True,
+        )
+
         if torch.cuda.is_available():
             device = torch.device("cuda")
             cudnn.deterministic = True
@@ -165,8 +171,7 @@ class SimCLRTrainer(BaseTrainer):
 
         composition_dim = feature_df.shape[1] - cov_dim
         kmer_dim = kmer_dim if kmer_dim != KMER_DIM else KMER_DIM
-        corgi_dim = composition_dim - kmer_dim
-        proj_head_dim = 128
+        tax_emb_dim = tax_df.shape[1] if tax_df is not None else 0
 
         # prepare model.
         if self.simclrnet:
@@ -178,8 +183,14 @@ class SimCLRTrainer(BaseTrainer):
                 actn=nn.LeakyReLU(),
                 use_bn=True,
             ).to(device)
+
+            if tax_emb_dim > 0:
+                in_size = composition_dim + self.output_dim + tax_emb_dim
+            else:
+                in_size = composition_dim + self.output_dim
+
             model = SimCLRNet(
-                in_sz=composition_dim + self.output_dim,
+                in_sz=in_size,
                 out_sz=self.output_dim,
                 emb_szs=[2048] * 3,
                 use_bn=True,
@@ -202,6 +213,7 @@ class SimCLRTrainer(BaseTrainer):
         # prepare training.
         train_loader, optimizer, scheduler, dataset = self.prepare_trainer(
             data_df=feature_df,
+            tax_df=tax_df,
             batch_size=self.batch_size,
             contig_length=self.contig_length,
             model=model,
@@ -329,7 +341,8 @@ class SimCLRTrainer(BaseTrainer):
 
     def prepare_trainer(
         self,
-        data_df,
+        data_df: pd.DataFrame,
+        tax_df: pd.DataFrame = None,
         batch_size: int = 1024,
         contig_length: int = 1000,
         model=None,
@@ -346,6 +359,7 @@ class SimCLRTrainer(BaseTrainer):
         dataset = list(
             torch.split(torch.from_numpy(data_df.values).float(), len(namelist))
         )
+        
         epochs = kwargs.get("epochs", 300)
         assert (
             len(dataset) == n_views
@@ -358,15 +372,36 @@ class SimCLRTrainer(BaseTrainer):
                 "Length weight is empty. Please check the contigs input and the length_weight function."
             )
 
-        train_dataset = torch.utils.data.TensorDataset(
-            *[
-                dataset[i][
-                    np.array([length_weight[name] for name in namelist])
-                    >= contig_length
+        if tax_df is None:
+            train_dataset = torch.utils.data.TensorDataset(
+                *[
+                    dataset[i][
+                        np.array([length_weight[name] for name in namelist])
+                        >= contig_length
+                    ]
+                    for i in range(n_views)
                 ]
-                for i in range(n_views)
-            ]
-        )
+            )
+        else:
+            tax_dataset = list(
+                torch.split(torch.from_numpy(tax_df.values).float(), len(namelist))
+            )
+            train_dataset = torch.utils.data.TensorDataset(
+                *[
+                    dataset[i][
+                        np.array([length_weight[name] for name in namelist])
+                        >= contig_length
+                    ]
+                    for i in range(n_views)
+                ],
+                *[
+                    tax_dataset[i][
+                        np.array([length_weight[name] for name in namelist])
+                        >= contig_length
+                    ]
+                    for i in range(n_views)
+                ],
+            )
 
         # Keep multiprocessing options conservative to avoid native worker crashes
         # on some PyTorch/HPC stacks (fork + pinned memory + persistent workers).
@@ -658,11 +693,24 @@ class SimCLRTrainer(BaseTrainer):
             num_skipped = 0
 
             for contig_features in dataloader:
-                contig_features = torch.cat(contig_features, dim=0).to(
-                    device, non_blocking=True
-                )
-                x_comp = contig_features[:, :kmer_dim] # composition features
-                x_cov = contig_features[:, kmer_dim:] # coverage features
+                # identify whether contig_features is a list of tensors.
+                if len(contig_features) > n_views:
+                    # first n_views are canonical features, the rest until the end are taxonomic features.
+                    comp_cov = contig_features[:n_views] 
+                    tax_emb = contig_features[n_views:]
+                    contig_features = torch.cat(comp_cov, dim=0).to(device, non_blocking=True)
+                    tax_features = torch.cat(tax_emb, dim=0).to(device, non_blocking=True)
+                    # concatenation of composition features and taxonomic features for the model input.
+                    x_comp = torch.cat([contig_features[:, :kmer_dim], tax_features], dim=1) # composition features + taxonomic features
+                    x_cov = contig_features[:, kmer_dim:] # coverage features
+                
+                else:
+                    contig_features = torch.cat(contig_features, dim=0).to(
+                        device, non_blocking=True
+                    )
+                    x_comp = contig_features[:, :kmer_dim] # composition features
+                    x_cov = contig_features[:, kmer_dim:] # coverage features
+                
                 optimizer.zero_grad(set_to_none=True)
 
                 with torch.amp.autocast(

@@ -1,13 +1,17 @@
 from __future__ import annotations, print_function
 
 import gzip
-from Bio import SeqIO
+import mimetypes
+import os
+from time import time
 import functools
 import logging
-from typing import Dict, List, Sequence
+
 import numpy as np
 import pandas as pd
+from Bio import SeqIO
 import scipy.sparse as sp
+from typing import Dict, List, Sequence
 from sklearn.cluster import KMeans
 from sklearn.cluster._kmeans import (
     check_random_state,
@@ -15,9 +19,9 @@ from sklearn.cluster._kmeans import (
     row_norms,
     stable_cumsum,
 )
-import mimetypes
-import os
-from time import time
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import FunctionTransformer
+from sklearn.decomposition import KernelPCA
 
 
 def get_length(fastx_file):
@@ -244,14 +248,52 @@ def partial_seed_init(
 
     return centers
 
+def l2_normalize(X):
+    norms = np.linalg.norm(X, axis=1, keepdims=True)
+    return X / (norms + 1e-12)
 
-def apply_dimension_reduction(X: np.ndarray) -> np.ndarray:
+def apply_dimension_reduction(X: pd.DataFrame,
+        pca: bool = False,
+        umap: bool = False,
+        res_dim: int = 10
+    ) -> pd.DataFrame:
     """
     Apply dimension reduction to the input features.
     Placeholder for actual dimension reduction method (e.g., PCA, UMAP and SUDE).
+    Latents are recommended to be used later in HDBSCAN/DBSCAN branch.
     """
+    # Example: Apply PCA for dimension reduction
+    from sklearn.decomposition import PCA
+    from umap import UMAP
 
-    return X
+    X_cols = X.columns
+    X_ind = X.index
+    X = X.to_numpy(dtype=np.float32)
+
+    operations = [
+        # Step 1: Ensure all latent vectors are strictly on the hypersphere
+        ('l2_norm', FunctionTransformer(l2_normalize)),
+        
+        # Step 2: Use kernel PCA based on cosine similarity to reduce to 50 dimensions
+        # Compared to ordinary PCA, this perfectly preserves the angular structure on the hypersphere and filters out latent space noise
+        ('cosine_pca', KernelPCA(n_components=50, kernel='cosine', random_state=42)),
+    ]
+
+    pipeline = Pipeline(operations)
+    if pca:
+        X = pipeline.fit_transform(X)
+    elif umap:
+        operations.append(('umap', UMAP(
+            n_components=res_dim,          
+            n_neighbors=30,          # slightly larger than default 15
+            min_dist=0.0,            # strictly preserve local structure, use 0.0
+            metric='cosine',         # use cosine distance to preserve angular structure
+            random_state=42,
+            n_jobs=-1
+        )))
+        X = pipeline.fit_transform(X)
+
+    return pd.DataFrame(X, columns=[f"dim_{i}" for i in range(X.shape[1])], index=X_ind) # The output, can be used for both leiden and DBSCAN.
 
 
 def file_len(fname):

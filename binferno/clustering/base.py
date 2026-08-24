@@ -18,15 +18,6 @@ class ClusterResult:
 
 
 class BaseClustering(BaseModel):
-    contig_len: int = (
-        1000  # minimum contig length to consider for clustering, default 1000 bp.
-    )
-    dimension_reduction: bool = Field(
-        default=False,
-        description="Whether to perform dimension reduction before clustering."
-        "Used only if training.concat is set to True and the dimension of embeddings > 128.",
-    )
-
     def __call__(
         self,
         contigs: Path,
