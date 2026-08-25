@@ -6,7 +6,7 @@ import pandas as pd
 from .base import BaseClustering, ClusterResult
 from .leiden import LeidenClustering
 from .dbscan import DbscanClustering
-from .clustering_utils import apply_dimension_reduction
+from .cluster_utils import apply_dimension_reduction
 import loguru
 
 
@@ -62,7 +62,7 @@ class BinfernoClustering(BaseClustering):
                     logger=logger,
                     threads=threads,
                     plastid=self.plastid,
-                    longread=longread,
+                    longread=self.longread,
                 )
             case ClusterMethod.dbscan:
                 result = self.dbscan(
@@ -72,6 +72,6 @@ class BinfernoClustering(BaseClustering):
                     logger=logger,
                     threads=threads,
                     plastid=self.plastid,
-                    longread=longread,
+                    longread=self.longread,
                 )
         return result

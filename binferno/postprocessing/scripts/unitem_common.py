@@ -8,7 +8,7 @@ import os
 import ast
 from collections import defaultdict
 
-from .seqIO import seq_io as seq_io
+from Bio import SeqIO
 import biolib.seq_tk as seq_tk
 
 from checkm.defaultValues import DefaultValues
@@ -86,7 +86,13 @@ def read_bins(bin_dirs):
                 bin_id = bin_id[0:-1]
             bf_path = os.path.join(bin_dir, bf)
 
-            for seq_id, seq in seq_io.read_seq(bf_path):
+            records = list(SeqIO.parse(bf_path, "fasta"))
+            if len(records) == 0:
+                records = list(SeqIO.parse(bf_path, "fastq"))
+
+            for record in records:
+                seq_id = record.id
+                seq = str(record.seq)
                 bins[method_id][bin_id].add(seq_id)
                 contigs[seq_id] = seq
                 contigs_in_bins[seq_id][method_id] = bin_id

@@ -345,6 +345,7 @@ def density_sweep(
     if not use_hdbscan:
         graph = build_knn_graph(latent, metric=cfg.metric, n_jobs=n_jobs, cfg=cfg)
         eps_grid = derive_eps_grid(latent, cfg, n_jobs=n_jobs)
+        # or can we directly use latent to run DBSCAN?
         if logger:
             logger.info(
                 f"kNN graph: n={n}, k={choose_k(n, cfg)}, nnz={graph.nnz}; "

@@ -59,8 +59,12 @@ class DbscanClustering(BaseClustering):
     min_bin_bp: int = Field(
         default=100_000, description="Discard candidate bins smaller than this."
     )
-    marker_hmm: Optional[str] = Field(
-        default=None,
+    contig_len: int = Field(
+        default=1000,
+        description="Contigs shorter than this are ignored for clustering.",
+    )
+    marker_hmm: Optional[Path] = Field(
+        default=Path(__file__).parent.parent / "auxiliary" / "bacar_marker.hmm",
         description=(
             "Path to the .hmm file defining the marker vocabulary. Strongly "
             "recommended: without it, completeness is normalised by the "
@@ -68,7 +72,7 @@ class DbscanClustering(BaseClustering):
             "comparable between runs."
         ),
     )
-    archaeal_hmm: Optional[str] = Field(
+    archaeal_hmm: Optional[Path] = Field(
         default=None,
         description="Optional second marker set; completeness takes the best domain.",
     )
@@ -102,12 +106,12 @@ class DbscanClustering(BaseClustering):
             contig_file=contigs,
             output_dir=output_path,
             threads=threads,
-            contig_length_threshold=1001,
+            contig_length_threshold=self.contig_len + 1,
             marker_name=marker_name,
             quarter="2quarter",
         )
         base = os.path.basename(str(contigs))
-        seed_file = output_path / f"{base}.{marker_name}.2quarter_lencutoff_1001.seed"
+        seed_file = output_path / f"{base}.{marker_name}.2quarter_lencutoff_{self.contig_len + 1}.seed"
 
         result = ClusterResult(n_genome=n_genome, clusters={})
 

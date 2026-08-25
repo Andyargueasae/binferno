@@ -1,16 +1,17 @@
 import numpy as np
 import pandas as pd
 import pytest
+from scipy.sparse import csr_matrix
 
 from loguru import logger as test_logger
-from binferno.clustering.dbscan import (
-    completeness_contamination,
-    count_markers_saturated,
-    dbscan_marker_sweep,
+from binferno.clustering.dbscan_sweep import (
+    SweepConfig,
+    build_knn_graph,
+    density_sweep,
     derive_eps_grid,
-    parse_contig_to_markers,
-    score_count,
+    score_bins,
 )
+from binferno.clustering.marker_quality import MarkerTable, build_marker_table
 from binferno.training import BinfernoTrainer
 from binferno.training.simclr import SimCLRTrainer
 from binferno.training.barlowtwins import BarlowTwinsTrainer
@@ -110,50 +111,63 @@ def test_trainer_concat_false_normalizes(tmp_path, monkeypatch):
     assert np.allclose(norms, 1.0, atol=1e-5)
 
 
-def test_completeness_contamination_basic():
-    counts = np.array([1, 1, 2, 0], dtype=np.int32)
-    comp, cont = completeness_contamination(counts, n_scgs=4)
+def test_marker_table_resolves_fraggenescan_ids(tmp_path):
+    hmm = tmp_path / "marker.hmm"
+    hmm.write_text("NAME HMM1\nNAME HMM2\n//\n")
 
-    assert comp == pytest.approx(0.75)
-    assert cont == pytest.approx(0.25)
-
-
-def test_count_markers_saturated_counts_unique_and_duplicates():
-    contig_to_markers = {"c1": [0, 0, 1], "c2": [0, 2]}
-    counts = count_markers_saturated([0, 1], contig_to_markers, ["c1", "c2"], n_scgs=3)
-
-    assert counts is not None
-    assert counts.tolist() == [3, 1, 1]
-
-
-def test_score_count_rewards_only_good_bins():
-    namelist = ["c1", "c2", "c3", "c4"]
-    contig_to_markers = {
-        "c1": [0, 1, 2],
-        "c2": [0, 1, 2],
-        "c3": [0],
-        "c4": [0],
-    }
-
-    bins = [[0, 1], [2, 3]]
-    score = score_count(bins, contig_to_markers, namelist, n_scgs=3)
-
-    assert score == pytest.approx(1.0)
-
-
-def test_parse_contig_to_markers_handles_fraggenescan_ids(tmp_path):
     hmmout = tmp_path / "marker.hmmout"
     hmmout.write_text(
-        "contigA_1_10_+ 0 HMM1 15 100 0.0 0.0 0.0\n"
-        "contigA_2_20_+ 0 HMM2 15 100 0.0 0.0 0.0\n"
-        "contigB_3_30_- 0 HMM1 15 100 0.0 0.0 0.0\n"
+        "# a minimal domtblout-like file\n"
+        "contigA_1_10_+ 0 10 HMM1 0 20 0.0 15 0.0\n"
+        "contigA_2_20_+ 0 10 HMM2 0 20 0.0 12 0.0\n"
+        "contigB_3_30_- 0 10 HMM1 0 20 0.0 10 0.0\n"
     )
 
-    contig_to_markers, n_scgs = parse_contig_to_markers(str(hmmout))
+    table, info = build_marker_table(
+        str(hmmout),
+        ["contigA", "contigB"],
+        contig_lengths=[1000, 1000],
+        hmm_files={"bacteria": str(hmm)},
+        max_evalue=1e-5,
+    )
 
-    assert n_scgs == 2
-    assert contig_to_markers["contigA"] == [0, 1]
-    assert contig_to_markers["contigB"] == [0]
+    assert info["orf_id_style"] == "fraggenescan"
+    assert table.n_markers == 2
+    assert table.quality([0, 1]).n_unique == 2
+
+
+def test_score_bins_rewards_only_good_bins():
+    namelist = ["c1", "c2", "c3", "c4"]
+    counts = csr_matrix(
+        np.array(
+            [
+                [1, 1, 1],
+                [1, 1, 1],
+                [1, 0, 0],
+                [1, 0, 0],
+            ],
+            dtype=np.int32,
+        )
+    )
+    table = MarkerTable(
+        namelist=namelist,
+        counts=counts,
+        marker_names=["m1", "m2", "m3"],
+        marker_sets={"bacteria": np.array([0, 1, 2], dtype=np.int64)},
+        contig_lengths=np.ones(4, dtype=np.int64),
+    )
+    cfg = SweepConfig(
+        hq_completeness=0.90,
+        hq_contamination=0.05,
+        mq_completeness=0.50,
+        mq_contamination=0.10,
+    )
+
+    score, quals = score_bins([[0, 1], [2, 3]], table, cfg)
+
+    assert score[0] == 1.0
+    assert score[1] == 2.0
+    assert len(quals) == 2
 
 
 def test_derive_eps_grid_returns_sorted_positive_values():
@@ -161,18 +175,18 @@ def test_derive_eps_grid_returns_sorted_positive_values():
         [[0.0, 0.0], [0.1, 0.0], [0.2, 0.0], [10.0, 10.0]],
         dtype=np.float32,
     )
-    graph = __import__("sklearn.neighbors", fromlist=["kneighbors_graph"]).kneighbors_graph(
-        latent, n_neighbors=2, mode="distance", metric="euclidean", n_jobs=-1
-    )
+    cfg = SweepConfig(k=2, eps_k_values=(1, 2), eps_quantiles=(0.05, 0.50), metric="euclidean")
 
-    eps_grid = derive_eps_grid(graph, latent.shape[0])
+    graph = build_knn_graph(latent, k=2, metric="euclidean", n_jobs=1, cfg=cfg)
+    eps_grid = derive_eps_grid(latent, cfg, n_jobs=1)
 
+    assert graph.nnz > 0
     assert eps_grid
     assert eps_grid == sorted(eps_grid)
     assert all(e > 0 for e in eps_grid)
 
 
-def test_dbscan_marker_sweep_rescue_path_runs_with_noise():
+def test_density_sweep_rescue_path_runs_with_noise():
     latent = np.array(
         [
             [0.0, 0.0],
@@ -183,22 +197,36 @@ def test_dbscan_marker_sweep_rescue_path_runs_with_noise():
         ],
         dtype=np.float32,
     )
-    contig_to_markers = {f"c{i}": [0] for i in range(1, 6)}
-    contig_lengths = np.ones(len(latent), dtype=np.float32)
-
-    bins, score, eps_grid = dbscan_marker_sweep(
-        latent=latent,
-        contig_lengths=contig_lengths,
-        contig_to_markers=contig_to_markers,
+    counts = csr_matrix(np.ones((5, 1), dtype=np.int32))
+    table = MarkerTable(
         namelist=[f"c{i}" for i in range(1, 6)],
-        n_scgs=1,
+        counts=counts,
+        marker_names=["m1"],
+        marker_sets={"bacteria": np.array([0], dtype=np.int64)},
+        contig_lengths=np.ones(5, dtype=np.int64),
+    )
+    cfg = SweepConfig(
+        k=2,
+        eps_k_values=(1, 2),
+        eps_quantiles=(0.05, 0.50),
+        min_bin_bp=0,
+        min_bin_contigs=1,
+        core_bp=None,
         min_samples=1,
         metric="cosine",
-        scoring="count",
+    )
+
+    result = density_sweep(
+        latent=latent,
+        contig_lengths=np.ones(5, dtype=np.float64),
+        table=table,
+        cfg=cfg,
+        use_hdbscan=False,
         do_rescue=True,
+        n_jobs=1,
         logger=None,
     )
 
-    assert len(eps_grid) > 0
-    assert score >= 0.0
-    assert len(bins) >= 1
+    assert len(result.audit) > 0
+    assert result.score is not None
+    assert len(result.bins) >= 1
