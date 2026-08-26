@@ -50,7 +50,7 @@ class BinfernoClustering(BaseClustering):
                 embeddings,
                 pca=self.pca,
                 umap=self.umap,
-                default_dim=self.default_dim,
+                res_dim=self.default_dim,
             )
         
         match self.cluster_method:

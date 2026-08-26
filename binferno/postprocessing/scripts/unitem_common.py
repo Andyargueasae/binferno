@@ -6,13 +6,10 @@ from __future__ import print_function
 
 import os
 import ast
-from collections import defaultdict
+from collections import defaultdict, Counter
 
 from Bio import SeqIO
-import biolib.seq_tk as seq_tk
-
 from checkm.defaultValues import DefaultValues
-
 from .unitem_defaults import *
 
 
@@ -104,19 +101,16 @@ def read_bins(bin_dirs):
 
 
 def bin_gc(bin):
-    """Calculate GC-content of bin."""
-
-    a_count = 0
+    """Calculate GC-content of bin. bin is a dictionary."""
     c_count = 0
     g_count = 0
     t_count = 0
+    a_count = 0
     for seq in bin.values():
-        a, c, g, t = seq_tk.count_nt(seq)
-
-        a_count += a
-        c_count += c
-        g_count += g
-        t_count += t
-
+        counts = Counter(seq)
+        c_count += counts["C"] + counts["c"]
+        g_count += counts["G"] + counts["g"]
+        t_count += counts["T"] + counts["t"]
+        a_count += counts["A"] + counts["a"]
     total = a_count + c_count + g_count + t_count
     return (g_count + c_count) / total

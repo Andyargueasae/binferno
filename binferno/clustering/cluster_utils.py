@@ -5,7 +5,7 @@ import mimetypes
 import os
 from time import time
 import functools
-import logging
+import loguru
 
 import numpy as np
 import pandas as pd
@@ -107,7 +107,7 @@ def gen_seed_idx(seed_file: str, contig_id_list: Sequence[str]) -> List[int]:
 
 
 def seed_kmeans_full(
-    logger: logging.Logger,
+    logger: loguru._logger.Logger,
     contig_file: str,
     namelist: Sequence[str],
     out_path: str,
@@ -252,7 +252,8 @@ def l2_normalize(X):
     norms = np.linalg.norm(X, axis=1, keepdims=True)
     return X / (norms + 1e-12)
 
-def apply_dimension_reduction(X: pd.DataFrame,
+def apply_dimension_reduction(
+        X: pd.DataFrame,
         pca: bool = False,
         umap: bool = False,
         res_dim: int = 10
@@ -270,13 +271,17 @@ def apply_dimension_reduction(X: pd.DataFrame,
     X_ind = X.index
     X = X.to_numpy(dtype=np.float32)
 
+    PCA_dim_reducer = KernelPCA(n_components=res_dim, kernel='linear', random_state=42)
+    if X.shape[0] > 50000:
+        PCA_dim_reducer = PCA(n_components=res_dim, random_state=42, svd_solver='randomized')
+
     operations = [
         # Step 1: Ensure all latent vectors are strictly on the hypersphere
         ('l2_norm', FunctionTransformer(l2_normalize)),
         
         # Step 2: Use kernel PCA based on cosine similarity to reduce to 50 dimensions
         # Compared to ordinary PCA, this perfectly preserves the angular structure on the hypersphere and filters out latent space noise
-        ('cosine_pca', KernelPCA(n_components=50, kernel='cosine', random_state=42)),
+        ('cosine_pca', PCA_dim_reducer),
     ]
 
     pipeline = Pipeline(operations)
@@ -288,9 +293,10 @@ def apply_dimension_reduction(X: pd.DataFrame,
             n_neighbors=30,          # slightly larger than default 15
             min_dist=0.0,            # strictly preserve local structure, use 0.0
             metric='cosine',         # use cosine distance to preserve angular structure
-            random_state=42,
-            n_jobs=-1
+            random_state=42, # wait, random state overrides the n_jobs.
+            n_jobs=-1 # n_jobs=-1 to use all available cores for parallel processing
         )))
+        pipeline = Pipeline(operations)
         X = pipeline.fit_transform(X)
 
     return pd.DataFrame(X, columns=[f"dim_{i}" for i in range(X.shape[1])], index=X_ind) # The output, can be used for both leiden and DBSCAN.
