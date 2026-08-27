@@ -52,6 +52,9 @@ class BinfernoClustering(BaseClustering):
                 umap=self.umap,
                 res_dim=self.default_dim,
             )
+        else:
+            # normalize by all means.
+            embeddings = normalize(embeddings).astype(np.float32, copy=False) 
         
         match self.cluster_method:
             case ClusterMethod.leiden:

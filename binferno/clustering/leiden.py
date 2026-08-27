@@ -100,15 +100,9 @@ class LeidenClustering(BaseClustering):
         logger.info(f"N50:\t{calc_n50(contigs)}")
         logger.info(f"Contigs retained after length filter: {len(namelist)}")
 
-        norm_embeddings = normalize(emb_mat).astype(np.float32, copy=False) # only normalize once before clustering.
+        norm_embeddings = emb_mat
 
         # check if to apply dimension reduction.
-        if self.dimension_reduction:
-            norm_embeddings = apply_dimension_reduction(norm_embeddings,
-                pca=self.pca,
-                umap=self.umap,
-                default_dim=self.default_dim,
-            )
 
         # Two-phase clustering will incorporate shorter contigs below 2500 bp. We can first try with mutual KNN, and then decide what to do. 
         # seed_thresh = 2500  # or self.seed_len, a new param

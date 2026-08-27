@@ -26,6 +26,14 @@ class BinfernoTrainer(BaseTrainer):
         default=True,
         description="Whether to concatenate the embeddings from SimCLR and Barlow Twins. If False, the embeddings are added and normalized.",
     )
+    cnn: bool = Field(
+        default=False,
+        description="Whether to use CNN for encoder. If False, only MLP will be used for training.",
+    )
+    lstm: bool = Field(
+        default=False,
+        description="Whether to use LSTM for encoder. If False, only MLP will be used for training.",
+    )
 
     def __call__(
         self,
@@ -76,6 +84,8 @@ class BinfernoTrainer(BaseTrainer):
                 logger=logger,
                 threads=threads,
                 features=features,
+                cnn=self.cnn,
+                lstm=self.lstm,
             )
             # normalized output_emb before concatenations, use F.normalize from torch.
 

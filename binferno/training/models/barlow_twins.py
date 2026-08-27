@@ -384,13 +384,14 @@ class AttentionFusion(nn.Module):
         output = self.fused_proj(final_fused_features)
         return output
 
-
 def _build_coverage_encoder(coverage_dim: int, output_dim: int, dropout: float):
     """
     Adaptive coverage encoder that scales capacity with input information content.
 
     coverage_dim is always 2 * n_samples (mean + std per sample).
     n_samples drives capacity, not coverage_dim directly.
+
+    Coverage feature has sometimes very low dimensionality, only consider mlp but not cnn and lstm.
     """
     n_samples = max(1, coverage_dim // 2)
 
@@ -462,3 +463,83 @@ def _build_coverage_encoder(coverage_dim: int, output_dim: int, dropout: float):
             nn.BatchNorm1d(output_dim),
             nn.LeakyReLU(),
         )
+
+def build_tnf_encoder_cnn(tnf_dim: int, output_dim: int, dropout: float):
+    """Parameter-efficient CNN encoder for flat TNF vectors.
+
+    Input:  [B, tnf_dim]
+    Output: [B, output_dim]
+
+    TNF is treated as a 1-D ordered feature vector for this architectural
+    ablation. Global average pooling avoids a very large flatten/projection
+    layer and keeps capacity comparable to the MLP baseline.
+    """
+    return TNFCNNEncoder(tnf_dim=tnf_dim, output_dim=output_dim, dropout=dropout)
+
+
+class TNFCNNEncoder(nn.Module):
+    def __init__(self, tnf_dim: int, output_dim: int, dropout: float = 0.05):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Conv1d(1, 128, kernel_size=3, padding=1),
+            nn.BatchNorm1d(128),
+            nn.LeakyReLU(),
+            nn.Dropout(dropout),
+            nn.Conv1d(128, 192, kernel_size=3, padding=1),
+            nn.BatchNorm1d(192),
+            nn.LeakyReLU(),
+            nn.Dropout(dropout),
+            nn.Conv1d(192, 192, kernel_size=3, padding=1),
+            nn.BatchNorm1d(192),
+            nn.LeakyReLU(),
+            nn.AdaptiveAvgPool1d(1),
+        )
+        self.proj = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(192, output_dim),
+            nn.BatchNorm1d(output_dim),
+            nn.LeakyReLU(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 2:
+            raise ValueError(f"TNFCNNEncoder expects [B, D], got {tuple(x.shape)}")
+        x = x.unsqueeze(1)  # [B, 1, D]
+        return self.proj(self.encoder(x))
+
+
+def build_lstm_encoder(tnf_dim: int, output_dim: int, dropout: float):
+    """Parameter-efficient LSTM encoder for flat TNF vectors.
+
+    Input:  [B, tnf_dim]
+    Output: [B, output_dim]
+
+    Each TNF component is treated as one scalar time step. The final hidden
+    state is used instead of flattening all recurrent outputs, keeping the
+    model size comparable to the MLP baseline.
+    """
+    return TNFLSTMEncoder(tnf_dim=tnf_dim, output_dim=output_dim, dropout=dropout)
+
+
+class TNFLSTMEncoder(nn.Module):
+    def __init__(self, tnf_dim: int, output_dim: int, dropout: float = 0.05):
+        super().__init__()
+        self.lstm = nn.LSTM(
+            input_size=1,
+            hidden_size=128,
+            num_layers=2,
+            batch_first=True,
+            dropout=dropout,
+        )
+        self.proj = nn.Sequential(
+            nn.Linear(128, output_dim),
+            nn.BatchNorm1d(output_dim),
+            nn.LeakyReLU(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 2:
+            raise ValueError(f"TNFLSTMEncoder expects [B, D], got {tuple(x.shape)}")
+        x = x.unsqueeze(-1)  # [B, D, 1]
+        _, (h_n, _) = self.lstm(x)
+        return self.proj(h_n[-1])

@@ -25,15 +25,18 @@ Key differences from the first draft:
 from __future__ import annotations
 
 import math
+import os
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 import pandas as pd
 from scipy import sparse
 from sklearn.cluster import DBSCAN, Birch
 from sklearn.neighbors import kneighbors_graph
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+from rich.progress import track
 
 try:  # in-package
     from .marker_quality import BinQuality, MarkerTable
@@ -368,24 +371,51 @@ def density_sweep(
     else:
         HDB = _import_hdbscan()
         sizes = _hdbscan_grid(n, cfg, longread)
-        # latent is L2-normalised, so euclidean is a monotone function of
-        # cosine (d_euc^2 = 2 - 2*cos). The `hdbscan` package does not
-        # accept metric='cosine' at all -- it raises ValueError.
-        for mcs in sizes:
-            for ms in cfg.hdbscan_min_samples:
-                for sel in cfg.hdbscan_selection_methods:
-                    try:
-                        labels = HDB(
-                            min_cluster_size=int(mcs),
-                            min_samples=None if ms is None else int(ms),
-                            metric="euclidean",
-                            cluster_selection_method=sel,
-                        ).fit_predict(latent)
-                    except Exception as e:  # noqa: BLE001
-                        if logger:
-                            logger.warning(f"hdbscan({mcs},{ms},{sel}) failed: {e}")
-                        continue
-                    consider(("mcs", int(mcs), "ms", ms, "sel", sel), labels)
+
+        def run_hdbscan_single(mcs, ms, sel):
+            try:
+                labels = HDB(
+                    min_cluster_size=int(mcs),
+                    min_samples=None if ms is None else int(ms),
+                    metric="euclidean",
+                    cluster_selection_method=sel,
+                ).fit_predict(latent)
+                return ("mcs", int(mcs), "ms", ms, "sel", sel), labels
+            except Exception as e:
+                if logger:
+                    logger.warning(f"hdbscan({mcs},{ms},{sel}) failed: {e}")
+                return None
+
+        cpu_count = os.cpu_count() or 1
+        if n_jobs < 0:
+            max_workers = max(1, cpu_count + n_jobs)
+        else:
+            max_workers = n_jobs if n_jobs > 0 else cpu_count
+        
+        tasks = list(itertools.product(sizes, cfg.hdbscan_min_samples, cfg.hdbscan_selection_methods))
+
+        if max_workers > 1:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all parameter combinations to the thread pool
+                future_to_params = {
+                    executor.submit(run_hdbscan_single, mcs, ms, sel): (mcs, ms, sel)
+                    for mcs, ms, sel in tasks
+                }
+                
+                # Process results as soon as each thread finishes
+                for future in track(as_completed(future_to_params), total=len(tasks), description="Sweeping HDBSCAN parameters in parallel..."):
+                    result = future.result()
+                    if result is not None:
+                        params_tuple, labels = result
+                        consider(params_tuple, labels)
+        else:
+            # Fallback to synchronous execution if 1 CPU / worker is specified
+            for mcs, ms, sel in track(tasks, description="Sweeping HDBSCAN parameters sequentially..."):
+                result = run_hdbscan_single(mcs, ms, sel)
+                if result is not None:
+                    params_tuple, labels = result
+                    consider(params_tuple, labels)
+
         graph = None
 
     audit = pd.DataFrame(rows)
@@ -413,7 +443,6 @@ def density_sweep(
     best_bins.sort(key=lambda b: (-int(contig_lengths[b].sum()), b[0]))
     best_quals = table.quality_many(best_bins)
     return SweepResult(best_bins, best_params, best_score, audit, best_quals, unbinned)
-
 
 def _import_hdbscan():
     try:

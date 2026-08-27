@@ -23,6 +23,35 @@ def _bn_drop_lin(
         layers.append(actn)
     return layers
 
+def _bn_drop_cnn(
+    n_in: int,
+    n_out: int,
+    bn: bool = True,
+    p: float = 0.0,
+    actn: Optional[nn.Module] = None,
+):
+    layers = [nn.BatchNorm1d(n_in)] if bn else []
+    if p != 0:
+        layers.append(nn.Dropout(p))
+    layers.append(nn.Conv1d(n_in, n_out, kernel_size=3, padding=1))
+    if actn is not None:
+        layers.append(actn)
+    return layers
+
+def _bn_drop_lstm(
+    n_in: int,
+    n_out: int,
+    bn: bool = True,
+    p: float = 0.0,
+    actn: Optional[nn.Module] = None,
+):
+    layers = [nn.BatchNorm1d(n_in)] if bn else []
+    if p != 0:
+        layers.append(nn.Dropout(p))
+    layers.append(nn.LSTM(n_in, n_out, batch_first=True))
+    if actn is not None:
+        layers.append(actn)
+    return layers
 
 # Shared COMEBin MLP stack builder for EmbeddingNet/SimCLRNet.
 def _build_embedding_stack(
@@ -54,6 +83,86 @@ def _build_embedding_stack(
     layers.append(nn.Linear(emb_szs[-1], out_sz))
     return nn.Sequential(*layers)
 
+class CNNEmbeddingStack(nn.Module):
+    """CNN alternative with the same [B, D] -> [B, out_sz] contract as the MLP."""
+    def __init__(self, in_sz, out_sz, ps=0.0, actn=None):
+        super().__init__()
+        p = float(ps if isinstance(ps, (int, float)) else (ps[0] if len(ps) else 0.0))
+        # Capacity-matched to the COMEBin SimCLR MLP used with
+        # emb_szs=[2048, 2048, 2048] (~8.94M parameters for 136 -> 128).
+        # Global pooling prevents the parameter explosion that would occur
+        # if all 136 spatial positions were flattened before projection.
+        self.net = nn.Sequential(
+            nn.Conv1d(1, 1024, kernel_size=3, padding=1),
+            nn.BatchNorm1d(1024),
+            nn.ReLU() if actn is None else actn,
+            nn.Dropout(p),
+            nn.Conv1d(1024, 1280, kernel_size=3, padding=1),
+            nn.BatchNorm1d(1280),
+            nn.ReLU() if actn is None else actn,
+            nn.Dropout(p),
+            nn.Conv1d(1280, 1280, kernel_size=3, padding=1),
+            nn.BatchNorm1d(1280),
+            nn.ReLU() if actn is None else actn,
+            nn.AdaptiveAvgPool1d(1),
+        )
+        self.out = nn.Linear(1280, out_sz)
+
+    def forward(self, x):
+        if x.ndim != 2:
+            raise ValueError(f"CNNEmbeddingStack expects [B, D], got {tuple(x.shape)}")
+        x = self.net(x.unsqueeze(1)).squeeze(-1)
+        return self.out(x)
+
+
+class LSTMEmbeddingStack(nn.Module):
+    """LSTM alternative with the same [B, D] -> [B, out_sz] contract as the MLP."""
+    def __init__(self, in_sz, out_sz, ps=0.0):
+        super().__init__()
+        p = float(ps if isinstance(ps, (int, float)) else (ps[0] if len(ps) else 0.0))
+        # hidden_size=864 gives ~9.09M parameters for a 2-layer LSTM
+        # plus the final 864 -> out_sz projection, closely matching the
+        # ~8.94M-parameter 3x2048 SimCLR MLP baseline.
+        self.lstm = nn.LSTM(
+            input_size=1,
+            hidden_size=864,
+            num_layers=2,
+            batch_first=True,
+            dropout=p,
+        )
+        self.out = nn.Linear(864, out_sz)
+
+    def forward(self, x):
+        if x.ndim != 2:
+            raise ValueError(f"LSTMEmbeddingStack expects [B, D], got {tuple(x.shape)}")
+        _, (h_n, _) = self.lstm(x.unsqueeze(-1))
+        return self.out(h_n[-1])
+
+
+def build_embedding_stack_cnn(
+    in_sz,
+    out_sz,
+    emb_szs,
+    ps,
+    use_bn=True,
+    actn=nn.ReLU(),
+):
+    # emb_szs/use_bn are kept in the signature so this remains a drop-in
+    # builder alongside _build_embedding_stack.
+    return CNNEmbeddingStack(in_sz=in_sz, out_sz=out_sz, ps=ps, actn=actn)
+
+
+def build_embedding_stack_lstm(
+    in_sz,
+    out_sz,
+    emb_szs,
+    ps,
+    use_bn=True,
+    actn=nn.ReLU(),
+):
+    # LSTM is implemented as a dedicated module rather than nn.Sequential,
+    # because nn.LSTM returns (output, (h_n, c_n)).
+    return LSTMEmbeddingStack(in_sz=in_sz, out_sz=out_sz, ps=ps)
 
 # The raw COMEBin's embedding network is a simple MLP with batch normalization and dropout. We can use it as a baseline model for our experiments. We can also implement a more complex fusion network later to see if we can improve the performance.
 class EmbeddingNet(nn.Module):

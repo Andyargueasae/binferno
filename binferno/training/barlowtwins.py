@@ -74,6 +74,8 @@ class BarlowTwinsTrainer(BaseTrainer):
         features: BinfernoFeatureBuilder = None,
         threads: int = 4,
         logger: loguru._logger.Logger = None,
+        cnn: bool = False,
+        lstm: bool = False,
     ) -> pd.DataFrame:
         """
         Args:

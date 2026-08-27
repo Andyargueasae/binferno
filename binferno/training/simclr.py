@@ -94,6 +94,8 @@ class SimCLRTrainer(BaseTrainer):
         features: BinfernoFeatureBuilder = None,
         threads: int = 4,
         logger: loguru._logger.Logger = None,
+        cnn: bool = False, # all applied to model. 
+        lstm: bool = False,
     ) -> pd.DataFrame:
         """
         Args:
