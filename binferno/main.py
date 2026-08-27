@@ -8,6 +8,7 @@ from binferno.training import BinfernoTrainer
 from binferno.clustering import BinfernoClustering
 from binferno.postprocessing import BinfernoPostprocessor
 from binferno.features import BinfernoFeatureBuilder
+from binferno.reducer import BinfernoReducer
 
 
 def binferno(
@@ -67,6 +68,14 @@ def binferno(
         features=features,
         threads=threads,
         logger=logger,
+    )
+
+    
+    logger.info("Starting dimension reduction before clustering.")
+    embeddings = BinfernoReducer(
+        data=embeddings,
+        logger=logger,
+        threads=threads,
     )
 
     if train_only:

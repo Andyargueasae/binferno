@@ -18,6 +18,23 @@ class ClusterResult:
 
 
 class BaseClustering(BaseModel):
+    cluster_method: ClusterMethod = Field(
+        default=ClusterMethod.leiden,
+        description="The clustering method to use.",
+    )
+    leiden: LeidenClustering
+    dbscan: DbscanClustering
+
+    plastid: bool = Field(
+        default=False,
+        description="Whether to use plastid-specific seed generation and minimum bin size.",
+    )
+    dimension_reduction: bool = Field(False, description="Whether to apply dimension reduction to embeddings before clustering.")
+    pca: bool = Field(False, description="Whether to apply PCA for dimension reduction.")
+    umap: bool = Field(False, description="Whether to apply UMAP for dimension reduction.")
+    default_dim: int = Field(32, description="Default dimension for dimension reduction.")
+    longread: bool = Field(False, description="Whether the input data is from long-read sequencing. This will impact the downstream binning choices of parameters and thresholds.")
+
     def __call__(
         self,
         contigs: Path,
@@ -28,3 +45,7 @@ class BaseClustering(BaseModel):
         plastid: bool = False,
     ) -> ClusterResult:
         raise NotImplementedError("Subclasses must implement __call__ method.")
+
+    def l2_normalize(self, X: pd.DataFrame) -> pd.DataFrame:
+        norms = np.linalg.norm(X, axis=1, keepdims=True)
+        return X / (norms + 1e-12)

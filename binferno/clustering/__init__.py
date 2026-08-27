@@ -30,7 +30,7 @@ class BinfernoClustering(BaseClustering):
     dimension_reduction: bool = Field(False, description="Whether to apply dimension reduction to embeddings before clustering.")
     pca: bool = Field(False, description="Whether to apply PCA for dimension reduction.")
     umap: bool = Field(False, description="Whether to apply UMAP for dimension reduction.")
-    default_dim: int = Field(50, description="Default dimension for dimension reduction.")
+    default_dim: int = Field(32, description="Default dimension for dimension reduction.")
     longread: bool = Field(False, description="Whether the input data is from long-read sequencing. This will impact the downstream binning choices of parameters and thresholds.")
 
     class Config:
