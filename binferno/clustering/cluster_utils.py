@@ -248,58 +248,55 @@ def partial_seed_init(
 
     return centers
 
-def l2_normalize(X):
-    norms = np.linalg.norm(X, axis=1, keepdims=True)
-    return X / (norms + 1e-12)
 
-def apply_dimension_reduction(
-        X: pd.DataFrame,
-        pca: bool = False,
-        umap: bool = False,
-        res_dim: int = 10
-    ) -> pd.DataFrame:
-    """
-    Apply dimension reduction to the input features.
-    Placeholder for actual dimension reduction method (e.g., PCA, UMAP and SUDE).
-    Latents are recommended to be used later in HDBSCAN/DBSCAN branch.
-    """
-    # Example: Apply PCA for dimension reduction
-    from sklearn.decomposition import PCA
-    from umap import UMAP
+# def apply_dimension_reduction(
+#         X: pd.DataFrame,
+#         pca: bool = False,
+#         umap: bool = False,
+#         res_dim: int = 10
+#     ) -> pd.DataFrame:
+#     """
+#     Apply dimension reduction to the input features.
+#     Placeholder for actual dimension reduction method (e.g., PCA, UMAP and SUDE).
+#     Latents are recommended to be used later in HDBSCAN/DBSCAN branch.
+#     """
+#     # Example: Apply PCA for dimension reduction
+#     from sklearn.decomposition import PCA
+#     from umap import UMAP
 
-    X_cols = X.columns
-    X_ind = X.index
-    X = X.to_numpy(dtype=np.float32)
+#     X_cols = X.columns
+#     X_ind = X.index
+#     X = X.to_numpy(dtype=np.float32)
 
-    PCA_dim_reducer = KernelPCA(n_components=res_dim, kernel='linear', random_state=42)
-    if X.shape[0] > 50000:
-        PCA_dim_reducer = PCA(n_components=res_dim, random_state=42, svd_solver='randomized')
+#     PCA_dim_reducer = KernelPCA(n_components=res_dim, kernel='linear', random_state=42)
+#     if X.shape[0] > 50000:
+#         PCA_dim_reducer = PCA(n_components=res_dim, random_state=42, svd_solver='randomized')
 
-    operations = [
-        # Step 1: Ensure all latent vectors are strictly on the hypersphere
-        ('l2_norm', FunctionTransformer(l2_normalize)),
-        
-        # Step 2: Use kernel PCA based on cosine similarity to reduce to 50 dimensions
-        # Compared to ordinary PCA, this perfectly preserves the angular structure on the hypersphere and filters out latent space noise
-        ('cosine_pca', PCA_dim_reducer),
-    ]
+#     operations = [
+#         # Step 1: Ensure all latent vectors are strictly on the hypersphere
+#         ('l2_norm', FunctionTransformer(l2_normalize)),
 
-    pipeline = Pipeline(operations)
-    if pca:
-        X = pipeline.fit_transform(X)
-    elif umap:
-        operations.append(('umap', UMAP(
-            n_components=res_dim,          
-            n_neighbors=30,          # slightly larger than default 15
-            min_dist=0.0,            # strictly preserve local structure, use 0.0
-            metric='cosine',         # use cosine distance to preserve angular structure
-            random_state=42, # wait, random state overrides the n_jobs.
-            n_jobs=-1 # n_jobs=-1 to use all available cores for parallel processing
-        )))
-        pipeline = Pipeline(operations)
-        X = pipeline.fit_transform(X)
+#         # Step 2: Use kernel PCA based on cosine similarity to reduce to 50 dimensions
+#         # Compared to ordinary PCA, this perfectly preserves the angular structure on the hypersphere and filters out latent space noise
+#         ('cosine_pca', PCA_dim_reducer),
+#     ]
 
-    return pd.DataFrame(X, columns=[f"dim_{i}" for i in range(X.shape[1])], index=X_ind) # The output, can be used for both leiden and DBSCAN.
+#     pipeline = Pipeline(operations)
+#     if pca:
+#         X = pipeline.fit_transform(X)
+#     elif umap:
+#         operations.append(('umap', UMAP(
+#             n_components=res_dim,
+#             n_neighbors=30,          # slightly larger than default 15
+#             min_dist=0.0,            # strictly preserve local structure, use 0.0
+#             metric='cosine',         # use cosine distance to preserve angular structure
+#             random_state=42, # wait, random state overrides the n_jobs.
+#             n_jobs=-1 # n_jobs=-1 to use all available cores for parallel processing
+#         )))
+#         pipeline = Pipeline(operations)
+#         X = pipeline.fit_transform(X)
+
+#     return pd.DataFrame(X, columns=[f"dim_{i}" for i in range(X.shape[1])], index=X_ind) # The output, can be used for both leiden and DBSCAN.
 
 
 def file_len(fname):

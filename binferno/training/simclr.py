@@ -24,9 +24,13 @@ from .models.COMEBin_models import SimCLRNet, EmbeddingNet
 from .models.simclr import NeuralNetwork
 from .InfoNCEloss import info_nce_loss, InfoNCEHardNegative
 from .base import (
-    BaseTrainer, 
-    label_augmented_views, build_mask,
-    TAXONOMY_DF, TAX_NODES, TAX_NODE_INDICES, PARENTAL_ARRAY
+    BaseTrainer,
+    label_augmented_views,
+    build_mask,
+    TAXONOMY_DF,
+    TAX_NODES,
+    TAX_NODE_INDICES,
+    PARENTAL_ARRAY,
 )
 
 KMER_DIM = 136
@@ -94,7 +98,7 @@ class SimCLRTrainer(BaseTrainer):
         features: BinfernoFeatureBuilder = None,
         threads: int = 4,
         logger: loguru._logger.Logger = None,
-        cnn: bool = False, # all applied to model. 
+        cnn: bool = False,  # all applied to model.
         lstm: bool = False,
     ) -> pd.DataFrame:
         """
@@ -108,9 +112,9 @@ class SimCLRTrainer(BaseTrainer):
         else:
             N_50 = calc_n50(contigs)
             logger.info(f"N50 of the input contigs: {N_50}")
-            temperature = 0.12 # 0.15
+            temperature = 0.12  # 0.15
             if N_50 > 10000:
-                temperature = 0.10 # 0.07
+                temperature = 0.10  # 0.07
 
         # the first step is to generate the augmented views and then turn views into vectors.
         output_aug_dir = output_dir / "augmentation"
@@ -146,7 +150,7 @@ class SimCLRTrainer(BaseTrainer):
 
         feature_data, kmer_dim = feature_result
         feature_df, tax_df = feature_data
-        
+
         # after getting the features, sort the features by method to ensure integrity before training.
         feature_df = self.sort_features_by_method(
             feature_df,
@@ -313,9 +317,7 @@ class SimCLRTrainer(BaseTrainer):
         else:
             # for simclr, group by view, stack the features of same view together, then concatenate the features.
             index_ = features_df.index.tolist()
-            features_df["view"] = (
-                [ind.rsplit(".", 1)[-1] for ind in index_]
-            )
+            features_df["view"] = [ind.rsplit(".", 1)[-1] for ind in index_]
             # replace "original" as "0".
             # features_df["view"] = features_df["view"].replace("original", "0")
             features_df["view"] = features_df["view"].astype(int)
@@ -355,13 +357,15 @@ class SimCLRTrainer(BaseTrainer):
         **kwargs,
     ):
         # determine the namelist for the dataset.
-        orig_df = data_df[data_df.index.str.rsplit(".", n=1).str[-1] == "0"] # strictly matching once and only the original view as view 0.
+        orig_df = data_df[
+            data_df.index.str.rsplit(".", n=1).str[-1] == "0"
+        ]  # strictly matching once and only the original view as view 0.
         namelist = [index.rsplit(".", 1)[0] for index in orig_df.index]
         # slice the data_df by the length of namelist, make sure to assert length for sliced data to be same.
         dataset = list(
             torch.split(torch.from_numpy(data_df.values).float(), len(namelist))
         )
-        
+
         epochs = kwargs.get("epochs", 300)
         assert (
             len(dataset) == n_views
@@ -483,7 +487,9 @@ class SimCLRTrainer(BaseTrainer):
 
         try:
             seq_obj = pyfastx.Fastx(str(contig_path))
-        except Exception as exc:  # pragma: no cover - defensive guard for invalid FASTA paths
+        except (
+            Exception
+        ) as exc:  # pragma: no cover - defensive guard for invalid FASTA paths
             raise ValueError(
                 "Length weight is empty. Please check the contigs input and the length_weight function."
             ) from exc
@@ -698,21 +704,27 @@ class SimCLRTrainer(BaseTrainer):
                 # identify whether contig_features is a list of tensors.
                 if len(contig_features) > n_views:
                     # first n_views are canonical features, the rest until the end are taxonomic features.
-                    comp_cov = contig_features[:n_views] 
+                    comp_cov = contig_features[:n_views]
                     tax_emb = contig_features[n_views:]
-                    contig_features = torch.cat(comp_cov, dim=0).to(device, non_blocking=True)
-                    tax_features = torch.cat(tax_emb, dim=0).to(device, non_blocking=True)
+                    contig_features = torch.cat(comp_cov, dim=0).to(
+                        device, non_blocking=True
+                    )
+                    tax_features = torch.cat(tax_emb, dim=0).to(
+                        device, non_blocking=True
+                    )
                     # concatenation of composition features and taxonomic features for the model input.
-                    x_comp = torch.cat([contig_features[:, :kmer_dim], tax_features], dim=1) # composition features + taxonomic features
-                    x_cov = contig_features[:, kmer_dim:] # coverage features
-                
+                    x_comp = torch.cat(
+                        [contig_features[:, :kmer_dim], tax_features], dim=1
+                    )  # composition features + taxonomic features
+                    x_cov = contig_features[:, kmer_dim:]  # coverage features
+
                 else:
                     contig_features = torch.cat(contig_features, dim=0).to(
                         device, non_blocking=True
                     )
-                    x_comp = contig_features[:, :kmer_dim] # composition features
-                    x_cov = contig_features[:, kmer_dim:] # coverage features
-                
+                    x_comp = contig_features[:, :kmer_dim]  # composition features
+                    x_cov = contig_features[:, kmer_dim:]  # coverage features
+
                 optimizer.zero_grad(set_to_none=True)
 
                 with torch.amp.autocast(
@@ -816,7 +828,9 @@ class SimCLRTrainer(BaseTrainer):
             else:
                 earlystop_epoch = 0
             if earlystop_epoch >= 5:
-                logger.info(f"Early stopping at epoch {epoch_counter + 1} (acc {avg_acc1:.2f}%).")
+                logger.info(
+                    f"Early stopping at epoch {epoch_counter + 1} (acc {avg_acc1:.2f}%)."
+                )
                 break
 
         if best_state is not None:
@@ -870,8 +884,8 @@ class SimCLRTrainer(BaseTrainer):
             covout = np.concatenate(
                 [
                     model(
-                        data[0][i : i + bs_, :kmer_len].to(device), # kmer features
-                        data[0][i : i + bs_, kmer_len:].to(device), # coverage features
+                        data[0][i : i + bs_, :kmer_len].to(device),  # kmer features
+                        data[0][i : i + bs_, kmer_len:].to(device),  # coverage features
                     )[1]
                     .to("cpu")
                     .numpy()
@@ -1071,7 +1085,11 @@ class EarlyStoppingManagerSimCLR:
             stats["cov_out"] = cov_out
             for name, t in stats.items():
                 finite = torch.isfinite(t).all().item()
-                amax = t.abs()[torch.isfinite(t)].max().item() if t.numel() else float("nan")
+                amax = (
+                    t.abs()[torch.isfinite(t)].max().item()
+                    if t.numel()
+                    else float("nan")
+                )
                 logger.warning(
                     f"  [nan-probe] {name}: all_finite={finite}, max|x| (finite)={amax:.4e}, "
                     f"dtype={t.dtype}"

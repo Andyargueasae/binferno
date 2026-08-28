@@ -40,6 +40,7 @@ def binferno(
     training: BinfernoTrainer,
     clustering: BinfernoClustering,
     postprocessor: BinfernoPostprocessor,
+    reducer: BinfernoReducer,
     threads: Annotated[
         int,
         tyro.conf.arg(
@@ -70,9 +71,8 @@ def binferno(
         logger=logger,
     )
 
-    
     logger.info("Starting dimension reduction before clustering.")
-    embeddings = BinfernoReducer(
+    embeddings = reducer(
         data=embeddings,
         logger=logger,
         threads=threads,

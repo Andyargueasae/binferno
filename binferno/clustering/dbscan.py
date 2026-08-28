@@ -111,7 +111,10 @@ class DbscanClustering(BaseClustering):
             quarter="2quarter",
         )
         base = os.path.basename(str(contigs))
-        seed_file = output_path / f"{base}.{marker_name}.2quarter_lencutoff_{self.contig_len + 1}.seed"
+        seed_file = (
+            output_path
+            / f"{base}.{marker_name}.2quarter_lencutoff_{self.contig_len + 1}.seed"
+        )
 
         result = ClusterResult(n_genome=n_genome, clusters={})
 

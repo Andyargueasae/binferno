@@ -17,6 +17,7 @@ from .coverage_utils import (
     CoverageDict,
 )
 
+
 def _calculate_fragment_stats_vectorized(coverage_array, fragment_coords):
     n_fragments = len(fragment_coords)
     means = np.zeros(n_fragments, dtype=np.float64)
@@ -493,7 +494,7 @@ def calculate_bam_cov(
             coverage_std=coverage_std,
             all_fragment_headers=all_fragment_headers,
             total_mapped=total_mapped,
-            rpkm_normalize=rpkm_normalize
+            rpkm_normalize=rpkm_normalize,
         )
 
         sample_name = sample_names_map[bam_file]
@@ -600,6 +601,6 @@ class CoverageFeatureBuilder(BaseFeatureBuilder):
                 rpkm_normalize=False,
                 mode="comebin",
             )
-            # by default we apply a max normalization after stacking all views. 
+            # by default we apply a max normalization after stacking all views.
             cov_df = max_normalize_stacked_coverage(cov_df)
         return cov_df

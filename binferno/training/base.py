@@ -16,7 +16,8 @@ from ..features import BinfernoFeatureBuilder
 TAX_NODES = "tax_node"
 TAX_NODE_INDICES = "tax_node_index"
 PARENTAL_ARRAY = "parental_array"
-TAXONOMY_DF="contig_taxonomy_df"
+TAXONOMY_DF = "contig_taxonomy_df"
+
 
 class BaseTrainer(BaseModel):
 
@@ -242,7 +243,7 @@ class BaseTrainer(BaseModel):
             # for each view, make sure to sort the features by index.
             features_df = sorted_features_df.drop(columns=["view"])
             return features_df
-        
+
     class taxonomy_hloss(nn.Module):
         def __init__(self, lambda_tax=1.0):
             super().__init__()
@@ -255,23 +256,33 @@ class BaseTrainer(BaseModel):
             device = tax_logits.device
 
             # Create a mask for pairs of samples that come from the same base contig
-            mask = torch.eq(base_ids.unsqueeze(1), base_ids.unsqueeze(0)).float().to(device)
+            mask = (
+                torch.eq(base_ids.unsqueeze(1), base_ids.unsqueeze(0))
+                .float()
+                .to(device)
+            )
 
             # Compute pairwise distances between taxonomic logits
-            diff = tax_logits.unsqueeze(1) - tax_logits.unsqueeze(0)  # (batch_size, batch_size, num_taxa)
-            dist_squared = (diff ** 2).sum(dim=-1)  # (batch_size, batch_size)
+            diff = tax_logits.unsqueeze(1) - tax_logits.unsqueeze(
+                0
+            )  # (batch_size, batch_size, num_taxa)
+            dist_squared = (diff**2).sum(dim=-1)  # (batch_size, batch_size)
 
             # We want to minimize distances for pairs from the same contig and maximize for different contigs
-            loss_same = (mask * dist_squared).sum() / (mask.sum() + 1e-8)  # Avoid division by zero
-            loss_diff = ((1 - mask) * F.relu(1.0 - dist_squared.sqrt())).sum() / ((1 - mask).sum() + 1e-8)
+            loss_same = (mask * dist_squared).sum() / (
+                mask.sum() + 1e-8
+            )  # Avoid division by zero
+            loss_diff = ((1 - mask) * F.relu(1.0 - dist_squared.sqrt())).sum() / (
+                (1 - mask).sum() + 1e-8
+            )
 
             loss = self.lambda_tax * (loss_same + loss_diff)
             return loss
-        
+
+
 def label_augmented_views(
-    taxonomy_df: pd.DataFrame, 
-    augmented_indices: list,
-    node_indices: dict = None) -> pd.DataFrame:
+    taxonomy_df: pd.DataFrame, augmented_indices: list, node_indices: dict = None
+) -> pd.DataFrame:
     """
     This function is to label the augmented views with the same taxonomy label as the original contig.
     """
@@ -281,33 +292,45 @@ def label_augmented_views(
     tax_df = taxonomy_df[numeric_cols]
     contig_to_taxonomy = dict(zip(tax_df.index, tax_df.values))
     # create a new dataframe to store the taxonomy labels for the augmented views.
-    augmented_taxonomy_df = pd.DataFrame(index=augmented_indices, columns=tax_df.columns)
+    augmented_taxonomy_df = pd.DataFrame(
+        index=augmented_indices, columns=tax_df.columns
+    )
     for index in augmented_indices:
         contig_name = index.rsplit(".", 1)[0]
         if contig_name in contig_to_taxonomy:
             augmented_taxonomy_df.loc[index] = contig_to_taxonomy[contig_name]
         else:
-            augmented_taxonomy_df.loc[index] = np.full(len(numeric_cols), node_indices.get("unclassified", -1))  # assign -1 for unknown contigs
-    return augmented_taxonomy_df.astype(int) # ensure the index order matches the order of the features dataframe after sorting by method.
+            augmented_taxonomy_df.loc[index] = np.full(
+                len(numeric_cols), node_indices.get("unclassified", -1)
+            )  # assign -1 for unknown contigs
+    return augmented_taxonomy_df.astype(
+        int
+    )  # ensure the index order matches the order of the features dataframe after sorting by method.
 
-# # TODO: next step: refactor this function, without any vamb-style coding. Intuitive. 
-def build_mask( 
-    contig_names: List[str], 
-    contig_taxonomy: Dict[str, int], 
-    node_indices: Dict) -> Tuple[torch.Tensor, torch.Tensor]:
+
+# # TODO: next step: refactor this function, without any vamb-style coding. Intuitive.
+def build_mask(
+    contig_names: List[str], contig_taxonomy: Dict[str, int], node_indices: Dict
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     contig_names    : list[str], in the SAME order as your feature matrix rows
     contig_taxonomy : dict name -> ContigTaxonomy (or missing/None if unlabeled)
     node_indices    : dict taxon_name -> node index   (from make_graph's ind_nodes)
     """
     n = len(contig_names)
-    mask = np.zeros(n, dtype=bool) # default False
-    for i, name in enumerate(contig_names): # i index is with same order of contig_names.
-        name = name.rsplit(".", 1)[0] # remove any suffices.
+    mask = np.zeros(n, dtype=bool)  # default False
+    for i, name in enumerate(
+        contig_names
+    ):  # i index is with same order of contig_names.
+        name = name.rsplit(".", 1)[0]  # remove any suffices.
         tax = contig_taxonomy.get(name, None)
         if tax is None:
-            raise ValueError(f"Warning: Contig {name} not found in taxonomy. Assigning root index and mask False.")
-        if tax == node_indices.get("root", -1): # back in feature module, all unclassified contigs are assigned to root.
+            raise ValueError(
+                f"Warning: Contig {name} not found in taxonomy. Assigning root index and mask False."
+            )
+        if tax == node_indices.get(
+            "root", -1
+        ):  # back in feature module, all unclassified contigs are assigned to root.
             continue
         mask[i] = True
 

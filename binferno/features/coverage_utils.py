@@ -7,6 +7,7 @@ from typing import Dict, List, Set, Tuple, Union
 FragmentDict = Dict[str, Dict[str, Union[str, List[str]]]]
 CoverageDict = Dict[str, float]
 
+
 def _normalise_coverage_dicts(
     coverage: dict,
     coverage_std: dict,
@@ -37,6 +38,7 @@ def _normalise_coverage_dicts(
             {k: v / factor for k, v in coverage.items()},
             {k: v / factor for k, v in coverage_std.items()},
         )
+
 
 def _map_fasta_to_bam_refs(
     fragments_dict: FragmentDict,

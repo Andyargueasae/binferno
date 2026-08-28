@@ -21,7 +21,7 @@ def read_embeddings(
     embeddings_path = Path(embeddings_path)
     index_path = embeddings_index or embeddings_path.with_suffix(".index")
     index_path = Path(index_path)
-    assert index_path.exists(), f"Index file '{index_path}' does not exist." 
+    assert index_path.exists(), f"Index file '{index_path}' does not exist."
     # hit an error here. May need to think of contacting Rob.
     index_with_tabs = Path(index_path).read_text().strip().splitlines()
     embeddings = read_memmap(embeddings_path, len(index_with_tabs))

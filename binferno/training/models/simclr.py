@@ -65,7 +65,7 @@ class NeuralNetwork(nn.Module):
             nn.BatchNorm1d(tnf_hidden3),
             nn.LeakyReLU(),
         )
-        
+
         self.fusion_network = fusion_network(
             emb_dim=output_dim,
             # gated=gated,
@@ -237,6 +237,7 @@ def _build_coverage_encoder(
             nn.BatchNorm1d(output_dim),
             nn.LeakyReLU(),
         )
+
 
 # Then our model got an attention-based fusion network.
 class AttentionFusion(nn.Module):

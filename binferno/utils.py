@@ -10,6 +10,7 @@ import pyfastx
 import pyhmmer
 import pyrodigal
 
+
 def run_hmmsearch_pyhmmer(
     hmm_path: Path,
     faa_path: Path,

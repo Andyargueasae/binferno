@@ -17,6 +17,7 @@ from .coverage_utils import (
     CoverageDict,
 )
 
+
 def _calculate_fragment_stats_vectorized(
     coverage_array,
     fragment_coords,
@@ -497,7 +498,7 @@ def calculate_bam_cov(
             disable_progress=disable_inner_progress,
             return_variance=(mode == "comebin"),
         )
-    
+
         # mode == "comebin"
         coverage, coverage_dispersion = _normalise_coverage_dicts(
             coverage=coverage,
@@ -541,6 +542,7 @@ def calculate_bam_cov(
     )
 
     return coverage_features
+
 
 def _normalise_coverage_dicts(
     coverage: dict,

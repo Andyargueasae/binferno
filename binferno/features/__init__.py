@@ -197,7 +197,9 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
                     else None
                 )
 
-            canonical_features = pd.concat([canonical_features, coverage_df], axis=1) # [composition, coverage] 
+            canonical_features = pd.concat(
+                [canonical_features, coverage_df], axis=1
+            )  # [composition, coverage]
 
         if taxonomy_features is not None:
             with open(output_dir / "taxonomy_features.pkl", "wb") as f:

@@ -21,10 +21,17 @@ import loguru
 
 from .models.barlow_twins import NeuralNetwork
 from ..features import BinfernoFeatureBuilder
-from .base import BaseTrainer, TAX_NODES, TAX_NODE_INDICES, PARENTAL_ARRAY, TAXONOMY_DF, label_augmented_views
+from .base import (
+    BaseTrainer,
+    TAX_NODES,
+    TAX_NODE_INDICES,
+    PARENTAL_ARRAY,
+    TAXONOMY_DF,
+    label_augmented_views,
+)
 
 
-# TODO: implement the length-aware Barlow Twins loss calculations. 
+# TODO: implement the length-aware Barlow Twins loss calculations.
 class BarlowTwinsTrainer(BaseTrainer):
 
     learning_rate: float = Field(
@@ -38,7 +45,7 @@ class BarlowTwinsTrainer(BaseTrainer):
     )
     contig_length: int = Field(
         default=1000, description="Minimum contig length to be included in training."
-    ) # additional length-weighted loss: filter out noises in clustering. 
+    )  # additional length-weighted loss: filter out noises in clustering.
     view_num: int = Field(
         default=8, description="Number of augmented views to generate for each contig."
     )
@@ -122,7 +129,7 @@ class BarlowTwinsTrainer(BaseTrainer):
                 kmer_dim = features._get_kmer_dim()
             else:
                 kmer_dim = 0
-        
+
         feature_df, taxonomy_df = feature_df
 
         feature_df = self.sort_features_by_method(
@@ -249,11 +256,12 @@ class BarlowTwinsTrainer(BaseTrainer):
             # )
             self._cache = {}
 
-        def forward(self, 
-            feature1, 
+        def forward(
+            self,
+            feature1,
             feature2,
-            # w: Optional[torch.Tensor] = None, 
-            return_stats=False
+            # w: Optional[torch.Tensor] = None,
+            return_stats=False,
         ):
             N, D = feature1.size()
             device = feature1.device
@@ -312,11 +320,12 @@ class BarlowTwinsTrainer(BaseTrainer):
             return loss
 
     class BuildDataset:
-        def __init__(self,
-            data_df: pd.DataFrame, 
+        def __init__(
+            self,
+            data_df: pd.DataFrame,
             max_positive_pairs=700000,
-            taxonomy_features: Optional[pd.DataFrame|Dict|None] = None,
-            namelist: Optional[list[str]] = None
+            taxonomy_features: Optional[pd.DataFrame | Dict | None] = None,
+            namelist: Optional[list[str]] = None,
         ):
             self.data_df = data_df
             self.max_positive_pairs = max_positive_pairs
@@ -397,6 +406,7 @@ class BarlowTwinsTrainer(BaseTrainer):
                 return list(candidate_pairs)
 
             return random.sample(candidate_pairs, max_cap)
+
         def pair_frgs_to_contigs(self) -> dict:
             """
             Kept for compatibility with the original interface.
@@ -413,7 +423,8 @@ class BarlowTwinsTrainer(BaseTrainer):
                 tax_X = self.taxonomy_features.to_numpy(dtype=np.float32, copy=False)
             elif isinstance(self.taxonomy_features, dict):
                 self.h_tax = True
-                tax_X = label_augmented_views(self.taxonomy_features[TAXONOMY_DF], 
+                tax_X = label_augmented_views(
+                    self.taxonomy_features[TAXONOMY_DF],
                     self.data_df.index.tolist(),
                     node_indices=self.taxonomy_features[TAX_NODE_INDICES],
                 )
@@ -423,8 +434,12 @@ class BarlowTwinsTrainer(BaseTrainer):
             else:
                 tax_X = None
 
-            assert not np.isnan(X).any(), "data_df contains NaN values before TensorDataset construction."
-            assert not np.isinf(X).any(), "data_df contains Inf values before TensorDataset construction."
+            assert not np.isnan(
+                X
+            ).any(), "data_df contains NaN values before TensorDataset construction."
+            assert not np.isinf(
+                X
+            ).any(), "data_df contains Inf values before TensorDataset construction."
 
             pair_indices = np.asarray(self.training_pairs, dtype=np.int64)
             idx1 = pair_indices[:, 0]
@@ -443,16 +458,29 @@ class BarlowTwinsTrainer(BaseTrainer):
                 tax_features1 = torch.from_numpy(tax_X[idx1].copy())
                 tax_features2 = torch.from_numpy(tax_X[idx2].copy())
                 if not self.h_tax:
-                    return TensorDataset(features1, features2, tax_features1, tax_features2, base_ids)
+                    return TensorDataset(
+                        features1, features2, tax_features1, tax_features2, base_ids
+                    )
                 else:
-                    # turn idx1 to base name, and then reindex base names to get mask. 
+                    # turn idx1 to base name, and then reindex base names to get mask.
                     mask = torch.zeros(len(idx1), dtype=torch.bool)
-                    for i, idx in enumerate(idx1): # idx1 is the index 
+                    for i, idx in enumerate(idx1):  # idx1 is the index
                         base_name = self._extract_base_name(self.data_df.index[idx])
-                        tax = taxonomy_df.loc[base_name]["tax_node_idx"] if base_name in taxonomy_df.index else node_indices.get("root", -1)
+                        tax = (
+                            taxonomy_df.loc[base_name]["tax_node_idx"]
+                            if base_name in taxonomy_df.index
+                            else node_indices.get("root", -1)
+                        )
                         if tax != node_indices.get("root", -1):
                             mask[i] = True
-                    return TensorDataset(features1, features2, tax_features1, tax_features2, mask, base_ids)
+                    return TensorDataset(
+                        features1,
+                        features2,
+                        tax_features1,
+                        tax_features2,
+                        mask,
+                        base_ids,
+                    )
             else:
                 return TensorDataset(features1, features2, base_ids)
 
@@ -578,20 +606,22 @@ class BarlowTwinsTrainer(BaseTrainer):
 
     def train_an_epoch(
         self,
-        model: nn.Module, 
-        dataloader: torch.utils.data.DataLoader, 
-        optimizer: torch.optim.Optimizer, 
-        device: torch.device, 
+        model: nn.Module,
+        dataloader: torch.utils.data.DataLoader,
+        optimizer: torch.optim.Optimizer,
+        device: torch.device,
     ):
         criterion = self.BT_loss(lambda_bt=5e-3, alpha=1.0).to(device)
         model.train()
-        
+
         sum_loss = 0.0
         stats = None
         is_htax = model.hierarchical_taxonomy
         num_batches = len(dataloader)
 
-        for batch_i, batch_data in enumerate(dataloader): # here it determines taxonomy data to be yes or no.
+        for batch_i, batch_data in enumerate(
+            dataloader
+        ):  # here it determines taxonomy data to be yes or no.
             last_batch = batch_i == num_batches - 1
 
             if len(batch_data) == 3:
@@ -657,7 +687,17 @@ class BarlowTwinsTrainer(BaseTrainer):
         avg_loss = sum_loss / len(dataloader)
         return avg_loss, stats
 
-    def calculate_loss(self, criterion, model, features1, features2, tax_1=None, tax_2=None, mask=None, last_batch=False):
+    def calculate_loss(
+        self,
+        criterion,
+        model,
+        features1,
+        features2,
+        tax_1=None,
+        tax_2=None,
+        mask=None,
+        last_batch=False,
+    ):
         is_htax = model.hierarchical_taxonomy
 
         if tax_1 is not None or tax_2 is not None:
@@ -666,8 +706,12 @@ class BarlowTwinsTrainer(BaseTrainer):
                     features1, features2, tax_1, tax_2
                 )
                 if last_batch:
-                    loss, stats = criterion(feature1=output1, feature2=output2, return_stats=True)
-                    tax_vec_loss, tax_stats = criterion(feature1=tax_enc1, feature2=tax_enc2, return_stats=True)
+                    loss, stats = criterion(
+                        feature1=output1, feature2=output2, return_stats=True
+                    )
+                    tax_vec_loss, tax_stats = criterion(
+                        feature1=tax_enc1, feature2=tax_enc2, return_stats=True
+                    )
                     loss = loss + tax_vec_loss
 
                     # merge stats from both losses
@@ -684,11 +728,17 @@ class BarlowTwinsTrainer(BaseTrainer):
                     features1, features2, tax_emb1=tax_1, tax_emb2=tax_2
                 )
                 logit1, logit2 = tax_feature1["logits"], tax_feature2["logits"]
-                tax_hloss1 = model.taxonomy_encoder.loss(logit1, tax_1, mask, weights=None)
-                tax_hloss2 = model.taxonomy_encoder.loss(logit2, tax_2, mask, weights=None)
+                tax_hloss1 = model.taxonomy_encoder.loss(
+                    logit1, tax_1, mask, weights=None
+                )
+                tax_hloss2 = model.taxonomy_encoder.loss(
+                    logit2, tax_2, mask, weights=None
+                )
                 tax_hloss = (tax_hloss1 + tax_hloss2) / 2
                 if last_batch:
-                    loss, stats = criterion(feature1=output1, feature2=output2, return_stats=True)
+                    loss, stats = criterion(
+                        feature1=output1, feature2=output2, return_stats=True
+                    )
                     total_loss = loss + tax_hloss
                     return total_loss, stats
                 else:
@@ -696,11 +746,11 @@ class BarlowTwinsTrainer(BaseTrainer):
                     total_loss = loss + tax_hloss
                     return total_loss, None
         else:
-            output1, output2 = model(
-                features1, features2
-            )
+            output1, output2 = model(features1, features2)
             if last_batch:
-                loss, stats = criterion(feature1=output1, feature2=output2, return_stats=True)
+                loss, stats = criterion(
+                    feature1=output1, feature2=output2, return_stats=True
+                )
                 return loss, stats
             else:
                 loss = criterion(feature1=output1, feature2=output2)

@@ -27,6 +27,7 @@ from __future__ import annotations
 import math
 import os
 from collections import defaultdict
+import itertools
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -65,11 +66,11 @@ class SweepConfig:
     hq_contamination: float = 0.05
     mq_completeness: float = 0.50
     mq_contamination: float = 0.10
-    lam: float = 1.0          # contamination weight in the tie-break term
+    lam: float = 1.0  # contamination weight in the tie-break term
     smooth_min_completeness: float = 0.30
 
     # graph
-    k: Optional[int] = None            # None -> scaled from N
+    k: Optional[int] = None  # None -> scaled from N
     k_min: int = 15
     k_max: int = 150
     max_graph_entries: int = 30_000_000  # memory guard: N*k
@@ -81,16 +82,16 @@ class SweepConfig:
     max_eps_values: int = 48
 
     # core-point criterion
-    core_bp: Optional[int] = 100_000   # bp within eps for a core point;
-                                       # None -> classic contig-count semantics
-    min_samples: int = 5               # used only when core_bp is None
+    core_bp: Optional[int] = 100_000  # bp within eps for a core point;
+    # None -> classic contig-count semantics
+    min_samples: int = 5  # used only when core_bp is None
 
     # output filtering
     min_bin_bp: int = 100_000
     min_bin_contigs: int = 1
 
     # sweep control
-    patience: Optional[int] = None     # None -> evaluate the full grid
+    patience: Optional[int] = None  # None -> evaluate the full grid
     min_evals_before_stop: int = 10
 
     # hdbscan
@@ -165,13 +166,16 @@ def build_knn_graph(
     # N*k-element buffer.
     try:
         from sklearn.neighbors import sort_graph_by_row_values
+
         g = sort_graph_by_row_values(g, copy=False, warn_when_not_sorted=False)
     except Exception:  # noqa: BLE001  (older sklearn)
         pass
     return g
 
 
-def knn_distance_profile(latent: np.ndarray, k: int, metric: str, n_jobs: int = -1) -> np.ndarray:
+def knn_distance_profile(
+    latent: np.ndarray, k: int, metric: str, n_jobs: int = -1
+) -> np.ndarray:
     """(n, k) array of sorted per-point neighbour distances, self excluded."""
     g = kneighbors_graph(
         latent, n_neighbors=k, mode="distance", metric=metric, n_jobs=n_jobs
@@ -181,16 +185,18 @@ def knn_distance_profile(latent: np.ndarray, k: int, metric: str, n_jobs: int = 
         # ragged (shouldn't happen with kneighbors_graph) -- fall back
         out = np.zeros((g.shape[0], k))
         for i in range(g.shape[0]):
-            row = np.sort(g.data[g.indptr[i]:g.indptr[i + 1]])
+            row = np.sort(g.data[g.indptr[i] : g.indptr[i + 1]])
             out[i, : row.size] = row
             if row.size < k and row.size:
-                out[i, row.size:] = row[-1]
+                out[i, row.size :] = row[-1]
         return out
     d = g.data.reshape(g.shape[0], k)
     return np.sort(d, axis=1)
 
 
-def derive_eps_grid(latent: np.ndarray, cfg: SweepConfig, n_jobs: int = -1) -> List[float]:
+def derive_eps_grid(
+    latent: np.ndarray, cfg: SweepConfig, n_jobs: int = -1
+) -> List[float]:
     """eps candidates from quantiles of the k-th nearest-neighbour distance.
 
     The original version took ``np.partition(graph.data, n*k-1)``, i.e. a
@@ -236,9 +242,15 @@ def score_bins(
     n_hq = n_mq = 0
     smooth = 0.0
     for q in quals:
-        if q.completeness >= cfg.hq_completeness and q.contamination <= cfg.hq_contamination:
+        if (
+            q.completeness >= cfg.hq_completeness
+            and q.contamination <= cfg.hq_contamination
+        ):
             n_hq += 1
-        if q.completeness >= cfg.mq_completeness and q.contamination <= cfg.mq_contamination:
+        if (
+            q.completeness >= cfg.mq_completeness
+            and q.contamination <= cfg.mq_contamination
+        ):
             n_mq += 1
         if q.completeness >= cfg.smooth_min_completeness:
             smooth += q.completeness - cfg.lam * q.contamination
@@ -328,17 +340,31 @@ def density_sweep(
         nonlocal best_score, best_bins, best_params, best_quals, best_labels
         bins, unbinned = labels_to_bins(labels, contig_lengths, cfg)
         if not bins:
-            rows.append(dict(params=str(params), n_bins=0, n_hq=0, n_mq=0,
-                             smooth=0.0, binned_bp=0, unbinned_frac=1.0))
+            rows.append(
+                dict(
+                    params=str(params),
+                    n_bins=0,
+                    n_hq=0,
+                    n_mq=0,
+                    smooth=0.0,
+                    binned_bp=0,
+                    unbinned_frac=1.0,
+                )
+            )
             return False
         score, quals = score_bins(bins, table, cfg)
         binned_bp = int(sum(q.bp for q in quals))
-        rows.append(dict(
-            params=str(params), n_bins=len(bins), n_hq=int(score[0]),
-            n_mq=int(score[1]), smooth=round(score[2], 4),
-            binned_bp=binned_bp,
-            unbinned_frac=round(1 - binned_bp / max(contig_lengths.sum(), 1), 4),
-        ))
+        rows.append(
+            dict(
+                params=str(params),
+                n_bins=len(bins),
+                n_hq=int(score[0]),
+                n_mq=int(score[1]),
+                smooth=round(score[2], 4),
+                binned_bp=binned_bp,
+                unbinned_frac=round(1 - binned_bp / max(contig_lengths.sum(), 1), 4),
+            )
+        )
         improved = score > best_score
         if improved:
             best_score, best_bins, best_params = score, bins, params
@@ -353,7 +379,9 @@ def density_sweep(
             logger.info(
                 f"kNN graph: n={n}, k={choose_k(n, cfg)}, nnz={graph.nnz}; "
                 f"sweeping {len(eps_grid)} eps values in "
-                f"[{eps_grid[0]:.4g}, {eps_grid[-1]:.4g}]" if eps_grid else "empty eps grid"
+                f"[{eps_grid[0]:.4g}, {eps_grid[-1]:.4g}]"
+                if eps_grid
+                else "empty eps grid"
             )
         n_worse = 0
         for i, eps in enumerate(eps_grid):
@@ -362,11 +390,15 @@ def density_sweep(
                 n_worse = 0
             else:
                 n_worse += 1
-            if (cfg.patience is not None
-                    and i + 1 >= cfg.min_evals_before_stop
-                    and n_worse > cfg.patience):
+            if (
+                cfg.patience is not None
+                and i + 1 >= cfg.min_evals_before_stop
+                and n_worse > cfg.patience
+            ):
                 if logger:
-                    logger.info(f"early stop at eps={eps} after {n_worse} non-improving steps")
+                    logger.info(
+                        f"early stop at eps={eps} after {n_worse} non-improving steps"
+                    )
                 break
     else:
         HDB = _import_hdbscan()
@@ -379,6 +411,7 @@ def density_sweep(
                     min_samples=None if ms is None else int(ms),
                     metric="euclidean",
                     cluster_selection_method=sel,
+                    core_dist_n_jobs=1,
                 ).fit_predict(latent)
                 return ("mcs", int(mcs), "ms", ms, "sel", sel), labels
             except Exception as e:
@@ -389,28 +422,39 @@ def density_sweep(
         cpu_count = os.cpu_count() or 1
         if n_jobs < 0:
             max_workers = max(1, cpu_count + n_jobs)
+            max_workers = min(max_workers, 4)
         else:
             max_workers = n_jobs if n_jobs > 0 else cpu_count
-        
-        tasks = list(itertools.product(sizes, cfg.hdbscan_min_samples, cfg.hdbscan_selection_methods))
+
+        tasks = list(
+            itertools.product(
+                sizes, cfg.hdbscan_min_samples, cfg.hdbscan_selection_methods
+            )
+        )
 
         if max_workers > 1:
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all parameter combinations to the thread pool
+                # Submit all parameter combinations to the thread pool
                 future_to_params = {
                     executor.submit(run_hdbscan_single, mcs, ms, sel): (mcs, ms, sel)
                     for mcs, ms, sel in tasks
                 }
-                
+
                 # Process results as soon as each thread finishes
-                for future in track(as_completed(future_to_params), total=len(tasks), description="Sweeping HDBSCAN parameters in parallel..."):
+                for future in track(
+                    as_completed(future_to_params),
+                    total=len(tasks),
+                    description="Sweeping HDBSCAN parameters in parallel...",
+                ):
                     result = future.result()
                     if result is not None:
                         params_tuple, labels = result
                         consider(params_tuple, labels)
         else:
             # Fallback to synchronous execution if 1 CPU / worker is specified
-            for mcs, ms, sel in track(tasks, description="Sweeping HDBSCAN parameters sequentially..."):
+            for mcs, ms, sel in track(
+                tasks, description="Sweeping HDBSCAN parameters sequentially..."
+            ):
                 result = run_hdbscan_single(mcs, ms, sel)
                 if result is not None:
                     params_tuple, labels = result
@@ -438,20 +482,25 @@ def density_sweep(
             unbinned = [i for i in unbinned if i not in used]
             best_quals = table.quality_many(best_bins)
             if logger:
-                logger.info(f"rescued {len(rescued)} bins from {len(unbinned) + len(used)} noise contigs")
+                logger.info(
+                    f"rescued {len(rescued)} bins from {len(unbinned) + len(used)} noise contigs"
+                )
 
     best_bins.sort(key=lambda b: (-int(contig_lengths[b].sum()), b[0]))
     best_quals = table.quality_many(best_bins)
     return SweepResult(best_bins, best_params, best_score, audit, best_quals, unbinned)
 
+
 def _import_hdbscan():
     try:
         from hdbscan import HDBSCAN  # type: ignore
+
         return HDBSCAN
     except Exception:
         pass
     try:
         from sklearn.cluster import HDBSCAN  # sklearn >= 1.3
+
         return HDBSCAN
     except Exception as e:  # noqa: BLE001
         raise ImportError(
@@ -485,8 +534,10 @@ def rescue_noise(
     remaining = []
     for ci in available:
         q = table.quality([ci])
-        if (q.completeness >= cfg.mq_completeness
-                and q.contamination <= cfg.mq_contamination):
+        if (
+            q.completeness >= cfg.mq_completeness
+            and q.contamination <= cfg.mq_contamination
+        ):
             rescued.append([ci])
         else:
             remaining.append(ci)
@@ -497,8 +548,11 @@ def rescue_noise(
         k = min(30, len(remaining) - 1)
         prof = knn_distance_profile(sub, k, cfg.metric)
         thresholds = sorted(
-            {round(float(np.quantile(prof[:, min(j, k) - 1], 0.5)), 6)
-             for j in (5, 15, 30) if j <= k},
+            {
+                round(float(np.quantile(prof[:, min(j, k) - 1], 0.5)), 6)
+                for j in (5, 15, 30)
+                if j <= k
+            },
             reverse=True,
         )
         claimed: set = set()
@@ -516,8 +570,10 @@ def rescue_noise(
                 if int(contig_lengths[members].sum()) < cfg.min_bin_bp:
                     continue
                 q = table.quality(members)
-                if (q.completeness >= cfg.mq_completeness
-                        and q.contamination <= cfg.mq_contamination):
+                if (
+                    q.completeness >= cfg.mq_completeness
+                    and q.contamination <= cfg.mq_contamination
+                ):
                     rescued.append(sorted(members))
                     claimed.update(members)
     return rescued
@@ -605,13 +661,21 @@ def quality_dataframe(
     quals: Sequence[BinQuality],
     namelist: Sequence[str],
 ) -> pd.DataFrame:
-    return pd.DataFrame([
-        dict(cluster_id=i, n_contigs=q.n_contigs, bp=q.bp,
-             completeness=round(q.completeness, 4),
-             contamination=round(q.contamination, 4),
-             n_unique_markers=q.n_unique, n_markers=q.n_markers,
-             marker_set=q.marker_set,
-             longest_contig=max((namelist[c] for c in b),
-                                key=lambda s: len(s)) if b else "")
-        for i, (b, q) in enumerate(zip(bins, quals))
-    ])
+    return pd.DataFrame(
+        [
+            dict(
+                cluster_id=i,
+                n_contigs=q.n_contigs,
+                bp=q.bp,
+                completeness=round(q.completeness, 4),
+                contamination=round(q.contamination, 4),
+                n_unique_markers=q.n_unique,
+                n_markers=q.n_markers,
+                marker_set=q.marker_set,
+                longest_contig=(
+                    max((namelist[c] for c in b), key=lambda s: len(s)) if b else ""
+                ),
+            )
+            for i, (b, q) in enumerate(zip(bins, quals))
+        ]
+    )

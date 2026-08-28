@@ -229,7 +229,9 @@ def resolve_orf_to_contig(
             mapping[o] = c
             if c in known:
                 matched += 1
-        candidates.append((style, mapping, OrfJoinReport(style, matched, len(uniq_orfs))))
+        candidates.append(
+            (style, mapping, OrfJoinReport(style, matched, len(uniq_orfs)))
+        )
 
     _try("identity", lambda o: o)
     for style, rx in _ORF_STRIPPERS.items():
@@ -326,7 +328,9 @@ class MarkerTable:
         self.counts = counts.tocsr()
         self.counts.sort_indices()
         self.marker_names = list(marker_names)
-        self.marker_sets = {k: np.asarray(v, dtype=np.int64) for k, v in marker_sets.items()}
+        self.marker_sets = {
+            k: np.asarray(v, dtype=np.int64) for k, v in marker_sets.items()
+        }
         if contig_lengths is None:
             contig_lengths = np.zeros(len(self.namelist), dtype=np.int64)
         self.contig_lengths = np.asarray(contig_lengths, dtype=np.int64)
@@ -518,16 +522,20 @@ def diagnose_marker_table(table: MarkerTable, info: dict, out=sys.stdout) -> Non
     p("=" * 68)
     p(f"hmmout format detected      : {info['hmmout_format']}")
     p(f"hits after dedup/filtering  : {info['n_hits']}")
-    p(f"ORF->contig rule chosen     : {info['orf_id_style']} "
-      f"({info['orf_join_rate']:.1%} of ORFs matched a contig)")
+    p(
+        f"ORF->contig rule chosen     : {info['orf_id_style']} "
+        f"({info['orf_join_rate']:.1%} of ORFs matched a contig)"
+    )
     for style, rate in sorted(info["orf_join_all"].items(), key=lambda t: -t[1]):
         p(f"    {style:<18} {rate:6.1%}")
     p(f"hits dropped (contig n/a)   : {info['n_hits_dropped_contig_not_in_namelist']}")
     p(f"hits dropped (hmm n/a)      : {info['n_hits_dropped_hmm_not_in_vocab']}")
     p(f"hits used                   : {info['n_hits_used']}")
     p(f"contigs                     : {table.n_contigs}")
-    p(f"contigs carrying >=1 marker : {info['contigs_with_markers']} "
-      f"({info['contigs_with_markers'] / max(table.n_contigs,1):.1%})")
+    p(
+        f"contigs carrying >=1 marker : {info['contigs_with_markers']} "
+        f"({info['contigs_with_markers'] / max(table.n_contigs,1):.1%})"
+    )
     p(f"marker sets                 : {info['n_marker_sets']}")
     p("")
     p("Ceiling check -- completeness if the WHOLE assembly were one bin:")
@@ -542,15 +550,21 @@ def diagnose_marker_table(table: MarkerTable, info: dict, out=sys.stdout) -> Non
         top = np.argsort(per_contig)[::-1][:5]
         for i in top:
             q = table.quality([int(i)])
-            p(f"    {table.namelist[i][:48]:<48} "
-              f"markers={per_contig[i]:4d} comp={q.completeness:6.1%} "
-              f"cont={q.contamination:6.1%}")
+            p(
+                f"    {table.namelist[i][:48]:<48} "
+                f"markers={per_contig[i]:4d} comp={q.completeness:6.1%} "
+                f"cont={q.contamination:6.1%}"
+            )
     p("")
     whole = table.quality(range(table.n_contigs))
-    p(f"Whole-assembly bin: comp={whole.completeness:.1%} "
-      f"cont={whole.contamination:.1%} set={whole.marker_set}")
-    p("(a huge contamination here is expected and healthy -- it means the "
-      "markers are being counted; near-zero means the join is broken)")
+    p(
+        f"Whole-assembly bin: comp={whole.completeness:.1%} "
+        f"cont={whole.contamination:.1%} set={whole.marker_set}"
+    )
+    p(
+        "(a huge contamination here is expected and healthy -- it means the "
+        "markers are being counted; near-zero means the join is broken)"
+    )
     p("=" * 68)
 
 
@@ -562,8 +576,12 @@ def _cli(argv: Sequence[str]) -> int:
     d = sub.add_parser("diagnose")
     d.add_argument("--hmmout", required=True)
     d.add_argument("--contigs", required=True, help="assembly FASTA")
-    d.add_argument("--hmm-file", action="append", default=[],
-                   help="name=path/to/markers.hmm (repeatable)")
+    d.add_argument(
+        "--hmm-file",
+        action="append",
+        default=[],
+        help="name=path/to/markers.hmm (repeatable)",
+    )
     d.add_argument("--min-contig-len", type=int, default=1000)
     d.add_argument("--max-evalue", type=float, default=1e-5)
     d.add_argument("--no-best-hit-per-orf", action="store_true")

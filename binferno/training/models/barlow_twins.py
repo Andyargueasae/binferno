@@ -112,13 +112,17 @@ class NeuralNetwork(nn.Module):
 
         if self.tax_emb_dim > 0:
             self.fuse_tax_fusion = nn.Sequential(
-                nn.Linear(self.representation_dim + self.output_dim, self.representation_dim),
+                nn.Linear(
+                    self.representation_dim + self.output_dim, self.representation_dim
+                ),
                 nn.BatchNorm1d(self.representation_dim),
                 nn.LeakyReLU(),
             )
 
     # TODO: incorporate taxonomy embedding vectors and hierarchical taxonomy.
-    def _encode(self, x: torch.Tensor, tax_emb: torch.Tensor = None) -> tuple[torch.Tensor, Optional[None|Dict]]:
+    def _encode(
+        self, x: torch.Tensor, tax_emb: torch.Tensor = None
+    ) -> tuple[torch.Tensor, Optional[None | Dict]]:
         tnf_features = x[:, : self.tnf_enc_dim]
         cov_features = x[:, self.tnf_enc_dim :]
         tnf_encode = self.tnf_encoder(tnf_features)
@@ -141,7 +145,7 @@ class NeuralNetwork(nn.Module):
         fused_emb = self._encode(x, tax_emb)
         proj_emb = self.proj_head(fused_emb)
         return proj_emb
-    
+
     def forward(
         self,
         x1: torch.Tensor,
@@ -153,12 +157,24 @@ class NeuralNetwork(nn.Module):
         z2 = self.forward_one(x2, tax_emb2)
         return z1, z2
 
-    def forward_htax(self, x1: torch.Tensor, x2: torch.Tensor, tax_emb1: torch.Tensor, tax_emb2: torch.Tensor):
+    def forward_htax(
+        self,
+        x1: torch.Tensor,
+        x2: torch.Tensor,
+        tax_emb1: torch.Tensor,
+        tax_emb2: torch.Tensor,
+    ):
         z1 = self.forward_one(x1, tax_emb1)
         z2 = self.forward_one(x2, tax_emb2)
         return z1, z2
 
-    def forward_with_embs(self, x1: torch.Tensor, x2: torch.Tensor, tax_emb1: torch.Tensor = None, tax_emb2: torch.Tensor = None):
+    def forward_with_embs(
+        self,
+        x1: torch.Tensor,
+        x2: torch.Tensor,
+        tax_emb1: torch.Tensor = None,
+        tax_emb2: torch.Tensor = None,
+    ):
         z1 = self.forward_one(x1, tax_emb1)
         z2 = self.forward_one(x2, tax_emb2)
         return z1, z2
@@ -384,6 +400,7 @@ class AttentionFusion(nn.Module):
         output = self.fused_proj(final_fused_features)
         return output
 
+
 def _build_coverage_encoder(coverage_dim: int, output_dim: int, dropout: float):
     """
     Adaptive coverage encoder that scales capacity with input information content.
@@ -463,6 +480,7 @@ def _build_coverage_encoder(coverage_dim: int, output_dim: int, dropout: float):
             nn.BatchNorm1d(output_dim),
             nn.LeakyReLU(),
         )
+
 
 def build_tnf_encoder_cnn(tnf_dim: int, output_dim: int, dropout: float):
     """Parameter-efficient CNN encoder for flat TNF vectors.

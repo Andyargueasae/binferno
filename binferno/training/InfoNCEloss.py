@@ -2,6 +2,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch
 
+
 class info_nce_loss(nn.Module):
     def __init__(self, temperature: float = 0.15):
         super().__init__()
@@ -35,8 +36,8 @@ class info_nce_loss(nn.Module):
         positives = torch.gather(sim, 1, pos_idx).reshape(-1, 1)
 
         neg = sim.masked_fill(same_contig, float("-inf"))
-        neg_lse = self._neg_logpartition(neg, n_views)              # [total, 1]
-        neg_lse = neg_lse.repeat_interleave(n_views - 1, dim=0)     # [total*(V-1), 1]
+        neg_lse = self._neg_logpartition(neg, n_views)  # [total, 1]
+        neg_lse = neg_lse.repeat_interleave(n_views - 1, dim=0)  # [total*(V-1), 1]
 
         # -log( exp(pos) / (exp(pos) + sum_k exp(neg_k)) )
         loss = (torch.logaddexp(positives, neg_lse) - positives).mean()
@@ -47,6 +48,7 @@ class info_nce_loss(nn.Module):
             top1 = (positives > max_neg).float().mean().item() * 100.0
 
         return loss, top1
+
 
 class InfoNCEHardNegative(info_nce_loss):
     """Actual hard-negative reweighting (Robinson et al., ICLR 2021).
@@ -72,7 +74,8 @@ class InfoNCEHardNegative(info_nce_loss):
         n_neg = neg.shape[1] - n_views  # -inf entries are the same-contig block
         num = torch.logsumexp((1.0 + self.beta) * neg, dim=1, keepdim=True)
         den = torch.logsumexp(self.beta * neg, dim=1, keepdim=True)
-        return num - den + torch.log(
-            torch.tensor(float(n_neg), device=neg.device, dtype=neg.dtype)
+        return (
+            num
+            - den
+            + torch.log(torch.tensor(float(n_neg), device=neg.device, dtype=neg.dtype))
         )
-

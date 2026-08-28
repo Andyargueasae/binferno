@@ -16,7 +16,7 @@ def read_fasta(fastafile):
     else:
         open_func = open
         mode = "r"
-    
+
     with open_func(fastafile, mode) as f:
         current_seq = None
         for line in f:
@@ -31,7 +31,7 @@ def read_fasta(fastafile):
             else:
                 if current_seq:
                     sequences[current_seq] += line
-    
+
     return sequences
 
 
@@ -39,19 +39,19 @@ def gen_bins(fastafile, resultfile, outputdir):
     """Generate bins from clustering results."""
     print("Processing file:\t{}".format(fastafile))
     sequences = read_fasta(fastafile)
-    
+
     print("Reading Map:\t{}".format(resultfile))
     bin_to_contigs = defaultdict(list)
-    
+
     with open(resultfile, "r") as f:
         for line in f:
             contig_name, cluster_name = line.strip().split("\t")
             bin_to_contigs[cluster_name].append(contig_name)
-    
+
     print("Writing bins:\t{}".format(outputdir))
     if not os.path.exists(outputdir):
         os.makedirs(outputdir)
-    
+
     bin_num = 0
     for _cluster_name, contigs in bin_to_contigs.items():
         binfile = os.path.join(outputdir, "{}.fa".format(bin_num))
@@ -69,5 +69,5 @@ if __name__ == "__main__":
     parser.add_argument("result", help="Clustering result TSV")
     parser.add_argument("output", help="Output directory")
     args = parser.parse_args()
-    
+
     gen_bins(args.fasta, args.result, args.output)
