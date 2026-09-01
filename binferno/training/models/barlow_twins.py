@@ -11,10 +11,11 @@ class NeuralNetwork(nn.Module):
         dropout=0.05,
         output_dim=128,
         corgi_dim=0,
-        dense_mode=False,
         kmer_dim=136,
         tax_emb_dim=0,
         proj_head_dim=512,
+        cnn=False,
+        lstm=False,
         h_tax=False,
     ):
         super(NeuralNetwork, self).__init__()
@@ -31,8 +32,10 @@ class NeuralNetwork(nn.Module):
         if corgi_dim > 0:  # concat kmer with corgi and run single encoder.
             self.tnf_enc_dim += corgi_dim
 
+        # assert cnn and lstm are not both True, as we only support one of them at a time.
+        assert not (cnn is True and lstm is True), "Only one of cnn or lstm can be True."
         # may add more layers.
-        if not dense_mode:
+        if not cnn and not lstm:
             tnf_hidden1 = 512
             tnf_hidden2 = 256
             tnf_hidden3 = output_dim
@@ -49,35 +52,15 @@ class NeuralNetwork(nn.Module):
                 nn.BatchNorm1d(tnf_hidden3),
                 nn.LeakyReLU(),
             )
-        else:  # dense mode, tnf->1024->512->256->128
-            tnf_hidden1 = 1024
-            tnf_hidden2 = 512
-            tnf_hidden3 = 256
-            tnf_hidden4 = output_dim
-            self.tnf_encoder = nn.Sequential(
-                nn.Linear(self.tnf_enc_dim, tnf_hidden1),
-                nn.BatchNorm1d(tnf_hidden1),
-                nn.LeakyReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(tnf_hidden1, tnf_hidden2),
-                nn.BatchNorm1d(tnf_hidden2),
-                nn.LeakyReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(tnf_hidden2, tnf_hidden3),
-                nn.BatchNorm1d(tnf_hidden3),
-                nn.LeakyReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(tnf_hidden3, tnf_hidden4),
-                nn.BatchNorm1d(tnf_hidden4),
-                nn.LeakyReLU(),
+        elif cnn:
+            self.tnf_encoder = build_tnf_encoder_cnn(
+                tnf_dim=self.tnf_enc_dim, output_dim=output_dim, dropout=dropout
             )
-        # dense mode cannot improve the performance...
-        # As Barlow twins will reward embeddings more than encoder capacity.
-        # So what really matters won't be the kmer encoder and coverage encoder capacity,
-        # but the fusion network and projection head capacity,
-        # which will directly determine the quality of the embeddings
-        # and the Barlow Twins loss optimization.
-
+        elif lstm:
+            self.tnf_encoder = build_lstm_encoder(
+                tnf_dim=self.tnf_enc_dim, output_dim=output_dim, dropout=dropout
+            )
+        
         # determined by coverage dim.
         self.coverage_encoder = _build_coverage_encoder(
             coverage_dim=coverage_dim, output_dim=output_dim, dropout=dropout
@@ -92,16 +75,6 @@ class NeuralNetwork(nn.Module):
         )
 
         self.representation_dim = output_dim
-
-        # self.proj_head = nn.Sequential(
-        #     nn.Linear(self.representation_dim, self.proj_head_dim),
-        #     nn.BatchNorm1d(self.proj_head_dim),
-        #     nn.LeakyReLU(),
-        #     nn.Linear(
-        #         self.proj_head_dim, self.proj_head_dim
-        #     ),  # here we projects to a higher dimension to make the Barlow Twins loss work better, since the original paper shows that using a higher dimension for the projection head can improve the performance. We can also add a non-linear activation function here to make the projection head more powerful.
-        #     nn.BatchNorm1d(self.proj_head_dim),
-        # )
 
         self.proj_head = _build_bt_projector(
             in_dim=self.representation_dim,
@@ -119,7 +92,6 @@ class NeuralNetwork(nn.Module):
                 nn.LeakyReLU(),
             )
 
-    # TODO: incorporate taxonomy embedding vectors and hierarchical taxonomy.
     def _encode(
         self, x: torch.Tensor, tax_emb: torch.Tensor = None
     ) -> tuple[torch.Tensor, Optional[None | Dict]]:

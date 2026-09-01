@@ -35,6 +35,7 @@ class BinfernoClustering(BaseClustering):
         logger: loguru._logger.Logger = None,  # type: ignore
         threads: int = 1,
     ) -> ClusterResult:
+
         match self.cluster_method:
             case ClusterMethod.leiden:
                 result = self.leiden(

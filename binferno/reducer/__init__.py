@@ -45,18 +45,27 @@ class BinfernoReducer(BaseReducer):
                 data, n_components=50
             )  # first reduce to 50 dimensions using PCA
             data = self.umap(data, n_components=self.default_dim)
+            df = pd.DataFrame(
+                data, columns=[f"i{idx}" for idx in range(data.shape[1])], index=x_ind, dtype=np.float32
+            )
         elif self.use_pca:
             logger.info("Directly applying PCA for dimension reduction.")
             data = self.pca(data, n_components=self.default_dim)
+            df = pd.DataFrame(
+                data, columns=[f"i{idx}" for idx in range(data.shape[1])], index=x_ind, dtype=np.float32
+            )
         elif self.use_umap:
             logger.info("Directly applying UMAP for dimension reduction.")
             data = self.umap(data, n_components=self.default_dim)
+            df = pd.DataFrame(
+                data, columns=[f"i{idx}" for idx in range(data.shape[1])], index=x_ind, dtype=np.float32
+            )
         else:
             logger.info(
                 "No dimension reduction method selected. Returning original data."
             )
+            df = data.copy()
 
         logger.info(f"Dimension reduction completed. Final dimension: {data.shape[1]}")
-        return pd.DataFrame(
-            data, columns=[f"i{idx}" for idx in range(data.shape[1])], index=x_ind
-        )
+
+        return df

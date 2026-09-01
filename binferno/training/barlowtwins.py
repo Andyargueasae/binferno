@@ -52,10 +52,6 @@ class BarlowTwinsTrainer(BaseTrainer):
     seed: int = Field(
         default=42, description="Random seed for training and augmentation."
     )
-    dense_mode: bool = Field(
-        default=False,
-        description="Whether to use dense layers in the model architecture. If False, the model will use a more lightweight architecture without dense layers.",
-    )
     warmup_epochs: int = Field(
         default=10,
         description="Number of epochs to linearly increase the learning rate from a small value to the initial learning rate at the start of training.",
@@ -165,8 +161,9 @@ class BarlowTwinsTrainer(BaseTrainer):
             kmer_dim=kmer_dim,
             proj_head_dim=self.proj_head_dim,
             corgi_dim=corgi_dim,
-            dense_mode=self.dense_mode,
             output_dim=self.output_dim,
+            cnn=cnn,
+            lstm=lstm,
         ).to(device)
 
         logger.info(f"Model architecture:\n{model}")

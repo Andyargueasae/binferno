@@ -218,6 +218,8 @@ class SimCLRNet(nn.Module):
         pretrained_model=None,
         cov_model=None,
         covmodel_notl2normalize=False,
+        cnn=False,
+        lstm=False,
     ):
         super(SimCLRNet, self).__init__()
         self.pretrained_model = pretrained_model
@@ -226,14 +228,36 @@ class SimCLRNet(nn.Module):
         self.out_sz = out_sz
         self.n_embs = len(emb_szs) - 1
         self.covmodel_notl2normalize = covmodel_notl2normalize
-        self.fc = _build_embedding_stack(
-            in_sz=self.in_sz,
-            out_sz=self.out_sz,
-            emb_szs=emb_szs,
-            ps=ps,
-            use_bn=use_bn,
-            actn=actn,
-        )
+
+        assert not (cnn is True and lstm is True), "Only one of cnn or lstm can be True."
+        
+        if not cnn and not lstm:
+            self.fc = _build_embedding_stack(
+                in_sz=self.in_sz,
+                out_sz=self.out_sz,
+                emb_szs=emb_szs,
+                ps=ps,
+                use_bn=use_bn,
+                actn=actn,
+            )
+        elif cnn:
+            self.fc = build_embedding_stack_cnn(
+                in_sz=self.in_sz,
+                out_sz=self.out_sz,
+                emb_szs=emb_szs,
+                ps=ps,
+                use_bn=use_bn,
+                actn=actn,
+            )
+        elif lstm:
+            self.fc = build_embedding_stack_lstm(
+                in_sz=self.in_sz,
+                out_sz=self.out_sz,
+                emb_szs=emb_szs,
+                ps=ps,
+                use_bn=use_bn,
+                actn=actn,
+            )
 
     def bn_drop_lin(
         self,

@@ -411,7 +411,7 @@ def density_sweep(
                     min_samples=None if ms is None else int(ms),
                     metric="euclidean",
                     cluster_selection_method=sel,
-                    core_dist_n_jobs=1,
+                    n_jobs=1,
                 ).fit_predict(latent)
                 return ("mcs", int(mcs), "ms", ms, "sel", sel), labels
             except Exception as e:
@@ -492,12 +492,12 @@ def density_sweep(
 
 
 def _import_hdbscan():
-    try:
-        from hdbscan import HDBSCAN  # type: ignore
+    # try:
+    #     from hdbscan import HDBSCAN  # type: ignore
 
-        return HDBSCAN
-    except Exception:
-        pass
+    #     return HDBSCAN
+    # except Exception:
+    #     pass
     try:
         from sklearn.cluster import HDBSCAN  # sklearn >= 1.3
 

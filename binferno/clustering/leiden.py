@@ -103,6 +103,7 @@ class LeidenClustering(BaseClustering):
             contig_len=self.cluster_min_length,
         )
 
+
         if len(namelist) == 0:
             raise ValueError("No contigs remain after length filtering")
 

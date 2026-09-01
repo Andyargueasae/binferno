@@ -230,4 +230,12 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
             output_dir / "features.tsv", index=True, header=True, sep="\t"
         )
 
-        return [canonical_features, taxonomy_features], kmer_dim
+        if not self.use_kmer:
+            # concatenate the canonical features with taxonomy features if k-mer is not used
+            if taxonomy_features is not None and isinstance(taxonomy_features, pd.DataFrame):
+                canonical_features = pd.concat(
+                    [taxonomy_features, canonical_features], axis=1
+                ) # [taxonomy enc, coverage]
+            return [canonical_features, None], canonical_features.shape[1] - coverage_dim  # return the total dimension of canonical features
+        else:
+            return [canonical_features, taxonomy_features], kmer_dim

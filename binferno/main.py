@@ -78,6 +78,7 @@ def binferno(
         threads=threads,
     )
 
+
     if train_only:
         logger.info(
             "Only training stage is set, temperarily skipping clustering and results generations."

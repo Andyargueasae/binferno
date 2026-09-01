@@ -14,7 +14,7 @@ import pyfastx
 from torch.amp import GradScaler
 import loguru
 import pandas as pd
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 
 from ..utils import calc_n50
@@ -158,11 +158,12 @@ class SimCLRTrainer(BaseTrainer):
             simclr=True,
         )
 
-        tax_df = self.sort_features_by_method(
-            tax_df,
-            contig_ids=namelist,
-            simclr=True,
-        )
+        if tax_df is not None:
+            tax_df = self.sort_features_by_method(
+                tax_df,
+                contig_ids=namelist,
+                simclr=True,
+            )
 
         if torch.cuda.is_available():
             device = torch.device("cuda")
@@ -203,6 +204,8 @@ class SimCLRTrainer(BaseTrainer):
                 ps=[0.2] * 2,
                 actn=nn.LeakyReLU(),
                 cov_model=cov_model,
+                cnn=cnn,
+                lstm=lstm,
             ).to(device)
         else:
             model = NeuralNetwork(
@@ -249,20 +252,6 @@ class SimCLRTrainer(BaseTrainer):
                 output_dir=output_train_dir,
                 logger=logger,
             )
-        elif self.embnet:
-            model = self.train(
-                dataloader=train_loader,
-                optimizer=optimizer,
-                scheduler=scheduler,
-                device=device,
-                epochs=self.epochs,
-                model=model,
-                n_cov=cov_dim,
-                n_views=self.view_num,
-                temperature=temperature,
-                output_dir=output_train_dir,
-                logger=logger,
-            )
         else:
             model = self.train(
                 dataloader=train_loader,
@@ -287,6 +276,7 @@ class SimCLRTrainer(BaseTrainer):
                 output_path=embedding_path,
                 device=device,
                 kmer_len=kmer_dim,
+                tax_emb_dim=tax_emb_dim
             )
         else:
             embeddings = self.get_embeddings(
@@ -454,6 +444,10 @@ class SimCLRTrainer(BaseTrainer):
                 warmup=False,
                 max_lr_hold_epochs=self.max_lr_epochs,
             )
+
+        if tax_df is not None:
+            dataset = (dataset, tax_dataset)
+
 
         return train_loader, optimizer, scheduler, dataset
 
@@ -858,44 +852,87 @@ class SimCLRTrainer(BaseTrainer):
         logger.info(f"Model saved to {model_path}")
         return model
 
-    def simclr_get_embs(self, model, data, namelist, output_path, device, kmer_len):
+    def simclr_get_embs(self, 
+        model: nn.Module, 
+        data: Optional[List[torch.Tensor]|Tuple[List[torch.Tensor], List[torch.Tensor]]],
+        namelist: List[str], 
+        output_path: str, 
+        device: torch.device, 
+        kmer_len: int, 
+        tax_emb_dim: int
+    ) -> pd.DataFrame:
         with torch.no_grad():
             model.eval()
             bs_ = 1024
 
             print(f"length of original dataset: {len(data)}")
 
-            out = np.concatenate(
-                [
-                    model(
-                        data[0][i : i + bs_, :kmer_len].to(device),
-                        data[0][i : i + bs_, kmer_len:].to(device),
-                    )[0]
-                    .to("cpu")
-                    .numpy()
-                    for i in range(0, len(data[0]), bs_)
-                ],
-                axis=0,
-            )
-            embeddings_df = pd.DataFrame(out, index=namelist)
+            if isinstance(data, List): # Only canonical tnf and coverage features. 
+                out = np.concatenate(
+                    [
+                        model(
+                            data[0][i : i + bs_, :kmer_len].to(device),
+                            data[0][i : i + bs_, kmer_len:].to(device),
+                        )[0]
+                        .to("cpu")
+                        .numpy()
+                        for i in range(0, len(data[0]), bs_)
+                    ],
+                    axis=0,
+                )
+                embeddings_df = pd.DataFrame(out, index=namelist)
 
-            embeddings_df.to_csv(str(output_path), sep="\t", header=True, index=True)
+                embeddings_df.to_csv(str(output_path), sep="\t", header=True, index=True)
 
-            covout = np.concatenate(
-                [
-                    model(
-                        data[0][i : i + bs_, :kmer_len].to(device),  # kmer features
-                        data[0][i : i + bs_, kmer_len:].to(device),  # coverage features
-                    )[1]
-                    .to("cpu")
-                    .numpy()
-                    for i in range(0, len(data[0]), bs_)
-                ],
-                axis=0,
-            )
-            cov_embeddings_df = pd.DataFrame(covout, index=namelist)
-            outfile = output_path.parent / "cov_embeddings.tsv"
-            cov_embeddings_df.to_csv(str(outfile), sep="\t", header=True, index=True)
+                covout = np.concatenate(
+                    [
+                        model(
+                            data[0][i : i + bs_, :kmer_len].to(device),  # kmer features
+                            data[0][i : i + bs_, kmer_len:].to(device),  # coverage features
+                        )[1]
+                        .to("cpu")
+                        .numpy()
+                        for i in range(0, len(data[0]), bs_)
+                    ],
+                    axis=0,
+                )
+                cov_embeddings_df = pd.DataFrame(covout, index=namelist)
+                outfile = output_path.parent / "cov_embeddings.tsv"
+                cov_embeddings_df.to_csv(str(outfile), sep="\t", header=True, index=True)
+            else: # Both canonical and taxonomic features are present.
+                data, tax_data = data
+                out = np.concatenate(
+                    [
+                        model(
+                            torch.cat([data[0][i : i + bs_, :kmer_len], tax_data[0][i:i+bs_,:]], dim=1).to(device),
+                            data[0][i : i + bs_, kmer_len:].to(device),
+                        )[0]
+                        .to("cpu")
+                        .numpy()
+                        for i in range(0, len(data[0]), bs_)
+                    ],
+                    axis=0,
+                )
+                embeddings_df = pd.DataFrame(out, index=namelist)
+
+                embeddings_df.to_csv(str(output_path), sep="\t", header=True, index=True)
+
+                covout = np.concatenate(
+                    [
+                        model(
+                            torch.cat([data[0][i : i + bs_, :kmer_len], tax_data[0][i:i+bs_,:]], dim=1).to(device),
+                            data[0][i : i + bs_, kmer_len:].to(device),
+                        )[1]
+                        .to("cpu")
+                        .numpy()
+                        for i in range(0, len(data[0]), bs_)
+                    ],
+                    axis=0,
+                )
+                cov_embeddings_df = pd.DataFrame(covout, index=namelist)
+                outfile = output_path.parent / "cov_embeddings.tsv"
+                cov_embeddings_df.to_csv(str(outfile), sep="\t", header=True, index=True)
+
         return embeddings_df
 
     def gen_views(
