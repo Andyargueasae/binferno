@@ -5,6 +5,7 @@ import pickle
 import pandas as pd
 from pydantic import Field
 import loguru
+from sklearn.preprocessing import normalize
 
 from .base import BaseFeatureBuilder
 from .corgi import CorgiFeatureBuilder
@@ -97,13 +98,21 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
             if kmer_data.exists():
                 logger.info("Loading existing k-mer features...")
                 kmer_df = pd.read_csv(kmer_data, sep="\t", index_col=0, header=0)
+                kmer_df = pd.DataFrame(
+                    normalize(kmer_df), index=kmer_df.index, columns=kmer_df.columns
+                )
             else:
                 logger.info("Generating k-mer features...")
+
                 kmer_df = self.kmer(All_Fragments)
+                
                 (
                     kmer_df.to_csv(kmer_data, sep="\t", index=True, header=True)
                     if self.save_features
                     else None
+                )
+                kmer_df = pd.DataFrame(
+                    normalize(kmer_df), index=kmer_df.index, columns=kmer_df.columns
                 )
 
             canonical_features = pd.concat([canonical_features, kmer_df], axis=1)
@@ -135,6 +144,9 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
             if corgi_data.exists():
                 logger.info("Loading existing Corgi features...")
                 corgi_df = pd.read_csv(corgi_data, sep="\t", index_col=0, header=0)
+                corgi_df = pd.DataFrame(
+                    normalize(corgi_df), index=corgi_df.index, columns=corgi_df.columns
+                )
             else:
                 corgi_df = self.corgi(
                     output_dir, contigs=contigs, min_length=contig_length
@@ -144,6 +156,11 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
                     if self.save_features
                     else None
                 )
+                # normalize the corgi features to have unit length.
+                corgi_df = pd.DataFrame(
+                    normalize(corgi_df), index=corgi_df.index, columns=corgi_df.columns
+                )
+                
 
             taxonomy_features = corgi_df  # pd.DataFrame type.
 
@@ -155,10 +172,20 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
                 dnabert_s_df = pd.read_csv(
                     dnabert_s_data, sep="\t", index_col=0, header=0
                 )
+                dnabert_s_df = pd.DataFrame(
+                    normalize(dnabert_s_df),
+                    index=dnabert_s_df.index,
+                    columns=dnabert_s_df.columns,
+                )
             else:
                 dnabert_s_df = self.dnabert_s(
                     fragments=All_Fragments,
                     logger=logger,
+                )
+                dnabert_s_df = pd.DataFrame(
+                    normalize(dnabert_s_df),
+                    index=dnabert_s_df.index,
+                    columns=dnabert_s_df.columns,
                 )
                 (
                     dnabert_s_df.to_csv(

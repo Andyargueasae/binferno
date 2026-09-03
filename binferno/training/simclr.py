@@ -713,7 +713,6 @@ class SimCLRTrainer(BaseTrainer):
                     x_comp = torch.cat(
                         [contig_features[:, :kmer_dim], tax_features], dim=1
                     )  # composition features + taxonomic features, wait, we haven't normalized after concatenation.
-                    x_comp = F.normalize(x_comp, p=2, dim=1)  # normalize the concatenated features
                     x_cov = contig_features[:, kmer_dim:]  # coverage features
 
                 else:
