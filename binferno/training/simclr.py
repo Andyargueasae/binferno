@@ -164,11 +164,16 @@ class SimCLRTrainer(BaseTrainer):
                 contig_ids=namelist,
                 simclr=True,
             )
+        
+        self.unify_seeds(
+            self.seed
+        )  # ensure reproducibility by unifying seeds across random, numpy, and torch.
+        
 
         if torch.cuda.is_available():
             device = torch.device("cuda")
             cudnn.deterministic = True
-            cudnn.benchmark = True
+            cudnn.benchmark = False
         else:
             device = torch.device("cpu")
             torch.set_num_threads(threads)
@@ -512,9 +517,7 @@ class SimCLRTrainer(BaseTrainer):
         auxiliary_loss: bool = False,
         temperature: float = 0.15,
     ):
-        self.unify_seeds(
-            self.seed
-        )  # ensure reproducibility by unifying seeds across random, numpy, and torch.
+        
         MODEL_PATH = output_dir / "best_model.pt"
         if logger is None:
             raise ValueError(
@@ -709,7 +712,8 @@ class SimCLRTrainer(BaseTrainer):
                     # concatenation of composition features and taxonomic features for the model input.
                     x_comp = torch.cat(
                         [contig_features[:, :kmer_dim], tax_features], dim=1
-                    )  # composition features + taxonomic features
+                    )  # composition features + taxonomic features, wait, we haven't normalized after concatenation.
+                    x_comp = F.normalize(x_comp, p=2, dim=1)  # normalize the concatenated features
                     x_cov = contig_features[:, kmer_dim:]  # coverage features
 
                 else:

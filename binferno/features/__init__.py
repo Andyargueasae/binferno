@@ -185,11 +185,15 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
                     threads,
                     logger,
                 )
-                if coverage_df.shape[0] != canonical_features.shape[0]:
+                if (coverage_df.shape[0] != canonical_features.shape[0]) and (self.use_kmer):
                     raise ValueError(
                         f"Coverage features have different number of rows ({coverage_df.shape[0]}) compared \
                         to other features ({canonical_features.shape[0]}). Please check the coverage feature \
                         generation."
+                    )
+                else:
+                    logger.debug(
+                        f"Kmer is not used, coverage features will be the only canonical feature for binning."
                     )
                 (
                     coverage_df.to_csv(coverage_data, sep="\t", index=True, header=True)

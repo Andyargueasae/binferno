@@ -134,10 +134,14 @@ class BarlowTwinsTrainer(BaseTrainer):
             simclr=False,
         )
 
+        self.unify_seeds(
+            self.seed
+        )  # ensure reproducibility by unifying seeds across random, numpy, and torch.
+        
         if torch.cuda.is_available():
             device = torch.device("cuda")
             cudnn.deterministic = True
-            cudnn.benchmark = True
+            cudnn.benchmark = False
         else:
             device = torch.device("cpu")
             torch.set_num_threads(threads)
@@ -164,7 +168,7 @@ class BarlowTwinsTrainer(BaseTrainer):
             output_dim=self.output_dim,
             cnn=cnn,
             lstm=lstm,
-        ).to(device)
+        ).to(device) # can weights be reproducible? 
 
         logger.info(f"Model architecture:\n{model}")
 
@@ -550,9 +554,6 @@ class BarlowTwinsTrainer(BaseTrainer):
         output_dir: Path = None,
         logger=loguru._logger.Logger,
     ):
-        self.unify_seeds(
-            self.seed
-        )  # ensure reproducibility by unifying seeds across random, numpy, and torch.
         MODEL_PATH = output_dir / "best_model.pt"
         if logger is None:
             raise ValueError(
