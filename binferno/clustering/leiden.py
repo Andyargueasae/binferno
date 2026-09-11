@@ -103,7 +103,6 @@ class LeidenClustering(BaseClustering):
             contig_len=self.cluster_min_length,
         )
 
-
         if len(namelist) == 0:
             raise ValueError("No contigs remain after length filtering")
 
@@ -307,6 +306,7 @@ class LeidenClustering(BaseClustering):
             )
 
         optimiser = leidenalg.Optimiser()
+        optimiser.set_rng_seed(self.seed)
         optimiser.optimise_partition(
             partition,
             is_membership_fixed=is_membership_fixed,  # OK, this one should also be looked for. Run once on and once off.
@@ -416,6 +416,8 @@ class LeidenClustering(BaseClustering):
 
         index = hnswlib.Index(space=space, dim=dim)
         index.init_index(max_elements=n_samples, ef_construction=ef, M=M)
+        # temporarily add num_threads=1 for the two rep checks. After running the two-rep check, move back.
+        # num_threads = 1
         index.add_items(features, labels, num_threads=num_threads)
         index.set_ef(ef)
 

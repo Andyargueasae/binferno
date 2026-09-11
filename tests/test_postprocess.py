@@ -9,8 +9,7 @@ from binferno.clustering.base import ClusterResult
 
 def _write_tiny_contigs(path: Path) -> None:
     path.write_text(
-        ">contig_1\n" + "ATGC" * 400 + "\n"
-        ">contig_2\n" + "GCAT" * 400 + "\n"
+        ">contig_1\n" + "ATGC" * 400 + "\n" ">contig_2\n" + "GCAT" * 400 + "\n"
     )
 
 
@@ -75,11 +74,15 @@ def test_postprocessor_calls_expected_pipeline_non_plastid(tmp_path, monkeypatch
         def run_pltd(self, bin_dirs, out_dir):
             calls["run_pltd"] += 1
 
-    def fake_estimate_bins_quality_nobins(bac_mg_table, ar_mg_table, res_path, cluster_result):
+    def fake_estimate_bins_quality_nobins(
+        bac_mg_table, ar_mg_table, res_path, cluster_result
+    ):
         calls["estimate"] += 1
         return "weight_seed_kmeans_k_2_result.tsv"
 
-    def fake_filter_small_bins(log, contigs_path, best_method_path, output_path, minbinsize):
+    def fake_filter_small_bins(
+        log, contigs_path, best_method_path, output_path, minbinsize
+    ):
         calls["filter"] += 1
 
     monkeypatch.setattr("binferno.postprocessing.GenomeProfiler", DummyProfiler)
@@ -140,7 +143,9 @@ def test_postprocessor_calls_expected_pipeline_plastid(tmp_path, monkeypatch):
         calls["estimate_pltd"] += 1
         return "weight_seed_kmeans_k_1_result.tsv"
 
-    def fake_filter_small_bins(log, contigs_path, best_method_path, output_path, minbinsize):
+    def fake_filter_small_bins(
+        log, contigs_path, best_method_path, output_path, minbinsize
+    ):
         pass
 
     monkeypatch.setattr("binferno.postprocessing.GenomeProfiler", DummyProfiler)

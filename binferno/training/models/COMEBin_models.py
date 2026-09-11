@@ -229,8 +229,10 @@ class SimCLRNet(nn.Module):
         self.n_embs = len(emb_szs) - 1
         self.covmodel_notl2normalize = covmodel_notl2normalize
 
-        assert not (cnn is True and lstm is True), "Only one of cnn or lstm can be True."
-        
+        assert not (
+            cnn is True and lstm is True
+        ), "Only one of cnn or lstm can be True."
+
         if not cnn and not lstm:
             self.fc = _build_embedding_stack(
                 in_sz=self.in_sz,

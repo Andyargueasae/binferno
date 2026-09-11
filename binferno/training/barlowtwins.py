@@ -4,7 +4,7 @@ import os
 from collections import OrderedDict
 from pathlib import Path
 
-from typing import Dict, Tuple, List, Optional
+from typing import Dict, Tuple, List, Optional, Sequence
 from pydantic import Field
 import torch
 import torch.nn as nn
@@ -29,11 +29,160 @@ from .base import (
     TAXONOMY_DF,
     label_augmented_views,
 )
+from .WeightedBTLoss import WeightedBTLoss
 
 
-# TODO: implement the length-aware Barlow Twins loss calculations.
+def build_fragment_length_map(fragment_dict: Dict) -> Dict[str, int]:
+    """Flatten FragMent_Dict into an exact-match {fragment_header: length} map.
+
+    Covers every header shape barlow_twins_augmentation can emit:
+        {contig}.original          full sequence
+        {contig}.{i}               crop from a contig <= 50 kb
+        {contig}.h1.{i}            crop from the left half of a long contig
+        {contig}.h2.{i}            crop from the right half
+
+    Deliberately does NOT parse headers.  fragment_info is already keyed by the
+    exact header string, so lookup is exact and contig names containing dots
+    (SPAdes: NODE_1_length_5000_cov_12.345) are handled correctly.
+    """
+    lengths: Dict[str, int] = {}
+    for contig_name, payload in fragment_dict.items():
+        contig_len = len(payload.get("sequence", ""))
+        if contig_len:
+            # `.original` is appended by barlow_twins_augmentation but is not
+            # always written into fragment_info, so seed it explicitly.
+            lengths[f"{contig_name}.original"] = contig_len
+        for frag_header, info in payload.get("fragment_info", {}).items():
+            length = info.get("length")
+            lengths[frag_header] = int(length) if length else contig_len
+    return lengths
+
+
+# ---------------------------------------------------------------------------
+# Step 2: {header: length} + pair indices -> per-pair weights
+# ---------------------------------------------------------------------------
+
+
+def make_pair_weights(
+    index: Sequence[str],
+    idx1: np.ndarray,
+    idx2: np.ndarray,
+    length_map: Dict[str, int],
+    tau: float = 0.5,
+    clip_percentile: Optional[float] = 99.0,
+    default_length: int = 1000,
+    per_contig_group: Optional[np.ndarray] = None,
+    strict: bool = True,
+) -> np.ndarray:
+    """Precision weight for each positive pair.
+
+    Two views of lengths L1, L2 each estimate the same features with sampling
+    variance ~ 1/L.  Barlow Twins compares them, so the noise in the comparison
+    has variance ~ (1/L1 + 1/L2) and the precision of the comparison is
+
+        w = L1 * L2 / (L1 + L2)
+
+    which is half the harmonic mean.  This is the pair-level analogue of
+    MetaCAT's x_i ~ N(mu, Sigma / w_i).
+
+    Parameters
+    ----------
+    index
+        data_df.index, i.e. the fragment header for every row.
+    idx1, idx2
+        The two columns of BuildDataset.training_pairs.
+    tau
+        Tempering exponent.  0 -> uniform (identical to the current loss),
+        1 -> full linear precision.  Check N_eff before going above ~0.5.
+    clip_percentile
+        Cap the raw precision at this percentile before tempering.  Matters
+        here specifically because `.original` views of long contigs are orders
+        of magnitude longer than crops and would otherwise dominate.
+    strict
+        Raise if any header is missing from length_map.  Leave this on the
+        first time you run it -- a silent fallback to default_length would look
+        like the weighting simply not working.
+
+    Returns
+    -------
+    np.ndarray, float32, shape (n_pairs,), mean 1.0
+    """
+    index = list(index)
+    idx1 = np.asarray(idx1, dtype=np.int64)
+    idx2 = np.asarray(idx2, dtype=np.int64)
+
+    missing = [h for h in index if h not in length_map]
+    if missing:
+        msg = (
+            f"{len(missing)} of {len(index)} fragment headers are absent from "
+            f"the length map (first few: {missing[:3]}). The map is built from "
+            "FragMent_Dict; if these differ, feature_df and FragMent_Dict have "
+            "drifted out of sync."
+        )
+        if strict:
+            raise KeyError(msg)
+
+    lens = np.array(
+        [float(length_map.get(h, default_length)) for h in index], dtype=np.float64
+    )
+    lens = np.maximum(lens, 1.0)
+
+    L1, L2 = lens[idx1], lens[idx2]
+    prec = (L1 * L2) / (L1 + L2)
+
+    if clip_percentile is not None and clip_percentile < 100.0:
+        prec = np.minimum(prec, np.percentile(prec, clip_percentile))
+
+    if tau == 0.0:
+        return np.ones_like(prec, dtype=np.float32)
+
+    prec = prec ** float(tau)
+
+    if per_contig_group is not None:
+        # Measured beta(tau=0) = 1.16 on real data: pair multiplicity already
+        # weights contigs superlinearly in length, past MetaCAT's L^1. Rescale
+        # so each contig's pairs keep their tau=0 total -- tau then only
+        # redistributes WITHIN a contig (crop vs .original), which is the part
+        # multiplicity cannot express.
+        g = np.asarray(per_contig_group, dtype=np.int64)
+        assert g.shape == prec.shape, "per_contig_group must be one id per pair"
+        tot = np.bincount(g, weights=prec, minlength=g.max() + 1)
+        cnt = np.bincount(g, minlength=g.max() + 1)
+        prec = prec * (cnt[g] / np.maximum(tot[g], 1e-12))
+
+    prec = prec / prec.mean()  # mean 1.0 keeps the loss on the tau=0 scale
+    return prec.astype(np.float32)
+
+
+def weight_diagnostics(w: np.ndarray, batch_size: int = 1024) -> Dict[str, float]:
+    """Report N_eff for a given weight vector, at batch scale.
+
+    N_eff is what tells you whether the weighting has quietly destroyed your
+    ability to estimate a proj_head_dim x proj_head_dim cross-correlation.
+    Call this BEFORE training, on the full pair weight vector, using a random
+    batch-sized sample -- it is a property of the weight distribution, not of
+    the model.
+    """
+    w = np.asarray(w, dtype=np.float64)
+    rng = np.random.default_rng(0)
+    n_eff_samples = []
+    for _ in range(50):
+        s = rng.choice(w, size=min(batch_size, len(w)), replace=False)
+        s = s / s.sum()
+        n_eff_samples.append(1.0 / (s**2).sum())
+    n_eff = float(np.mean(n_eff_samples))
+    return {
+        "n_pairs": int(len(w)),
+        "weight_min": float(w.min()),
+        "weight_max": float(w.max()),
+        "weight_p50": float(np.percentile(w, 50)),
+        "weight_p99": float(np.percentile(w, 99)),
+        "n_eff_per_batch": n_eff,
+        "n_eff_ratio": n_eff / min(batch_size, len(w)),
+    }
+
+
 class BarlowTwinsTrainer(BaseTrainer):
-
     learning_rate: float = Field(
         default=2.5e-3, description="Learning rate for training."
     )
@@ -67,6 +216,27 @@ class BarlowTwinsTrainer(BaseTrainer):
     proj_head_dim: int = Field(
         default=2048,
         description="Dimension of the projection head used in the Barlow Twins architecture. The projection head is a small neural network that maps the output of the main encoder to a space where the Barlow Twins loss is applied. A larger proj_head_dim can allow for more complex transformations and potentially better performance, but it also increases the number of parameters and computational cost of the model.",
+    )
+    weight_tau: float = Field(
+        default=0.0,
+        description="Length-precision exponent for the Barlow Twins loss. 0 "
+        "reproduces the unweighted loss exactly. 0.5 is the recommended "
+        "operating point; above 0.75 the effective batch size collapses.",
+    )
+    weight_clip_percentile: float = Field(
+        default=99.0,
+        description="Percentile cap on raw pair precision before tempering.",
+    )
+    weight_per_contig_norm: bool = Field(
+        default=True,
+        description="Renormalise weights so each contig's pairs keep their "
+        "unweighted total, so tau acts within contigs only.",
+    )
+    stratified_cap: bool = Field(
+        default=True,
+        description="Guarantee every contig keeps one positive pair when the "
+        "pair set exceeds max_positive_pairs. False reproduces the uniform "
+        "sampler, which starved 7,423 of 131,042 contigs on a real run.",
     )
 
     def __call__(
@@ -107,6 +277,8 @@ class BarlowTwinsTrainer(BaseTrainer):
             contig_length=self.contig_length,
         )
 
+        self._frag_lengths = build_fragment_length_map(fragment_dict)
+
         feature_result = features(
             FragMent_Dict=fragment_dict,
             All_Fragments=all_fragments,
@@ -137,7 +309,7 @@ class BarlowTwinsTrainer(BaseTrainer):
         self.unify_seeds(
             self.seed
         )  # ensure reproducibility by unifying seeds across random, numpy, and torch.
-        
+
         if torch.cuda.is_available():
             device = torch.device("cuda")
             cudnn.deterministic = True
@@ -168,7 +340,9 @@ class BarlowTwinsTrainer(BaseTrainer):
             output_dim=self.output_dim,
             cnn=cnn,
             lstm=lstm,
-        ).to(device) # can weights be reproducible? 
+        ).to(
+            device
+        )  # can weights be reproducible?
 
         logger.info(f"Model architecture:\n{model}")
 
@@ -178,6 +352,7 @@ class BarlowTwinsTrainer(BaseTrainer):
             batch_size=self.batch_size,
             epochs=self.epochs,
             num_workers=threads,
+            logger=logger,
         )
 
         model_path = output_train_dir / "best_model.pt"
@@ -327,6 +502,11 @@ class BarlowTwinsTrainer(BaseTrainer):
             max_positive_pairs=700000,
             taxonomy_features: Optional[pd.DataFrame | Dict | None] = None,
             namelist: Optional[list[str]] = None,
+            fragment_lengths: Optional[Dict[str, int]] = None,
+            weight_tau: float = 0.0,
+            weight_clip_percentile: float = 99.0,
+            weight_per_contig_norm: bool = True,
+            stratified_cap: bool = True,
         ):
             self.data_df = data_df
             self.max_positive_pairs = max_positive_pairs
@@ -334,6 +514,11 @@ class BarlowTwinsTrainer(BaseTrainer):
             self.taxonomy_features = taxonomy_features
             self.namelist = namelist
             self.h_tax = False
+            self.fragment_lengths = fragment_lengths
+            self.weight_tau = weight_tau
+            self.weight_clip_percentile = weight_clip_percentile
+            self.weight_per_contig_norm = weight_per_contig_norm
+            self.stratified_cap = stratified_cap
 
             grouped = self._group_fragments_by_contig()
             self.base_name_to_id = {
@@ -400,13 +585,43 @@ class BarlowTwinsTrainer(BaseTrainer):
             return list(pair_list)
 
         def _cap_positive_pairs(self, candidate_pairs, max_cap):
-            """
-            Randomly subsample positive pairs if they exceed the allowed cap.
-            """
-            if len(candidate_pairs) <= max_cap:
-                return list(candidate_pairs)
+            """Cap the pair set while guaranteeing every contig keeps a pair.
 
-            return random.sample(candidate_pairs, max_cap)
+            Uniform sampling silently starves short contigs: a contig with a
+            single pair loses it outright at the cap ratio. Measured on a real
+            run, 7,423 of 131,042 contigs contributed no gradient at all.
+            """
+            if not self.stratified_cap:
+                return random.sample(candidate_pairs, max_cap)
+            candidate_pairs = list(candidate_pairs)
+            if len(candidate_pairs) <= max_cap:
+                return candidate_pairs
+
+            by_contig = {}
+            for pair in candidate_pairs:
+                by_contig.setdefault(self.index_to_base_id[pair[0]], []).append(pair)
+
+            contigs = list(by_contig)
+            random.shuffle(contigs)
+
+            kept, remainder = [], []
+            for contig in contigs:
+                group = by_contig[contig]
+                pick = random.randrange(len(group))
+                if len(kept) < max_cap:
+                    kept.append(group[pick])
+                    remainder.extend(group[:pick] + group[pick + 1 :])
+                else:
+                    remainder.extend(group)
+
+            if len(kept) < max_cap:
+                need = max_cap - len(kept)
+                kept.extend(
+                    remainder
+                    if len(remainder) <= need
+                    else random.sample(remainder, need)
+                )
+            return kept
 
         def pair_frgs_to_contigs(self) -> dict:
             """
@@ -414,7 +629,9 @@ class BarlowTwinsTrainer(BaseTrainer):
             """
             return self._group_fragments_by_contig()
 
-        def construct_tensordatasets_from_pairs(self):
+        def construct_tensordatasets_from_pairs(
+            self, logger: loguru._logger.Logger = None
+        ) -> TensorDataset:
             """
             Convert selected positive pairs into a TensorDataset of:
                 (feature1, feature2, base_id)
@@ -455,12 +672,33 @@ class BarlowTwinsTrainer(BaseTrainer):
                 count=len(idx1),
             )
             base_ids = torch.from_numpy(base_ids_np)
+            if self.fragment_lengths is not None and self.weight_tau > 0.0:
+                group = base_ids_np if self.weight_per_contig_norm else None
+                w = torch.from_numpy(
+                    make_pair_weights(
+                        self.data_df.index,
+                        idx1,
+                        idx2,
+                        self.fragment_lengths,
+                        tau=self.weight_tau,
+                        clip_percentile=self.weight_clip_percentile,
+                        per_contig_group=group,
+                    )
+                )
+            else:
+                w = torch.ones(len(idx1), dtype=torch.float32)
+
+            logger.info(
+                f"pair weights: tau={self.weight_tau} "
+                f"min={w.min():.3f} max={w.max():.3f} "
+                f"n_eff_ratio={(1.0/((w/w.sum())**2).sum()/len(w)):.3f}"
+            )
             if tax_X is not None:
                 tax_features1 = torch.from_numpy(tax_X[idx1].copy())
                 tax_features2 = torch.from_numpy(tax_X[idx2].copy())
                 if not self.h_tax:
                     return TensorDataset(
-                        features1, features2, tax_features1, tax_features2, base_ids
+                        features1, features2, tax_features1, tax_features2, base_ids, w
                     )
                 else:
                     # turn idx1 to base name, and then reindex base names to get mask.
@@ -481,9 +719,10 @@ class BarlowTwinsTrainer(BaseTrainer):
                         tax_features2,
                         mask,
                         base_ids,
+                        w,
                     )
             else:
-                return TensorDataset(features1, features2, base_ids)
+                return TensorDataset(features1, features2, base_ids, w)
 
     def prepare_trainer(
         self,
@@ -495,11 +734,27 @@ class BarlowTwinsTrainer(BaseTrainer):
         num_workers: int = 0,
         **kwargs,
     ):
-        dataset_builder = self.BuildDataset(data_df=data_df)
-        train_dataset = dataset_builder.construct_tensordatasets_from_pairs()
+        dataset_builder = self.BuildDataset(
+            data_df=data_df,
+            fragment_lengths=getattr(self, "_frag_lengths", None),
+            weight_tau=self.weight_tau,
+            weight_clip_percentile=self.weight_clip_percentile,
+            weight_per_contig_norm=self.weight_per_contig_norm,
+            stratified_cap=self.stratified_cap,
+        )
+        train_dataset = dataset_builder.construct_tensordatasets_from_pairs(
+            logger=logger
+        )
 
         effective_batch_size = batch_size
         # a way of adaptively changing the batch sizes.
+        frag_lengths = getattr(self, "_frag_lengths", None)
+        if self.weight_tau > 0.0 and frag_lengths is None:
+            raise RuntimeError(
+                "weight_tau > 0 but no fragment length map was built. "
+                "self._frag_lengths is set in __call__ after gen_views."
+            )
+
         while len(train_dataset) < effective_batch_size and effective_batch_size > 1:
             effective_batch_size = effective_batch_size // 2
             if logger is not None:
@@ -609,7 +864,7 @@ class BarlowTwinsTrainer(BaseTrainer):
         optimizer: torch.optim.Optimizer,
         device: torch.device,
     ):
-        criterion = self.BT_loss(lambda_bt=5e-3, alpha=1.0).to(device)
+        criterion = WeightedBTLoss(lambda_bt=5e-3, alpha=1.0).to(device)
         model.train()
 
         sum_loss = 0.0
@@ -621,6 +876,8 @@ class BarlowTwinsTrainer(BaseTrainer):
             dataloader
         ):  # here it determines taxonomy data to be yes or no.
             last_batch = batch_i == num_batches - 1
+            *batch_data, w = batch_data  # weights always last
+            w = w.to(device, non_blocking=True)
 
             if len(batch_data) == 3:
                 features1, features2, base_ids = batch_data
@@ -636,6 +893,7 @@ class BarlowTwinsTrainer(BaseTrainer):
                     tax_2=None,
                     mask=None,
                     last_batch=last_batch,
+                    w=w,
                 )
             elif not is_htax:
                 features1, features2, tax_1, tax_2, base_ids = batch_data
@@ -653,6 +911,7 @@ class BarlowTwinsTrainer(BaseTrainer):
                     tax_2=tax_2,
                     mask=None,
                     last_batch=last_batch,
+                    w=w,
                 )
             else:
                 feature1, feature2, label1, label2, mask, base_ids = batch_data
@@ -671,6 +930,7 @@ class BarlowTwinsTrainer(BaseTrainer):
                     tax_2=label2,
                     mask=mask,
                     last_batch=last_batch,
+                    w=w,
                 )
 
             total_loss.backward()
@@ -695,6 +955,7 @@ class BarlowTwinsTrainer(BaseTrainer):
         tax_2=None,
         mask=None,
         last_batch=False,
+        w=None,
     ):
         is_htax = model.hierarchical_taxonomy
 
@@ -705,10 +966,10 @@ class BarlowTwinsTrainer(BaseTrainer):
                 )
                 if last_batch:
                     loss, stats = criterion(
-                        feature1=output1, feature2=output2, return_stats=True
+                        feature1=output1, feature2=output2, return_stats=True, w=w
                     )
                     tax_vec_loss, tax_stats = criterion(
-                        feature1=tax_enc1, feature2=tax_enc2, return_stats=True
+                        feature1=tax_enc1, feature2=tax_enc2, return_stats=True, w=w
                     )
                     loss = loss + tax_vec_loss
 
@@ -716,8 +977,8 @@ class BarlowTwinsTrainer(BaseTrainer):
                     stats = {**stats, **{f"tax_{k}": v for k, v in tax_stats.items()}}
                     return loss, stats
                 else:
-                    loss = criterion(feature1=output1, feature2=output2)
-                    tax_vec_loss = criterion(feature1=tax_enc1, feature2=tax_enc2)
+                    loss = criterion(feature1=output1, feature2=output2, w=w)
+                    tax_vec_loss = criterion(feature1=tax_enc1, feature2=tax_enc2, w=w)
                     loss = loss + tax_vec_loss
                     return loss, None
 
@@ -735,23 +996,23 @@ class BarlowTwinsTrainer(BaseTrainer):
                 tax_hloss = (tax_hloss1 + tax_hloss2) / 2
                 if last_batch:
                     loss, stats = criterion(
-                        feature1=output1, feature2=output2, return_stats=True
+                        feature1=output1, feature2=output2, return_stats=True, w=w
                     )
                     total_loss = loss + tax_hloss
                     return total_loss, stats
                 else:
-                    loss = criterion(feature1=output1, feature2=output2)
+                    loss = criterion(feature1=output1, feature2=output2, w=w)
                     total_loss = loss + tax_hloss
                     return total_loss, None
         else:
             output1, output2 = model(features1, features2)
             if last_batch:
                 loss, stats = criterion(
-                    feature1=output1, feature2=output2, return_stats=True
+                    feature1=output1, feature2=output2, return_stats=True, w=w
                 )
                 return loss, stats
             else:
-                loss = criterion(feature1=output1, feature2=output2)
+                loss = criterion(feature1=output1, feature2=output2, w=w)
                 return loss, None
 
     def barlow_twins_augmentation(

@@ -91,7 +91,13 @@ def test_comebin_process_contig_worker_handles_bad_fragment_positions():
         (
             "contig_1",
             {
-                "fragments": ["missing_info", "neg_start", "beyond_end", "empty_range", "ok"],
+                "fragments": [
+                    "missing_info",
+                    "neg_start",
+                    "beyond_end",
+                    "empty_range",
+                    "ok",
+                ],
                 "fragment_info": {
                     "neg_start": {"start_pos": -5, "length": 10},
                     "beyond_end": {"start_pos": 500, "length": 5},

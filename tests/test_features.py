@@ -35,8 +35,8 @@ def test_generate_feature_mapping_k4_dim():
 
 def test_kmer_composition_short_and_ambiguous_sequences():
     seqs = [
-        ("contig_short", "AT"),      # shorter than k
-        ("contig_ambig", "ATGCNNN"), # contains ambiguous chars
+        ("contig_short", "AT"),  # shorter than k
+        ("contig_ambig", "ATGCNNN"),  # contains ambiguous chars
         ("contig_ok", "ATGCATGC"),
     ]
     df = _calculate_kmer_composition(seqs, kmer_len=4, pseudocount=1.0)
@@ -130,7 +130,7 @@ def test_normalise_coverage_dicts_zero_total_mapped():
         coverage_std=coverage_std,
         all_fragment_headers=headers,
         total_mapped=0,
-        rpkm_normalize=True
+        rpkm_normalize=True,
     )
 
     assert cov == {"f1": 0.0, "f2": 0.0}
@@ -157,6 +157,7 @@ def test_normalise_coverage_dicts_rpkm():
 
 
 import pickle
+
 
 def _make_feature_builder(
     use_kmer=True,
@@ -330,7 +331,9 @@ def test_feature_builder_loads_cached_features_without_recompute(monkeypatch, tm
         pickle.dump({"dummy": 1}, handle)
 
     def fail_if_called(*args, **kwargs):
-        raise AssertionError("Feature branch should not be recomputed when cache exists")
+        raise AssertionError(
+            "Feature branch should not be recomputed when cache exists"
+        )
 
     monkeypatch.setattr(builder.kmer, "__call__", fail_if_called)
     monkeypatch.setattr(builder.coverage, "__call__", fail_if_called)
@@ -410,6 +413,7 @@ def test_feature_builder_taxonomy_branch(monkeypatch, tmp_path):
     assert isinstance(taxonomy, dict)
     assert "tax_node_index" in taxonomy
     assert "contig_taxonomy_df" in taxonomy
+
 
 def test_feature_builder_taxonomy_only_no_coverage_no_kmer(monkeypatch, tmp_path):
     """Regression: no UnboundLocalError when use_coverage=False and use_kmer=False."""

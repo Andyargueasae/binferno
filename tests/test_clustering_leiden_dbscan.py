@@ -175,7 +175,9 @@ def test_derive_eps_grid_returns_sorted_positive_values():
         [[0.0, 0.0], [0.1, 0.0], [0.2, 0.0], [10.0, 10.0]],
         dtype=np.float32,
     )
-    cfg = SweepConfig(k=2, eps_k_values=(1, 2), eps_quantiles=(0.05, 0.50), metric="euclidean")
+    cfg = SweepConfig(
+        k=2, eps_k_values=(1, 2), eps_quantiles=(0.05, 0.50), metric="euclidean"
+    )
 
     graph = build_knn_graph(latent, k=2, metric="euclidean", n_jobs=1, cfg=cfg)
     eps_grid = derive_eps_grid(latent, cfg, n_jobs=1)

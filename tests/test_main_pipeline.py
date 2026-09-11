@@ -137,7 +137,9 @@ class DummyPostprocessor:
     def __init__(self):
         self.called = 0
 
-    def __call__(self, contigs, cluster_result, num_threads, output_path, plastid, logger):
+    def __call__(
+        self, contigs, cluster_result, num_threads, output_path, plastid, logger
+    ):
         self.called += 1
 
 
@@ -147,8 +149,7 @@ class DummyFeatures:
 
 def _write_contigs(path: Path):
     path.write_text(
-        ">contig_1\n" + "ATGC" * 500 + "\n"
-        ">contig_2\n" + "GCAT" * 500 + "\n"
+        ">contig_1\n" + "ATGC" * 500 + "\n" ">contig_2\n" + "GCAT" * 500 + "\n"
     )
 
 

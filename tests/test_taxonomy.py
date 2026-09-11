@@ -30,8 +30,8 @@ def test_taxonomy_builder_single_level(tmp_path):
     assert nodes[0] == "root"
     assert "Bacteria" in node_indices
     assert node_indices["root"] == 0
-    assert parental_array[0] == -1                              # root has no parent
-    assert parental_array[node_indices["Bacteria"]] == 0        # Bacteria's parent is root
+    assert parental_array[0] == -1  # root has no parent
+    assert parental_array[node_indices["Bacteria"]] == 0  # Bacteria's parent is root
     assert set(contig_df["contig_id"].tolist()) == {"ctg1", "ctg2"}
     assert all(contig_df["tax_node_idx"] == node_indices["Bacteria"])
 
@@ -52,7 +52,13 @@ def test_taxonomy_builder_multi_level(tmp_path):
     builder = TaxonomyFeatureBuilder(taxonomy=tsv)
     nodes, node_indices, parental_array, contig_df = builder(fasta, logger)
 
-    for name in ("root", "Bacteria", "Proteobacteria", "Gammaproteobacteria", "Firmicutes"):
+    for name in (
+        "root",
+        "Bacteria",
+        "Proteobacteria",
+        "Gammaproteobacteria",
+        "Firmicutes",
+    ):
         assert name in node_indices
 
     # Parent of Proteobacteria must be Bacteria
@@ -78,12 +84,12 @@ def test_taxonomy_builder_contig_filtering(tmp_path):
     """Contigs in TSV absent from FASTA must be excluded; their taxa not added."""
     fasta = tmp_path / "contigs.fasta"
     tsv = tmp_path / "tax.tsv"
-    _write_fasta(fasta, {"ctg1": "ATGCATGC"})          # only ctg1
+    _write_fasta(fasta, {"ctg1": "ATGCATGC"})  # only ctg1
     _write_taxonomy_tsv(
         tsv,
         [
             ("ctg1", "Bacteria"),
-            ("ctg2", "Archaea"),                        # ctg2 not in FASTA
+            ("ctg2", "Archaea"),  # ctg2 not in FASTA
         ],
     )
 
@@ -92,5 +98,5 @@ def test_taxonomy_builder_contig_filtering(tmp_path):
 
     assert "ctg2" not in contig_df["contig_id"].tolist()
     assert "ctg1" in contig_df["contig_id"].tolist()
-    assert "Archaea" not in node_indices      # filtered-out taxon absent from graph
+    assert "Archaea" not in node_indices  # filtered-out taxon absent from graph
     assert "Bacteria" in node_indices

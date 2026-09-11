@@ -110,9 +110,11 @@ def test_partial_seed_init_errors():
     with pytest.raises(ValueError):
         partial_seed_init(X=X, n_clusters=1, random_state=0, seed_idx=[0, 1])
 
+
 # ============================================================================
 # Tests for apply_dimension_reduction and l2_normalize functions
 # ============================================================================
+
 
 def _create_sample_embeddings(n_samples=100, n_features=768):
     """Create synthetic embedding data for testing."""

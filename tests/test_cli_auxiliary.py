@@ -31,10 +31,7 @@ def test_getmarker_cli_happy_path(tmp_path: Path):
     hmm = tmp_path / "hits.hmmout"
     out = tmp_path / "seed.out"
 
-    fasta.write_text(
-        ">contigA\n" + "A" * 1200 + "\n"
-        ">contigB\n" + "C" * 1200 + "\n"
-    )
+    fasta.write_text(">contigA\n" + "A" * 1200 + "\n" ">contigB\n" + "C" * 1200 + "\n")
 
     # Need >=17 columns; indexes used by code:
     # arr[0]=target, arr[3]=marker, arr[5]=hmm_len, arr[15], arr[16]=covered span
@@ -53,7 +50,7 @@ def test_getmarker_cli_happy_path(tmp_path: Path):
         ]
     )
 
-    assert result.returncode == 0, (result.stdout + "\n" + result.stderr)
+    assert result.returncode == 0, result.stdout + "\n" + result.stderr
     assert out.exists()
     lines = [x.strip() for x in out.read_text().splitlines() if x.strip()]
     assert "contigA" in lines
@@ -85,13 +82,9 @@ def test_gethmmmarker_selects_matching_contigs(tmp_path: Path):
 
 def test_gethmmmarker_returns_minus_one_with_no_valid_hit(tmp_path: Path):
     fasta = tmp_path / "contigs.fasta"
-    fasta.write_text(
-        ">contigA\n" + "A" * 1200 + "\n"
-    )
+    fasta.write_text(">contigA\n" + "A" * 1200 + "\n")
     hmm = tmp_path / "hits.hmmout"
-    hmm.write_text(
-        "contigA_1 x x TIGR00388 x 100 x x x x x x x x x 5 20\n"
-    )
+    hmm.write_text("contigA_1 x x TIGR00388 x 100 x x x x x x x x x 5 20\n")
     out = tmp_path / "seed.txt"
 
     rc = marker_mod.gethmmmarker(str(hmm), str(fasta), 1000, str(out))
@@ -151,7 +144,9 @@ def test_gen_seed_invokes_external_steps_and_writes_seed(monkeypatch, tmp_path: 
     def fake_run_pyrodigal(contig_file, faa_path, threads):
         faa_path.write_text(">gene1\nAAA\n")
 
-    def fake_run_hmmsearch_pyhmmer(hmm_path, faa_path, domtblout_path, threads, e_value):
+    def fake_run_hmmsearch_pyhmmer(
+        hmm_path, faa_path, domtblout_path, threads, e_value
+    ):
         domtblout_path.write_text("# domtblout\n")
 
     def fake_subprocess_run(cmd, shell, check):
@@ -176,4 +171,3 @@ def test_gen_seed_invokes_external_steps_and_writes_seed(monkeypatch, tmp_path: 
     assert count == 1
     assert seed_path.exists()
     assert seed_path.read_text().splitlines() == ["contigA"]
-

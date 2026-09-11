@@ -33,7 +33,9 @@ class NeuralNetwork(nn.Module):
             self.tnf_enc_dim += corgi_dim
 
         # assert cnn and lstm are not both True, as we only support one of them at a time.
-        assert not (cnn is True and lstm is True), "Only one of cnn or lstm can be True."
+        assert not (
+            cnn is True and lstm is True
+        ), "Only one of cnn or lstm can be True."
         # may add more layers.
         if not cnn and not lstm:
             tnf_hidden1 = 512
@@ -60,7 +62,7 @@ class NeuralNetwork(nn.Module):
             self.tnf_encoder = build_lstm_encoder(
                 tnf_dim=self.tnf_enc_dim, output_dim=output_dim, dropout=dropout
             )
-        
+
         # determined by coverage dim.
         self.coverage_encoder = _build_coverage_encoder(
             coverage_dim=coverage_dim, output_dim=output_dim, dropout=dropout

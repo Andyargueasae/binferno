@@ -4,19 +4,54 @@ from pydantic import Field
 import networkx as nx
 import pandas as pd
 import loguru
-from typing import List
+from typing import List, Dict, Tuple
 
 from .base import BaseFeatureBuilder
 
 TAXONOMY_HEADER = ["contigs", "predictions"]
 
+TAXONOMIC_RANKS = [
+    "domain",
+    "phylum",
+    "class",
+    "order",
+    "family",
+    "genus",
+    "species",
+]
+
 
 class TaxonomyFeatureBuilder(BaseFeatureBuilder):
     """
-    A feature builder that constructs a taxonomy graph from contig sequences and their taxonomic classifications.
+    Convert hierarchical taxonomic predictions into rank-specific
+    categorical IDs.
 
-    Insights come from: (June 22 2026)
-     - TaxVamb and taxometer: the extraordinary work to use taxonomy as a feature for binning, and the taxonomic classifications they provide for contigs.
+    Output
+    ------
+    taxonomy_df:
+        index = contig_id
+
+        columns:
+            tax_domain
+            tax_phylum
+            tax_class
+            tax_order
+            tax_family
+            tax_genus
+            tax_species
+
+            mask_domain
+            mask_phylum
+            mask_class
+            mask_order
+            mask_family
+            mask_genus
+            mask_species
+
+    vocabularies:
+        dict mapping rank -> {taxon_name: integer_id}
+
+        Integer 0 is always reserved for <UNK>.
     """
 
     taxonomy: Path = Field(
@@ -36,89 +71,147 @@ class TaxonomyFeatureBuilder(BaseFeatureBuilder):
         - A DataFrame representing the taxonomy graph.
         """
         taxonomy_df = pd.read_csv(self.taxonomy, sep="\t", header=0)
-        # filter the contigs by contigs list.
-        contig_ids = set()
-        with open(contigs, "r") as f:
-            for line in f:
-                if line.startswith(">"):
-                    contig_id = line[1:].strip().split()[0]
-                    contig_ids.add(contig_id)
-        taxonomy_df = taxonomy_df[taxonomy_df["contigs"].isin(contig_ids)]
-        tax_nodes, tax_node_indices, parental_array = self._construct_taxonomy_graph(
-            logger, taxonomy_df
-        )
+        return self.fit_transform(taxonomy_df)
 
-        # assign the node index per contig for the finest taxonomy level.
-        contig_to_tax_node = {}
-        for _, row in taxonomy_df.iterrows():
-            contig_id, taxonomy_str = row["contigs"], row["predictions"]
-            if not taxonomy_str or taxonomy_str == "unclassified":
-                contig_to_tax_node[contig_id] = tax_node_indices[
-                    "root"
-                ]  # assign to root if unclassified, so they are not used in training. This is a design choice; you may choose to handle unclassified contigs differently.
-            taxonomy_levels = taxonomy_str.split(";")
-            finest_taxon = taxonomy_levels[-1]
-            tax_node_idx = tax_node_indices[finest_taxon]
-            contig_to_tax_node[contig_id] = tax_node_idx
+    @staticmethod
+    def _clean_taxon(taxon: str) -> str | None:
+        if taxon is None:
+            return None
 
-        # turn that into a df.
-        contig_taxonomy_df = pd.DataFrame(
-            {
-                "contig_id": list(contig_to_tax_node.keys()),
-                "tax_node_idx": list(
-                    contig_to_tax_node.values()
-                ),  # it already maps conitgs to the finest tax_node index.
-            }
-        )
-        return tax_nodes, tax_node_indices, parental_array, contig_taxonomy_df
+        taxon = str(taxon).strip()
 
-    def _construct_taxonomy_graph(
-        self, logger: loguru._logger.Logger, taxonomy_df: pd.DataFrame
-    ) -> nx.Graph:
+        if taxon == "":
+            return None
+
+        if taxon.lower() in {
+            "unclassified",
+            "unknown",
+            "na",
+            "nan",
+            "none",
+            "root",
+        }:
+            return None
+
+        return taxon
+
+    def _parse_lineage(self, lineage: str) -> Dict[str, str | None]:
         """
-        Constructs a taxonomy graph from a DataFrame containing taxonomic classifications.
+        Convert:
+            d__Bacteria;p__Proteobacteria;...
 
-        Parameters:
-        - taxonomy_df: A DataFrame with columns 'parent_taxon' and 'child_taxon' representing taxonomic relationships.
+        or:
+            Bacteria;Proteobacteria;...
 
-        Returns:
-        - A NetworkX graph representing the taxonomy.
+        into a rank dictionary.
         """
-        logger.info("Constructing taxonomy graph from taxonomy DataFrame.")
-        G = nx.DiGraph()
-        root = "root"
-        G.add_node(root)
-        for _, row in taxonomy_df.iterrows():
-            contig_id, taxonomy_str = row["contigs"], row["predictions"]
-            if not taxonomy_str:
-                continue
-            taxonomy_levels = taxonomy_str.split(
-                ";"
-            )  # assume in "domain;phylum;class;order;family;genus;species" format, by having --tax-lineage 1 in mmseqs2.
-            G.add_edge(root, taxonomy_levels[0])
-            for i in range(1, len(taxonomy_levels)):
-                parent_taxon = taxonomy_levels[i - 1]
-                child_taxon = taxonomy_levels[i]
-                G.add_node(child_taxon)
-                G.add_edge(parent_taxon, child_taxon)
 
-        edges = nx.bfs_edges(G, source=root)
-        logger.info(
-            f"Constructed taxonomy graph with {G.number_of_nodes()} nodes \
-            and {G.number_of_edges()} edges."
-        )
+        result = {rank: None for rank in self.ranks}
 
-        nodes = [root] + [child for _, child in edges]
-        node_indices = {node: idx for idx, node in enumerate(nodes)}
+        if lineage is None or pd.isna(lineage):
+            return result
 
-        table_parent: list[int] = [
-            -1 if n == root else node_indices[next(iterator(G.predecessors(n)))]
-            for n in nodes
+        parts = [self._clean_taxon(x) for x in str(lineage).split(";")]
+
+        parts = parts[: len(self.ranks)]
+
+        for rank, taxon in zip(self.ranks, parts):
+            result[rank] = taxon
+
+        return result
+
+    def fit(self, taxonomy_table: pd.DataFrame):
+        """
+        Construct rank-specific vocabularies.
+
+        taxonomy_table requires:
+            contigs
+            predictions
+        """
+
+        parsed = [
+            self._parse_lineage(lineage) for lineage in taxonomy_table["predictions"]
         ]
-        # Verify ancestor-first ordering: every parent precedes its child
-        assert all(p < i for i, p in enumerate(table_parent) if p != -1)
 
-        return nodes, node_indices, table_parent
+        vocabularies = {}
+
+        for rank in self.ranks:
+            taxa = sorted(
+                {lineage[rank] for lineage in parsed if lineage[rank] is not None}
+            )
+
+            # 0 is reserved for missing / unknown
+            vocab = {"<UNK>": 0}
+
+            for idx, taxon in enumerate(taxa, start=1):
+                vocab[taxon] = idx
+
+            vocabularies[rank] = vocab
+
+        self.vocabularies = vocabularies
+
+        return self
+
+    def transform(
+        self,
+        taxonomy_table: pd.DataFrame,
+    ) -> pd.DataFrame:
+
+        if self.vocabularies is None:
+            raise RuntimeError(
+                "TaxonomyFeatureBuilder.fit() must be called before transform()."
+            )
+
+        records = []
+
+        for _, row in taxonomy_table.iterrows():
+
+            contig_id = row["contigs"]
+            lineage = self._parse_lineage(row["predictions"])
+
+            record = {"contig_id": contig_id}
+
+            for rank in self.ranks:
+
+                taxon = lineage[rank]
+
+                if taxon is None:
+                    tax_id = 0
+                    mask = 0.0
+
+                else:
+                    tax_id = self.vocabularies[rank].get(
+                        taxon,
+                        0,
+                    )
+
+                    # Unknown taxon at transform time
+                    if tax_id == 0:
+                        mask = 0.0
+                    else:
+                        mask = 1.0
+
+                record[f"tax_{rank}"] = tax_id
+                record[f"mask_{rank}"] = mask
+
+            records.append(record)
+
+        taxonomy_df = pd.DataFrame(records)
+
+        taxonomy_df = taxonomy_df.set_index("contig_id")
+
+        return taxonomy_df
+
+    def fit_transform(
+        self,
+        taxonomy_table: pd.DataFrame,
+    ) -> Tuple[pd.DataFrame, Dict[str, Dict[str, int]]]:
+
+        self.fit(taxonomy_table)
+
+        taxonomy_df = self.transform(taxonomy_table)
+
+        return taxonomy_df, self.vocabularies
 
 
 def iterator(itr):

@@ -18,6 +18,7 @@ def set_test_seed() -> None:
     np.random.seed(seed)
     try:
         import torch
+
         torch.manual_seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
@@ -119,7 +120,11 @@ def dummy_all_fragments():
         subseq_end = random.randint(1000, 4 * 900)
         frag_len = subseq_end - subseq_start
 
-        for contig_name, seq in [("contig_1", seq1), ("contig_2", seq2), ("contig_3", seq3)]:
+        for contig_name, seq in [
+            ("contig_1", seq1),
+            ("contig_2", seq2),
+            ("contig_3", seq3),
+        ]:
             frag_id = f"{contig_name}_frag_{i}"
             frag_dict[contig_name]["fragments"].append(frag_id)
             frag_dict[contig_name]["fragment_info"][frag_id] = {

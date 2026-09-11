@@ -85,15 +85,21 @@ def test_cli_invalid_enum_value_fails(tmp_path: Path):
     result = _run(
         [
             "binferno.main",
-            "--contigs", str(contigs),
-            "--bam-dir", str(bam_dir),
-            "--output-dir", str(out_dir),
-            "--clustering.cluster-method", "not-a-method",
+            "--contigs",
+            str(contigs),
+            "--bam-dir",
+            str(bam_dir),
+            "--output-dir",
+            str(out_dir),
+            "--clustering.cluster-method",
+            "not-a-method",
         ]
     )
     assert result.returncode != 0
     combined = _norm(result.stdout + "\n" + result.stderr)
-    _assert_any(combined, ["cluster-method", "invalid", "not-a-method", "leiden", "dbscan"])
+    _assert_any(
+        combined, ["cluster-method", "invalid", "not-a-method", "leiden", "dbscan"]
+    )
 
 
 def test_cli_help_contains_pydantic_defaults():
@@ -104,7 +110,9 @@ def test_cli_help_contains_pydantic_defaults():
     # Don't assert exact full lines, just verify defaults are rendered somewhere.
     # Tyro + Pydantic usually include "(default: ...)".
     _assert_any(out, ["default", "(default:"])
-    _assert_any(out, ["training.simclr.batch-size", "training.simclr.batch_size", "batch-size"])
+    _assert_any(
+        out, ["training.simclr.batch-size", "training.simclr.batch_size", "batch-size"]
+    )
     _assert_any(out, ["training.barlowtwins.epochs", "training.barlowtwins.epochs"])
 
 
