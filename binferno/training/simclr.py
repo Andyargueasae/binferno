@@ -20,7 +20,7 @@ from typing import Dict, List, Tuple, Optional
 from ..utils import calc_n50
 from .base import BaseTrainer
 from ..features import BinfernoFeatureBuilder
-from .models.COMEBin_models import SimCLRNet, EmbeddingNet
+from .models.COMEBin_models import SimCLRNet, EmbeddingNet, RankTaxonomyEncoder
 from .models.simclr import NeuralNetwork
 from .InfoNCEloss import info_nce_loss, InfoNCEHardNegative
 from .base import (
@@ -32,6 +32,8 @@ from .base import (
     TAX_NODE_INDICES,
     PARENTAL_ARRAY,
 )
+from ..clustering.marker_quality import parse_hmmout, resolve_orf_to_contig
+from ..utils import run_hmmsearch_pyhmmer, run_pyrodigal
 
 KMER_DIM = 136
 
@@ -92,6 +94,22 @@ class SimCLRTrainer(BaseTrainer):
     auxiliary_loss: bool = Field(
         default=False,
         description="Whether to include an auxiliary loss on the individual view embeddings in addition to the main InfoNCE loss on the fused embeddings. This can help encourage the model to learn useful representations in each view before fusion.",
+    )
+    # weight_tax: float = Field(
+    #     default=0.5,
+    #     description="The weight applied to taxonomic embeddings within the neural network."
+    # )
+    # tax_dropout: float = Field(
+    #     default=0.0, 
+    #     description="The dropout probability is zeroed for the taxonomy encoding."
+    # )
+    get_taxout: bool = Field(
+        default=False,
+        description="The switch for getting taxonomy embeddings."
+    )
+    bin_tax_emb: bool = Field(
+        default=False,
+        description="Decide whether to use taxonomy features only to get the resulting bins."
     )
 
     def __call__(
@@ -165,12 +183,14 @@ class SimCLRTrainer(BaseTrainer):
             simclr=True,
         )
 
-        if tax_df is not None:
+        if tax_df is not None and not tax_df.empty:
             tax_df = self.sort_features_by_method(
                 tax_df,
                 contig_ids=namelist,
                 simclr=True,
             )
+        else:
+            tax_df = None
 
         # self.unify_seeds(
         #     self.seed
@@ -202,11 +222,26 @@ class SimCLRTrainer(BaseTrainer):
                 use_bn=True,
             ).to(device)
 
+            tax_model = None
+            in_size = composition_dim + self.output_dim
             if tax_emb_dim > 0:
-                in_size = composition_dim + self.output_dim + tax_emb_dim
-            else:
-                in_size = composition_dim + self.output_dim
-
+                taxonomy_ranks = features.taxonomy.ranks()
+                tax_columns = [f"tax_{rank}" for rank in taxonomy_ranks]
+                mask_columns = [f"mask_{rank}" for rank in taxonomy_ranks]
+                expected_columns = tax_columns + mask_columns
+                if set(tax_df.columns) != set(expected_columns):
+                    raise ValueError(
+                        "Taxonomy columns must contain rank IDs and rank masks; "
+                        f"expected {expected_columns}, got {tax_df.columns.tolist()}."
+                    )
+                # Older caches interleaved each ID with its mask. Canonicalize
+                # the layout before constructing datasets and inference tensors.
+                tax_df = tax_df[expected_columns]
+                vocab_sizes = [int(tax_df[column].max()) + 1 for column in tax_columns]
+                tax_model = RankTaxonomyEncoder(
+                    vocab_sizes=vocab_sizes, out_sz=self.output_dim
+                ).to(device)
+                in_size += self.output_dim
             model = SimCLRNet(
                 in_sz=in_size,
                 out_sz=self.output_dim,
@@ -215,8 +250,7 @@ class SimCLRTrainer(BaseTrainer):
                 ps=[0.2] * 2,
                 actn=nn.LeakyReLU(),
                 cov_model=cov_model,
-                cnn=cnn,
-                lstm=lstm,
+                tax_model=tax_model,
             ).to(device)
         else:
             model = NeuralNetwork(
@@ -248,7 +282,8 @@ class SimCLRTrainer(BaseTrainer):
             logger.info(
                 f"Model already exists at {model_path}. Loading the model and skipping training."
             )
-            model.load_state_dict(torch.load(model_path))
+            map_location = torch.device("cpu") if not torch.cuda.is_available() else torch.device("cuda")
+            model.load_state_dict(torch.load(model_path, map_location=map_location))
         elif self.simclrnet:
             model = self.simclrnet_train(
                 dataloader=train_loader,
@@ -381,17 +416,37 @@ class SimCLRTrainer(BaseTrainer):
                 "Length weight is empty. Please check the contigs input and the length_weight function."
             )
 
-        # Simplified: Always single dataset (no separate tax_df path)
-        # Since __init__.py now returns tax_df=None always
-        train_dataset = torch.utils.data.TensorDataset(
-            *[
-                dataset[i][
-                    np.array([length_weight[name] for name in namelist])
-                    >= contig_length
-                ]
-                for i in range(n_views)
-            ]
+        length_mask = (
+            np.array([length_weight[name] for name in namelist]) >= contig_length
         )
+        retained_contigs = int(length_mask.sum())
+        if retained_contigs < 2:
+            raise ValueError(
+                "SimCLR requires at least two contigs after length filtering; "
+                f"found {retained_contigs}."
+            )
+        train_dataset = torch.utils.data.TensorDataset(
+            *[dataset[i][length_mask] for i in range(n_views)]
+        )
+
+        tax_dataset = None
+        if tax_df is not None and not tax_df.empty:
+            if not tax_df.index.equals(data_df.index):
+                raise ValueError(
+                    "Taxonomic features must have the same ordered indices as canonical features."
+                )
+            tax_dataset = list(
+                torch.split(torch.from_numpy(tax_df.values).float(), len(namelist))
+            )
+            if len(tax_dataset) != n_views:
+                raise ValueError(
+                    f"Number of taxonomy views ({len(tax_dataset)}) does not match "
+                    f"the expected number of views ({n_views})."
+                )
+            train_dataset = torch.utils.data.TensorDataset(
+                *[dataset[i][length_mask] for i in range(n_views)],
+                *[tax_dataset[i][length_mask] for i in range(n_views)],
+            )
 
         # Keep multiprocessing options conservative to avoid native worker crashes
         # on some PyTorch/HPC stacks (fork + pinned memory + persistent workers).
@@ -401,7 +456,7 @@ class SimCLRTrainer(BaseTrainer):
 
         dataloader_kwargs = {
             "dataset": train_dataset,
-            "batch_size": batch_size,
+            "batch_size": min(batch_size, retained_contigs),
             "shuffle": True,
             "num_workers": requested_workers,
             "pin_memory": torch.cuda.is_available(),
@@ -418,6 +473,11 @@ class SimCLRTrainer(BaseTrainer):
             )
 
         train_loader = torch.utils.data.DataLoader(**dataloader_kwargs)
+        if len(train_loader) == 0:
+            raise RuntimeError(
+                "SimCLR produced no training batches. Check batch size and "
+                "contig filtering."
+            )
 
         if simclrnet:
             optimizer = torch.optim.AdamW(
@@ -438,7 +498,10 @@ class SimCLRTrainer(BaseTrainer):
                 warmup=False,
                 max_lr_hold_epochs=self.max_lr_epochs,
             )
-        return train_loader, optimizer, scheduler, dataset
+        inference_dataset = (
+            (dataset, tax_dataset) if tax_dataset is not None else dataset
+        )
+        return train_loader, optimizer, scheduler, inference_dataset
 
     def accuracy(self, output, target, topk=(1,)):
         """Computes the accuracy over the k top predictions for the specified values of k"""
@@ -683,6 +746,7 @@ class SimCLRTrainer(BaseTrainer):
             num_skipped = 0
 
             for contig_features in dataloader:
+                tax_features = None
                 # identify whether contig_features is a list of tensors.
                 if len(contig_features) > n_views:
                     # first n_views are canonical features, the rest until the end are taxonomic features.
@@ -694,11 +758,8 @@ class SimCLRTrainer(BaseTrainer):
                     tax_features = torch.cat(tax_emb, dim=0).to(
                         device, non_blocking=True
                     )
-                    # concatenation of composition features and taxonomic features for the model input.
-                    x_comp = torch.cat(
-                        [contig_features[:, :kmer_dim], tax_features], dim=1
-                    )  # composition features + taxonomic features, wait, we haven't normalized after concatenation.
-                    x_cov = contig_features[:, self.n_cov :]  # coverage features
+                    x_cov = contig_features[:, :n_cov]
+                    x_comp = contig_features[:, n_cov:]
 
                 else:
                     contig_features = torch.cat(contig_features, dim=0).to(
@@ -712,7 +773,7 @@ class SimCLRTrainer(BaseTrainer):
                 with torch.amp.autocast(
                     enabled=use_cuda, device_type=device.type, dtype=amp_dtype
                 ):
-                    features, _ = model(x_comp, x_cov)
+                    features, _ = model(x_comp, x_cov, tax_features)
 
                 actual_batch_size = contig_features.shape[0] // n_views
                 loss, batch_acc = info_nceloss_fn(
@@ -729,7 +790,9 @@ class SimCLRTrainer(BaseTrainer):
                         logger.warning(
                             f"First non-finite InfoNCE loss at epoch {epoch_counter + 1}; probing:"
                         )
-                        _first_nonfinite_report(model, x_comp, x_cov, logger)
+                        _first_nonfinite_report(
+                            model, x_comp, x_cov, tax_features, logger
+                        )
                     optimizer.zero_grad(set_to_none=True)
                     continue
 
@@ -754,10 +817,10 @@ class SimCLRTrainer(BaseTrainer):
             skip_frac = num_skipped / max(total_batches, 1)
 
             if num_steps == 0:
-                logger.error(
-                    f"Epoch {epoch_counter + 1}: every batch was non-finite. Aborting."
+                raise RuntimeError(
+                    f"Epoch {epoch_counter + 1}: every observed batch was "
+                    "non-finite; no model checkpoint was written."
                 )
-                break
 
             avg_loss = total_loss / num_steps
             avg_acc1 = total_acc1 / num_steps
@@ -831,9 +894,10 @@ class SimCLRTrainer(BaseTrainer):
             if buf.dtype.is_floating_point and not torch.isfinite(buf).all()
         ]
         if bad_bn:
-            logger.error(
+            raise RuntimeError(
                 f"Non-finite BatchNorm buffers after training: {bad_bn[:5]}"
-                f"{' ...' if len(bad_bn) > 5 else ''}. Eval-mode embeddings will be NaN."
+                f"{' ...' if len(bad_bn) > 5 else ''}. Refusing to save "
+                "an invalid model."
             )
 
         torch.save(model.state_dict(), model_path)
@@ -860,7 +924,7 @@ class SimCLRTrainer(BaseTrainer):
 
             print(f"length of original dataset: {len(data)}")
 
-            if isinstance(data, List):  # Only canonical tnf and coverage features.
+            if not isinstance(data, tuple):  # Only canonical tnf and coverage features.
                 out = np.concatenate(
                     [
                         model(
@@ -905,14 +969,9 @@ class SimCLRTrainer(BaseTrainer):
                 out = np.concatenate(
                     [
                         model(
-                            torch.cat(
-                                [
-                                    data[0][i : i + bs_, :kmer_len],
-                                    tax_data[0][i : i + bs_, :],
-                                ],
-                                dim=1,
-                            ).to(device),
-                            data[0][i : i + bs_, kmer_len:].to(device),
+                            data[0][i : i + bs_, n_cov:].to(device),
+                            data[0][i : i + bs_, :n_cov].to(device),
+                            tax_data[0][i : i + bs_].to(device),
                         )[0]
                         .to("cpu")
                         .numpy()
@@ -929,14 +988,9 @@ class SimCLRTrainer(BaseTrainer):
                     covout = np.concatenate(
                         [
                             model(
-                                torch.cat(
-                                    [
-                                        data[0][i : i + bs_, :kmer_len],
-                                        tax_data[0][i : i + bs_, :],
-                                    ],
-                                    dim=1,
-                                ).to(device),
-                                data[0][i : i + bs_, kmer_len:].to(device),
+                                data[0][i : i + bs_, n_cov:].to(device),
+                                data[0][i : i + bs_, :n_cov].to(device),
+                                tax_data[0][i : i + bs_].to(device),
                             )[1]
                             .to("cpu")
                             .numpy()
@@ -949,7 +1003,28 @@ class SimCLRTrainer(BaseTrainer):
                     cov_embeddings_df.to_csv(
                         str(outfile), sep="\t", header=True, index=True
                     )
-
+                if self.get_taxout:
+                    taxout = np.concatenate(
+                        [
+                            model(
+                                data[0][i : i + bs_, n_cov:].to(device),
+                                data[0][i : i + bs_, :n_cov].to(device),
+                                tax_data[0][i : i + bs_].to(device),
+                            )[2]
+                            .to("cpu")
+                            .numpy()
+                            for i in range(0, len(data[0]), bs_)
+                        ],
+                        axis=0,
+                    )
+                    tax_embeddings_df = pd.DataFrame(taxout, index=namelist)
+                    outfile = output_path.parent / "tax_embeddings.tsv"
+                    tax_embeddings_df.to_csv(
+                        str(outfile), sep="\t", header=True, index=True
+                    )
+                    if self.bin_tax_emb is True:
+                        embeddings_df = tax_embeddings_df
+                
         return embeddings_df
 
     def gen_views(
@@ -1095,6 +1170,29 @@ class SimCLRTrainer(BaseTrainer):
         return FragMent_Dict, All_Fragments
 
 
+def _first_nonfinite_report(model, x_comp, x_cov, tax_features, logger):
+    """Report which model output first becomes non-finite."""
+    with torch.no_grad():
+        stats = {"cov_model_out": model.cov_model(x_cov)}
+        if model.tax_model is not None and tax_features is not None:
+            stats["tax_model_out"] = model.tax_model(tax_features)
+        feats, cov_out = model(x_comp, x_cov, tax_features)
+        stats["backbone_out"] = feats
+        stats["cov_out"] = cov_out
+        for name, tensor in stats.items():
+            finite_values = tensor[torch.isfinite(tensor)]
+            maximum = (
+                finite_values.abs().max().item()
+                if finite_values.numel()
+                else float("nan")
+            )
+            logger.warning(
+                f"  [nan-probe] {name}: "
+                f"all_finite={torch.isfinite(tensor).all().item()}, "
+                f"finite_abs_max={maximum:.4e}, dtype={tensor.dtype}"
+            )
+
+
 class EarlyStoppingManagerSimCLR:
     def __init__(self, patience=10):
         self.patience = patience
@@ -1126,31 +1224,3 @@ class EarlyStoppingManagerSimCLR:
     def get_best_state(self):
         """Return the best checkpoint state and its associated loss and top accuracy."""
         return self._saved_state, self._lowest_loss, self._top_acc
-
-    def _first_nonfinite_report(self, model, x_comp, x_cov, logger):
-        """Run the forward again in fp32 and in the training dtype, and report
-        where the first non-finite value appears. Cheap: called at most once."""
-        with torch.no_grad():
-            stats = {}
-            h = model.cov_model(x_cov)
-            stats["cov_model_out"] = h
-            feats, cov_out = model(x_comp, x_cov)
-            stats["backbone_out"] = feats
-            stats["cov_out"] = cov_out
-            for name, t in stats.items():
-                finite = torch.isfinite(t).all().item()
-                amax = (
-                    t.abs()[torch.isfinite(t)].max().item()
-                    if t.numel()
-                    else float("nan")
-                )
-                logger.warning(
-                    f"  [nan-probe] {name}: all_finite={finite}, max|x| (finite)={amax:.4e}, "
-                    f"dtype={t.dtype}"
-                )
-            logger.warning(
-                f"  [nan-probe] inputs: comp max|x|={x_comp.abs().max().item():.4e}, "
-                f"cov max|x|={x_cov.abs().max().item():.4e}, "
-                f"comp finite={torch.isfinite(x_comp).all().item()}, "
-                f"cov finite={torch.isfinite(x_cov).all().item()}"
-            )

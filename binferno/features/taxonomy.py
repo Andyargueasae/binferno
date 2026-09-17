@@ -1,7 +1,6 @@
 from pathlib import Path
 
-from pydantic import Field
-import networkx as nx
+from pydantic import Field, PrivateAttr
 import pandas as pd
 import loguru
 from typing import List, Dict, Tuple
@@ -58,19 +57,44 @@ class TaxonomyFeatureBuilder(BaseFeatureBuilder):
         Path(),
         description="Path to a TSV file containing taxonomic classifications for each contig. Columns: contig_id, taxonomy_string.",
     )
+    _ranks: List[str] = PrivateAttr(default_factory=lambda: TAXONOMIC_RANKS.copy())
+    _vocabularies: Dict[str, Dict[str, int]] | None = PrivateAttr(default=None)
 
-    def __call__(self, contigs: Path, logger: loguru._logger.Logger) -> pd.DataFrame:
-        """
-        Constructs a taxonomy graph and returns it as a DataFrame.
+    def ranks(self) -> List[str]:
+        return self._ranks.copy()
 
-        Parameters:
-        - contigs: A Path object pointing to the contig file.
-        - logger: A loguru logger for logging information.
-
-        Returns:
-        - A DataFrame representing the taxonomy graph.
-        """
+    def __call__(
+        self, contigs: Path, logger: loguru._logger.Logger
+    ) -> Tuple[pd.DataFrame, Dict[str, Dict[str, int]]]:
+        """Build rank-specific features for FASTA contigs represented in the TSV."""
         taxonomy_df = pd.read_csv(self.taxonomy, sep="\t", header=0)
+        missing_columns = set(TAXONOMY_HEADER) - set(taxonomy_df.columns)
+        if missing_columns:
+            raise ValueError(
+                f"Taxonomy TSV is missing required columns: {sorted(missing_columns)}"
+            )
+        if taxonomy_df["contigs"].duplicated().any():
+            duplicates = taxonomy_df.loc[
+                taxonomy_df["contigs"].duplicated(), "contigs"
+            ].tolist()
+            raise ValueError(
+                f"Taxonomy TSV contains duplicate contig IDs: {duplicates[:5]}"
+            )
+
+        with Path(contigs).open() as fasta_handle:
+            fasta_ids = {
+                line[1:].split()[0] for line in fasta_handle if line.startswith(">")
+            }
+        in_fasta = taxonomy_df["contigs"].isin(fasta_ids)
+        ignored = int((~in_fasta).sum())
+        if ignored:
+            logger.warning(
+                f"Ignoring {ignored} taxonomy rows whose contig IDs are absent "
+                "from the input FASTA."
+            )
+        taxonomy_df = taxonomy_df.loc[in_fasta].copy()
+        if taxonomy_df.empty:
+            raise ValueError("No taxonomy rows match the input FASTA contig IDs.")
         return self.fit_transform(taxonomy_df)
 
     @staticmethod
@@ -106,16 +130,16 @@ class TaxonomyFeatureBuilder(BaseFeatureBuilder):
         into a rank dictionary.
         """
 
-        result = {rank: None for rank in self.ranks}
+        result = {rank: None for rank in self._ranks}
 
         if lineage is None or pd.isna(lineage):
             return result
 
         parts = [self._clean_taxon(x) for x in str(lineage).split(";")]
 
-        parts = parts[: len(self.ranks)]
+        parts = parts[: len(self._ranks)]
 
-        for rank, taxon in zip(self.ranks, parts):
+        for rank, taxon in zip(self._ranks, parts):
             result[rank] = taxon
 
         return result
@@ -135,7 +159,7 @@ class TaxonomyFeatureBuilder(BaseFeatureBuilder):
 
         vocabularies = {}
 
-        for rank in self.ranks:
+        for rank in self._ranks:
             taxa = sorted(
                 {lineage[rank] for lineage in parsed if lineage[rank] is not None}
             )
@@ -148,7 +172,7 @@ class TaxonomyFeatureBuilder(BaseFeatureBuilder):
 
             vocabularies[rank] = vocab
 
-        self.vocabularies = vocabularies
+        self._vocabularies = vocabularies
 
         return self
 
@@ -157,7 +181,7 @@ class TaxonomyFeatureBuilder(BaseFeatureBuilder):
         taxonomy_table: pd.DataFrame,
     ) -> pd.DataFrame:
 
-        if self.vocabularies is None:
+        if self._vocabularies is None:
             raise RuntimeError(
                 "TaxonomyFeatureBuilder.fit() must be called before transform()."
             )
@@ -171,7 +195,7 @@ class TaxonomyFeatureBuilder(BaseFeatureBuilder):
 
             record = {"contig_id": contig_id}
 
-            for rank in self.ranks:
+            for rank in self._ranks:
 
                 taxon = lineage[rank]
 
@@ -180,7 +204,7 @@ class TaxonomyFeatureBuilder(BaseFeatureBuilder):
                     mask = 0.0
 
                 else:
-                    tax_id = self.vocabularies[rank].get(
+                    tax_id = self._vocabularies[rank].get(
                         taxon,
                         0,
                     )
@@ -199,8 +223,11 @@ class TaxonomyFeatureBuilder(BaseFeatureBuilder):
         taxonomy_df = pd.DataFrame(records)
 
         taxonomy_df = taxonomy_df.set_index("contig_id")
-
-        return taxonomy_df
+        ordered_columns = [
+            *[f"tax_{rank}" for rank in self._ranks],
+            *[f"mask_{rank}" for rank in self._ranks],
+        ]
+        return taxonomy_df[ordered_columns]
 
     def fit_transform(
         self,
@@ -211,9 +238,4 @@ class TaxonomyFeatureBuilder(BaseFeatureBuilder):
 
         taxonomy_df = self.transform(taxonomy_table)
 
-        return taxonomy_df, self.vocabularies
-
-
-def iterator(itr):
-    for item in itr:
-        yield item
+        return taxonomy_df, self._vocabularies

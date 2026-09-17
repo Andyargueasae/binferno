@@ -3,6 +3,7 @@ from typing import Dict, List, Optional, Tuple
 import pickle
 
 import pandas as pd
+import numpy as np
 from pydantic import Field
 import loguru
 from sklearn.preprocessing import normalize
@@ -42,6 +43,10 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
         default=True,
         description="Whether to L2 normalize Corgi features before concatenation.",
     )
+    corgi_reduction: bool = Field(
+        default=False,
+        description="Whether to apply dimensionality reduction to Corgi features before concatenation, mutually exclusive with corgi_l2_normalize.",
+    )
     save_features: bool = Field(
         default=True,
         description="Whether to save the generated features as tsv files in the output directory.",
@@ -78,14 +83,44 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
                 use_dnabert_s, or use_taxonomy to True."
             )
         feature_path = output_dir / "features.tsv"
+        taxonomy_path = output_dir / "taxonomy_features.tsv"
+        fragment_ids = [header for header, _ in All_Fragments]
 
         if feature_path.exists():
             logger.info("Loading existing features...")
             resulting_features = pd.read_csv(
                 feature_path, sep="\t", index_col=0, header=0
             )
-            # Always return None for second output (unified matrix approach)
-            return [resulting_features, None], self._get_kmer_dim()
+            cached_ids = resulting_features.index.tolist()
+            if (
+                resulting_features.index.is_unique
+                and len(cached_ids) == len(fragment_ids)
+                and set(cached_ids) == set(fragment_ids)
+            ):
+                taxonomy_features = None
+                if self.use_taxonomy:
+                    if taxonomy_path.exists():
+                        taxonomy_features = pd.read_csv(
+                            taxonomy_path, sep="\t", index_col=0, header=0
+                        )
+                        if (
+                            taxonomy_features.index.is_unique
+                            and taxonomy_features.index.tolist() == cached_ids
+                        ):
+                            return [
+                                resulting_features,
+                                taxonomy_features,
+                            ], self._get_kmer_dim()
+                    logger.warning(
+                        "Ignoring cached canonical features because its taxonomy "
+                        "cache is missing or has different fragment IDs."
+                    )
+                else:
+                    return [resulting_features, None], self._get_kmer_dim()
+            logger.warning(
+                "Ignoring cached features because their contig/view IDs do not "
+                "match the current augmented fragments."
+            )
 
         canonical_features = pd.DataFrame()
 
@@ -118,22 +153,46 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
         # STEP 2: Load CORGI/TAXONOMY features and INTEGRATE into main matrix
         corgi_df = None
         dnabert_s_df = None
+        contig_taxonomy_df = None
 
         if self.use_taxonomy:
             logger.info("Generating taxonomy features...")
-            tax_nodes, tax_node_indices, parental_array, contig_taxonomy_df = (
-                self.taxonomy.__call__(
-                    contigs=contigs,
-                    logger=logger,
-                )
+            contig_taxonomy_df, taxonomy_vocabularies = self.taxonomy(
+                contigs=contigs,
+                logger=logger,
             )
-            contig_taxonomy_df = contig_taxonomy_df.set_index("contig_id")
-            # Integrate taxonomy features into main matrix
-            canonical_features = pd.concat(
-                [canonical_features, contig_taxonomy_df], axis=1
-            )  # Now: [coverage, taxonomy]
+            if not contig_taxonomy_df.index.is_unique:
+                raise ValueError("Taxonomy TSV contains duplicate contig IDs.")
+            if fragment_ids:
+                base_contig_ids = [
+                    fragment_id.rsplit(".", 1)[0] for fragment_id in fragment_ids
+                ]
+                missing_taxonomy = sorted(
+                    set(base_contig_ids) - set(contig_taxonomy_df.index)
+                )
+                if missing_taxonomy:
+                    preview = ", ".join(missing_taxonomy[:5])
+                    raise ValueError(
+                        f"Taxonomy is missing {len(missing_taxonomy)} contig IDs "
+                        f"required by augmented fragments (examples: {preview})."
+                    )
+                contig_taxonomy_df = contig_taxonomy_df.reindex(base_contig_ids).copy()
+                contig_taxonomy_df.index = pd.Index(
+                    fragment_ids, name=contig_taxonomy_df.index.name
+                )
+            # Taxon IDs are categorical; keep them out of the continuous
+            # coverage/composition matrix and encode them in a dedicated model.
+            if not np.isfinite(contig_taxonomy_df.to_numpy(dtype=float)).all():
+                raise ValueError("Taxonomy features contain NaN or infinite values.")
+            if self.save_features:
+                contig_taxonomy_df.to_csv(
+                    taxonomy_path, index=True, header=True, sep="\t"
+                )
+            unique_taxa = sum(
+                len(vocabulary) - 1 for vocabulary in taxonomy_vocabularies.values()
+            )
             logger.info(
-                f"Taxonomy of the data contains {len(tax_node_indices)} unique taxa."
+                f"Taxonomy of the data contains {unique_taxa} rank-specific taxa."
             )
         elif self.use_corgi:
             logger.info("Generating Corgi features...")
@@ -156,6 +215,12 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
                 corgi_df = pd.DataFrame(
                     normalize(corgi_df), index=corgi_df.index, columns=corgi_df.columns
                 )
+            if self.corgi_reduction:
+                corgi_df = pd.DataFrame(
+                    self.dim_reduce(corgi_df.values, n_components=50),
+                    index=corgi_df.index,
+                )
+                corgi_df.columns = [str(col) for col in corgi_df.columns]
 
             canonical_features = pd.concat(
                 [canonical_features, corgi_df], axis=1
@@ -206,14 +271,33 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
                     else None
                 )
 
-            kmer_df = pd.DataFrame(
-                normalize(kmer_df), index=kmer_df.index, columns=kmer_df.columns
-            )
+            # so here there might be an information loss if we normalize kmer again,
+            # because kmer itself is already normalized inside the kmer feature computation.
+            # kmer_df = pd.DataFrame(
+            #     normalize(kmer_df), index=kmer_df.index, columns=kmer_df.columns
+            # )
+
             canonical_features = pd.concat(
                 [canonical_features, kmer_df], axis=1
             )  # Final: [coverage, corgi/dnabert_s/taxonomy, kmer]
 
-        # STEP 4: Save and return UNIFIED feature matrix
+        # STEP 4: Enforce exact alignment before saving. Pandas concatenation
+        # otherwise turns missing feature rows into silent NaNs.
+        if fragment_ids:
+            expected_index = pd.Index(fragment_ids)
+            if (
+                not canonical_features.index.is_unique
+                or not canonical_features.index.equals(expected_index)
+            ):
+                missing = expected_index.difference(canonical_features.index).tolist()
+                extra = canonical_features.index.difference(expected_index).tolist()
+                raise ValueError(
+                    "Feature IDs do not exactly match augmented fragment IDs "
+                    f"(missing={missing[:5]}, extra={extra[:5]})."
+                )
+        if not np.isfinite(canonical_features.to_numpy(dtype=float)).all():
+            raise ValueError("Canonical features contain NaN or infinite values.")
+
         canonical_features.to_csv(
             output_dir / "features.tsv", index=True, header=True, sep="\t"
         )
@@ -222,13 +306,25 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
         coverage_dim = coverage_df.shape[1] if coverage_df is not None else 0
         corgi_dim = corgi_df.shape[1] if corgi_df is not None else 0
         dnabert_s_dim = dnabert_s_df.shape[1] if dnabert_s_df is not None else 0
+        taxonomy_dim = (
+            contig_taxonomy_df.shape[1] if contig_taxonomy_df is not None else 0
+        )
 
         logger.info(
             f"Generated unified features with dimensions - \
-            Coverage: {coverage_dim}, Corgi: {corgi_dim}, DNABERT-S: {dnabert_s_dim}, Kmer: {kmer_dim}. \
-            Total dimensions: {canonical_features.shape[1]}"
+            Coverage: {coverage_dim}, Corgi: {corgi_dim}, DNABERT-S: {dnabert_s_dim}, \
+            Taxonomy (separate): {taxonomy_dim}, Kmer: {kmer_dim}. \
+            Canonical dimensions: {canonical_features.shape[1]}"
         )
 
-        # Return UNIFIED feature matrix and None (no separate taxonomy features)
-        # This matches old binferno behavior
-        return [canonical_features, None], kmer_dim
+        return [canonical_features, contig_taxonomy_df], kmer_dim
+
+    def dim_reduce(self, embeddings: np.ndarray, n_components: int = 50) -> np.ndarray:
+        """
+        Reduce the dimensionality of the embeddings using PCA.
+        """
+        from sklearn.decomposition import PCA
+
+        pca = PCA(n_components=n_components)
+        reduced_embeddings = pca.fit_transform(embeddings)
+        return reduced_embeddings

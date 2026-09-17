@@ -1,7 +1,7 @@
 import hashlib
 import itertools
 import os
-from collections import OrderedDict
+from collections import Counter, defaultdict, OrderedDict
 from pathlib import Path
 
 from typing import Dict, Tuple, List, Optional, Sequence
@@ -9,7 +9,7 @@ from pydantic import Field
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, Dataset, TensorDataset
 from torch.backends import cudnn
 import torch.nn.functional as F
 import numpy as np
@@ -30,6 +30,86 @@ from .base import (
     label_augmented_views,
 )
 from .WeightedBTLoss import WeightedBTLoss
+from ..clustering.marker_quality import parse_hmmout, resolve_orf_to_contig
+from ..utils import run_hmmsearch_pyhmmer, run_pyrodigal
+
+
+class SCGMarginLoss(nn.Module):
+    """Soft cannot-link loss for contigs carrying the same SCG.
+
+    This loss operates on the fused representation used for clustering, not
+    on the Barlow Twins projector output.
+    """
+
+    def __init__(self, margin: float = 0.4):
+        super().__init__()
+        if not -1.0 <= margin <= 1.0:
+            raise ValueError("margin must be between -1 and 1")
+        self.margin = float(margin)
+
+    def forward_pairs(
+        self,
+        embedding1: torch.Tensor,
+        embedding2: torch.Tensor,
+        weights: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Evaluate already matched same-marker, different-contig pairs."""
+        similarity = F.cosine_similarity(embedding1, embedding2, dim=1)
+        losses = F.relu(similarity - self.margin).square()
+        if weights is None:
+            return losses.mean()
+        weights = weights.to(device=losses.device, dtype=losses.dtype)
+        return (losses * weights).sum() / weights.sum().clamp_min(1e-12)
+
+    def forward(
+        self,
+        embeddings: torch.Tensor,
+        marker_ids: torch.Tensor,
+        contig_ids: torch.Tensor,
+        pair_weights: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Build the same-marker/different-contig mask within a mixed batch."""
+        embeddings = F.normalize(embeddings, dim=1)
+        similarities = embeddings @ embeddings.T
+        pair_mask = marker_ids[:, None].eq(marker_ids[None, :])
+        pair_mask &= contig_ids[:, None].ne(contig_ids[None, :])
+        pair_mask &= torch.triu(
+            torch.ones_like(pair_mask, dtype=torch.bool), diagonal=1
+        )
+        if not pair_mask.any():
+            return embeddings.sum() * 0.0
+
+        losses = F.relu(similarities[pair_mask] - self.margin).square()
+        if pair_weights is None:
+            return losses.mean()
+        pair_weights = pair_weights.to(device=losses.device, dtype=losses.dtype)
+        weights = (pair_weights[:, None] * pair_weights[None, :])[pair_mask]
+        return (losses * weights).sum() / weights.sum().clamp_min(1e-12)
+
+
+class SCGPairDataset(Dataset):
+    """Memory-efficient view of same-marker contig pairs."""
+
+    def __init__(self, features, pairs, marker_ids, contig_ids, weights):
+        self.features = torch.from_numpy(features.astype(np.float32, copy=False))
+        self.pairs = torch.from_numpy(pairs.astype(np.int64, copy=False))
+        self.marker_ids = torch.from_numpy(marker_ids.astype(np.int64, copy=False))
+        self.contig_ids = torch.from_numpy(contig_ids.astype(np.int64, copy=False))
+        self.weights = torch.from_numpy(weights.astype(np.float32, copy=False))
+
+    def __len__(self) -> int:
+        return len(self.pairs)
+
+    def __getitem__(self, index: int):
+        left, right = self.pairs[index]
+        return (
+            self.features[left],
+            self.features[right],
+            self.marker_ids[index],
+            self.contig_ids[index, 0],
+            self.contig_ids[index, 1],
+            self.weights[index],
+        )
 
 
 def build_fragment_length_map(fragment_dict: Dict) -> Dict[str, int]:
@@ -183,6 +263,7 @@ def weight_diagnostics(w: np.ndarray, batch_size: int = 1024) -> Dict[str, float
 
 
 class BarlowTwinsTrainer(BaseTrainer):
+    # Basic parameters.
     learning_rate: float = Field(
         default=2.5e-3, description="Learning rate for training."
     )
@@ -217,6 +298,7 @@ class BarlowTwinsTrainer(BaseTrainer):
         default=2048,
         description="Dimension of the projection head used in the Barlow Twins architecture. The projection head is a small neural network that maps the output of the main encoder to a space where the Barlow Twins loss is applied. A larger proj_head_dim can allow for more complex transformations and potentially better performance, but it also increases the number of parameters and computational cost of the model.",
     )
+    # Weighted-barlowtwins loss terms.
     weight_tau: float = Field(
         default=0.0,
         description="Length-precision exponent for the Barlow Twins loss. 0 "
@@ -237,6 +319,46 @@ class BarlowTwinsTrainer(BaseTrainer):
         description="Guarantee every contig keeps one positive pair when the "
         "pair set exceeds max_positive_pairs. False reproduces the uniform "
         "sampler, which starved 7,423 of 131,042 contigs on a real run.",
+    )
+    # SCG cannot-link loss.
+    lambda_scg: float = Field(
+        default=0.0,
+        ge=0.0,
+        description="Weight of the SCG cannot-link loss. Zero disables marker search and all SCG computation.",
+    )
+    cosine_margin: float = Field(
+        default=0.4,
+        ge=-1.0,
+        le=1.0,
+        description="Maximum tolerated cosine similarity for same-SCG contigs.",
+    )
+    scg_batch_size: int = Field(
+        default=128, ge=2, description="Maximum contigs retained per marker group."
+    )
+    scg_update_freq: int = Field(
+        default=2, ge=1, description="Apply one SCG batch every N standard batches."
+    )
+    scg_loss_warmup: int = Field(
+        default=10,
+        ge=0,
+        description="Epochs used to linearly warm up the SCG loss weight.",
+    )
+    scg_marker_hmm: Path = Field(
+        default=Path(__file__).resolve().parent.parent
+        / "auxiliary"
+        / "marker.hmm",
+        description="Prokaryotic single-copy marker HMM collection.",
+    )
+    scg_max_evalue: float = Field(
+        default=1e-10,
+        gt=0.0,
+        description="Full-sequence E-value threshold for accepted SCG hits.",
+    )
+    scg_min_hmm_coverage: float = Field(
+        default=0.75,
+        gt=0.0,
+        le=1.0,
+        description="Minimum fraction of the marker HMM covered by an accepted domain.",
     )
 
     def __call__(
@@ -355,6 +477,23 @@ class BarlowTwinsTrainer(BaseTrainer):
             logger=logger,
         )
 
+        scg_dataloader = None
+        if self.lambda_scg > 0.0:
+            logger.info("Adding SCG cannot-link loss to Barlow Twins training.")
+            scg_groups = self.build_scg_groups(
+                contigs=contigs,
+                known_contigs=namelist,
+                output_dir=output_train_dir / "scg",
+                threads=threads,
+                logger=logger,
+            )
+            scg_dataloader = self.prepare_scg_loader(
+                data_df=feature_df,
+                marker_groups=scg_groups,
+                num_workers=threads,
+                logger=logger,
+            )
+
         model_path = output_train_dir / "best_model.pt"
         if not model_path.exists():
             model = self.train(
@@ -367,6 +506,7 @@ class BarlowTwinsTrainer(BaseTrainer):
                 model=model,
                 output_dir=output_train_dir,
                 logger=logger,
+                scg_dataloader=scg_dataloader,
             )
         else:
             logger.info(
@@ -724,6 +864,153 @@ class BarlowTwinsTrainer(BaseTrainer):
             else:
                 return TensorDataset(features1, features2, base_ids, w)
 
+    def build_scg_groups(
+        self,
+        contigs: Path,
+        known_contigs: Sequence[str],
+        output_dir: Path,
+        threads: int,
+        logger,
+    ) -> Dict[str, List[str]]:
+        """Run a cached prokaryotic SCG search and return trusted marker groups."""
+        marker_hmm = Path(self.scg_marker_hmm)
+        if not marker_hmm.is_file():
+            raise FileNotFoundError(f"SCG marker HMM does not exist: {marker_hmm}")
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+        faa_path = output_dir / f"{Path(contigs).name}.scg.faa"
+        hmmout_path = output_dir / f"{Path(contigs).name}.scg.domtblout"
+        if not faa_path.exists():
+            run_pyrodigal(contig_file=contigs, faa_path=faa_path, threads=threads)
+        if not hmmout_path.exists() or hmmout_path.stat().st_size == 0:
+            run_hmmsearch_pyhmmer(
+                hmm_path=marker_hmm,
+                faa_path=faa_path,
+                domtblout_path=hmmout_path,
+                threads=threads,
+                e_value=self.scg_max_evalue,
+            )
+
+        full_length_hits = set()
+        with hmmout_path.open() as handle:
+            for line in handle:
+                if line.startswith("#") or not line.strip():
+                    continue
+                columns = line.split()
+                if len(columns) < 17:
+                    continue
+                try:
+                    hmm_length = float(columns[5])
+                    hmm_from, hmm_to = int(columns[15]), int(columns[16])
+                except ValueError:
+                    continue
+                coverage = (hmm_to - hmm_from + 1) / max(hmm_length, 1.0)
+                if coverage >= self.scg_min_hmm_coverage:
+                    full_length_hits.add((columns[0], columns[3]))
+
+        hits = parse_hmmout(
+            hmmout_path, max_evalue=self.scg_max_evalue, best_hit_per_orf=False
+        )
+        hits = [hit for hit in hits if (hit.orf_id, hit.hmm_name) in full_length_hits]
+        best_by_orf = {}
+        for hit in hits:
+            previous = best_by_orf.get(hit.orf_id)
+            if previous is None or hit.score > previous.score:
+                best_by_orf[hit.orf_id] = hit
+        hits = list(best_by_orf.values())
+        if not hits:
+            raise ValueError(
+                "SCG search produced no hits passing the HMM coverage threshold"
+            )
+        orf_to_contig, join_report, _ = resolve_orf_to_contig(
+            [hit.orf_id for hit in hits], known_contigs
+        )
+        known_contig_set = set(known_contigs)
+        hit_counts = Counter(
+            (orf_to_contig[hit.orf_id], hit.hmm_name)
+            for hit in hits
+            if orf_to_contig[hit.orf_id] in known_contig_set
+        )
+        groups = defaultdict(list)
+        for (contig_id, marker_id), count in hit_counts.items():
+            if count == 1:
+                groups[marker_id].append(contig_id)
+        groups = {
+            marker: sorted(set(contig_ids))
+            for marker, contig_ids in groups.items()
+            if len(set(contig_ids)) >= 2
+        }
+        if not groups:
+            raise ValueError(
+                "SCG search produced no marker shared by at least two single-copy contigs"
+            )
+        logger.info(
+            f"SCG search: {len(hits)} accepted hits, "
+            f"{len(groups)} usable marker groups, ORF join {join_report.rate:.1%}."
+        )
+        return groups
+
+    def prepare_scg_loader(
+        self,
+        data_df: pd.DataFrame,
+        marker_groups: Dict[str, List[str]],
+        num_workers: int = 0,
+        logger=None,
+    ) -> DataLoader:
+        """Construct same-marker pairs from original (unaugmented) contigs."""
+        suffix = ".original"
+        original_rows = [
+            row for row, name in enumerate(data_df.index) if name.endswith(suffix)
+        ]
+        original_names = [data_df.index[row][: -len(suffix)] for row in original_rows]
+        contig_to_row = {name: row for row, name in enumerate(original_names)}
+        contig_to_id = {name: idx for idx, name in enumerate(original_names)}
+
+        usable_groups = {
+            marker: sorted({name for name in names if name in contig_to_row})
+            for marker, names in marker_groups.items()
+        }
+        usable_groups = {k: v for k, v in usable_groups.items() if len(v) >= 2}
+        memberships = Counter(
+            name for names in usable_groups.values() for name in names
+        )
+        rng = random.Random(self.seed)
+        pairs, marker_ids, contig_ids, weights = [], [], [], []
+        for marker_id, marker in enumerate(sorted(usable_groups)):
+            names = usable_groups[marker]
+            if len(names) > self.scg_batch_size:
+                names = sorted(rng.sample(names, self.scg_batch_size))
+            for left, right in itertools.combinations(names, 2):
+                pairs.append((contig_to_row[left], contig_to_row[right]))
+                marker_ids.append(marker_id)
+                contig_ids.append((contig_to_id[left], contig_to_id[right]))
+                weights.append(1.0 / (memberships[left] * memberships[right]))
+
+        if not pairs:
+            raise ValueError("No SCG cannot-link pairs overlap the training features")
+        original_features = data_df.iloc[original_rows].to_numpy(
+            dtype=np.float32, copy=True
+        )
+        dataset = SCGPairDataset(
+            features=original_features,
+            pairs=np.asarray(pairs),
+            marker_ids=np.asarray(marker_ids),
+            contig_ids=np.asarray(contig_ids),
+            weights=np.asarray(weights),
+        )
+        logger.info(
+            f"SCG loader: {len(dataset)} cannot-link pairs from "
+            f"{len(usable_groups)} marker groups."
+        )
+        return DataLoader(
+            dataset,
+            batch_size=min(self.scg_batch_size, len(dataset)),
+            shuffle=True,
+            num_workers=max(0, num_workers),
+            worker_init_fn=self.seed_worker,
+            pin_memory=torch.cuda.is_available(),
+        )
+
     def prepare_trainer(
         self,
         model,
@@ -808,6 +1095,7 @@ class BarlowTwinsTrainer(BaseTrainer):
         model=None,
         output_dir: Path = None,
         logger=loguru._logger.Logger,
+        scg_dataloader: Optional[DataLoader] = None,
     ):
         MODEL_PATH = output_dir / "best_model.pt"
         if logger is None:
@@ -824,6 +1112,8 @@ class BarlowTwinsTrainer(BaseTrainer):
                 dataloader=dataloader,
                 optimizer=optimizer,
                 device=device,
+                scg_dataloader=scg_dataloader,
+                epoch=epoch,
             )
 
             scheduler.step()
@@ -863,6 +1153,8 @@ class BarlowTwinsTrainer(BaseTrainer):
         dataloader: torch.utils.data.DataLoader,
         optimizer: torch.optim.Optimizer,
         device: torch.device,
+        scg_dataloader: Optional[DataLoader] = None,
+        epoch: int = 0,
     ):
         criterion = WeightedBTLoss(lambda_bt=5e-3, alpha=1.0).to(device)
         model.train()
@@ -871,6 +1163,15 @@ class BarlowTwinsTrainer(BaseTrainer):
         stats = None
         is_htax = model.hierarchical_taxonomy
         num_batches = len(dataloader)
+        scg_criterion = SCGMarginLoss(self.cosine_margin).to(device)
+        scg_iterator = iter(scg_dataloader) if scg_dataloader is not None else None
+        scg_loss_sum = 0.0
+        scg_updates = 0
+        scg_scale = (
+            1.0
+            if self.scg_loss_warmup == 0
+            else min(1.0, float(epoch + 1) / self.scg_loss_warmup)
+        )
 
         for batch_i, batch_data in enumerate(
             dataloader
@@ -933,6 +1234,28 @@ class BarlowTwinsTrainer(BaseTrainer):
                     w=w,
                 )
 
+            if scg_iterator is not None and batch_i % self.scg_update_freq == 0:
+                try:
+                    scg_batch = next(scg_iterator)
+                except StopIteration:
+                    scg_iterator = iter(scg_dataloader)
+                    scg_batch = next(scg_iterator)
+                scg_features1, scg_features2, _, _, _, scg_weights = scg_batch
+                scg_features = torch.cat([scg_features1, scg_features2], dim=0).to(
+                    device, non_blocking=True
+                )
+                scg_weights = scg_weights.to(device, non_blocking=True)
+                scg_embeddings = model.encode(scg_features)
+                split = len(scg_features1)
+                scg_loss = scg_criterion.forward_pairs(
+                    scg_embeddings[:split],
+                    scg_embeddings[split:],
+                    scg_weights,
+                )
+                total_loss = total_loss + self.lambda_scg * scg_scale * scg_loss
+                scg_loss_sum += scg_loss.detach().item()
+                scg_updates += 1
+
             total_loss.backward()
 
             torch.nn.utils.clip_grad_norm_(
@@ -943,6 +1266,10 @@ class BarlowTwinsTrainer(BaseTrainer):
             sum_loss += total_loss.item()  # sum loss.
 
         avg_loss = sum_loss / len(dataloader)
+        if stats is not None and scg_updates:
+            stats["scg_loss"] = scg_loss_sum / scg_updates
+            stats["scg_weight_scale"] = self.lambda_scg * scg_scale
+            stats["scg_updates"] = scg_updates
         return avg_loss, stats
 
     def calculate_loss(

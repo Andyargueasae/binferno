@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-from typing import Optional, Dict
 
 
 class NeuralNetwork(nn.Module):
@@ -94,9 +93,7 @@ class NeuralNetwork(nn.Module):
                 nn.LeakyReLU(),
             )
 
-    def _encode(
-        self, x: torch.Tensor, tax_emb: torch.Tensor = None
-    ) -> tuple[torch.Tensor, Optional[None | Dict]]:
+    def _encode(self, x: torch.Tensor, tax_emb: torch.Tensor = None) -> torch.Tensor:
         tnf_features = x[:, : self.tnf_enc_dim]
         cov_features = x[:, self.tnf_enc_dim :]
         tnf_encode = self.tnf_encoder(tnf_features)
@@ -104,8 +101,12 @@ class NeuralNetwork(nn.Module):
         fused_encode = self.fusion_network(tnf_encode, cov_encode)  # 128
         return fused_encode
 
+    def encode(self, x: torch.Tensor, tax_emb: torch.Tensor = None) -> torch.Tensor:
+        """Return the fused, pre-projector representation used for clustering."""
+        return self._encode(x, tax_emb)
+
     def get_embedding(self, x):
-        return self._encode(x)
+        return self.encode(x)
 
     def get_separate_modality_embs(self, x):
         kmer_features = x[:, : self.tnf_enc_dim]
@@ -116,7 +117,7 @@ class NeuralNetwork(nn.Module):
 
     # keep unchanged for forward functions.
     def forward_one(self, x: torch.Tensor, tax_emb: torch.Tensor = None):
-        fused_emb = self._encode(x, tax_emb)
+        fused_emb = self.encode(x, tax_emb)
         proj_emb = self.proj_head(fused_emb)
         return proj_emb
 
