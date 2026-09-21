@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from typing import Optional
+from .taxonomy_gate import bounded_taxonomy_residual
 
 
 # Shared COMEBin-style block builder (kept behavior-identical).
@@ -22,39 +23,6 @@ def _bn_drop_lin(
     if actn is not None:
         layers.append(actn)
     return layers
-
-
-def _bn_drop_cnn(
-    n_in: int,
-    n_out: int,
-    bn: bool = True,
-    p: float = 0.0,
-    actn: Optional[nn.Module] = None,
-):
-    layers = [nn.BatchNorm1d(n_in)] if bn else []
-    if p != 0:
-        layers.append(nn.Dropout(p))
-    layers.append(nn.Conv1d(n_in, n_out, kernel_size=3, padding=1))
-    if actn is not None:
-        layers.append(actn)
-    return layers
-
-
-def _bn_drop_lstm(
-    n_in: int,
-    n_out: int,
-    bn: bool = True,
-    p: float = 0.0,
-    actn: Optional[nn.Module] = None,
-):
-    layers = [nn.BatchNorm1d(n_in)] if bn else []
-    if p != 0:
-        layers.append(nn.Dropout(p))
-    layers.append(nn.LSTM(n_in, n_out, batch_first=True))
-    if actn is not None:
-        layers.append(actn)
-    return layers
-
 
 # Shared COMEBin MLP stack builder for EmbeddingNet/SimCLRNet.
 def _build_embedding_stack(
@@ -85,91 +53,6 @@ def _build_embedding_stack(
     # output layer
     layers.append(nn.Linear(emb_szs[-1], out_sz))
     return nn.Sequential(*layers)
-
-
-class CNNEmbeddingStack(nn.Module):
-    """CNN alternative with the same [B, D] -> [B, out_sz] contract as the MLP."""
-
-    def __init__(self, in_sz, out_sz, ps=0.0, actn=None):
-        super().__init__()
-        p = float(ps if isinstance(ps, (int, float)) else (ps[0] if len(ps) else 0.0))
-        # Capacity-matched to the COMEBin SimCLR MLP used with
-        # emb_szs=[2048, 2048, 2048] (~8.94M parameters for 136 -> 128).
-        # Global pooling prevents the parameter explosion that would occur
-        # if all 136 spatial positions were flattened before projection.
-        self.net = nn.Sequential(
-            nn.Conv1d(1, 1024, kernel_size=3, padding=1),
-            nn.BatchNorm1d(1024),
-            nn.ReLU() if actn is None else actn,
-            nn.Dropout(p),
-            nn.Conv1d(1024, 1280, kernel_size=3, padding=1),
-            nn.BatchNorm1d(1280),
-            nn.ReLU() if actn is None else actn,
-            nn.Dropout(p),
-            nn.Conv1d(1280, 1280, kernel_size=3, padding=1),
-            nn.BatchNorm1d(1280),
-            nn.ReLU() if actn is None else actn,
-            nn.AdaptiveAvgPool1d(1),
-        )
-        self.out = nn.Linear(1280, out_sz)
-
-    def forward(self, x):
-        if x.ndim != 2:
-            raise ValueError(f"CNNEmbeddingStack expects [B, D], got {tuple(x.shape)}")
-        x = self.net(x.unsqueeze(1)).squeeze(-1)
-        return self.out(x)
-
-
-class LSTMEmbeddingStack(nn.Module):
-    """LSTM alternative with the same [B, D] -> [B, out_sz] contract as the MLP."""
-
-    def __init__(self, in_sz, out_sz, ps=0.0):
-        super().__init__()
-        p = float(ps if isinstance(ps, (int, float)) else (ps[0] if len(ps) else 0.0))
-        # hidden_size=864 gives ~9.09M parameters for a 2-layer LSTM
-        # plus the final 864 -> out_sz projection, closely matching the
-        # ~8.94M-parameter 3x2048 SimCLR MLP baseline.
-        self.lstm = nn.LSTM(
-            input_size=1,
-            hidden_size=864,
-            num_layers=2,
-            batch_first=True,
-            dropout=p,
-        )
-        self.out = nn.Linear(864, out_sz)
-
-    def forward(self, x):
-        if x.ndim != 2:
-            raise ValueError(f"LSTMEmbeddingStack expects [B, D], got {tuple(x.shape)}")
-        _, (h_n, _) = self.lstm(x.unsqueeze(-1))
-        return self.out(h_n[-1])
-
-
-def build_embedding_stack_cnn(
-    in_sz,
-    out_sz,
-    emb_szs,
-    ps,
-    use_bn=True,
-    actn=nn.ReLU(),
-):
-    # emb_szs/use_bn are kept in the signature so this remains a drop-in
-    # builder alongside _build_embedding_stack.
-    return CNNEmbeddingStack(in_sz=in_sz, out_sz=out_sz, ps=ps, actn=actn)
-
-
-def build_embedding_stack_lstm(
-    in_sz,
-    out_sz,
-    emb_szs,
-    ps,
-    use_bn=True,
-    actn=nn.ReLU(),
-):
-    # LSTM is implemented as a dedicated module rather than nn.Sequential,
-    # because nn.LSTM returns (output, (h_n, c_n)).
-    return LSTMEmbeddingStack(in_sz=in_sz, out_sz=out_sz, ps=ps)
-
 
 # The raw COMEBin's embedding network is a simple MLP with batch normalization and dropout. We can use it as a baseline model for our experiments. We can also implement a more complex fusion network later to see if we can improve the performance.
 class EmbeddingNet(nn.Module):
@@ -233,8 +116,6 @@ class RankTaxonomyEncoder(nn.Module):
         encoded = []
         for rank, embedding in enumerate(self.embeddings):
             ids = taxon_ids[:, rank]
-            if ids.numel() and (ids.min() < 0 or ids.max() >= embedding.num_embeddings):
-                raise ValueError(f"Taxonomy ID is out of range at rank {rank}.")
             encoded.append(embedding(ids) * masks[:, rank : rank + 1])
         return self.projection(torch.cat([*encoded, masks], dim=1))
 
@@ -257,6 +138,7 @@ class SimCLRNet(nn.Module):
         cnn=False,
         lstm=False,
         get_taxout=False,
+        alpha_tax: float = 0.05,
     ):
         super(SimCLRNet, self).__init__()
         self.pretrained_model = pretrained_model
@@ -266,38 +148,19 @@ class SimCLRNet(nn.Module):
         self.out_sz = out_sz
         self.n_embs = len(emb_szs) - 1
         self.covmodel_notl2normalize = covmodel_notl2normalize
-
-        assert not (
-            cnn is True and lstm is True
-        ), "Only one of cnn or lstm can be True."
-
-        if not cnn and not lstm:
-            self.fc = _build_embedding_stack(
-                in_sz=self.in_sz,
-                out_sz=self.out_sz,
-                emb_szs=emb_szs,
-                ps=ps,
-                use_bn=use_bn,
-                actn=actn,
-            )
-        elif cnn:
-            self.fc = build_embedding_stack_cnn(
-                in_sz=self.in_sz,
-                out_sz=self.out_sz,
-                emb_szs=emb_szs,
-                ps=ps,
-                use_bn=use_bn,
-                actn=actn,
-            )
-        elif lstm:
-            self.fc = build_embedding_stack_lstm(
-                in_sz=self.in_sz,
-                out_sz=self.out_sz,
-                emb_szs=emb_szs,
-                ps=ps,
-                use_bn=use_bn,
-                actn=actn,
-            )
+        if not 0.0 <= alpha_tax <= 0.2:
+            raise ValueError("alpha_tax must be between 0 and 0.2.")
+        self.alpha_tax = alpha_tax
+ 
+        self.fc = _build_embedding_stack(
+            in_sz=self.in_sz,
+            out_sz=self.out_sz,
+            emb_szs=emb_szs,
+            ps=ps,
+            use_bn=use_bn,
+            actn=actn,
+        )
+        
 
     def bn_drop_lin(
         self,
@@ -342,17 +205,19 @@ class SimCLRNet(nn.Module):
                 raise ValueError(
                     "Taxonomic features are required when SimCLRNet has a tax_model."
                 )
-            # taxonomy, if too vague for some contigs, can split genomes.
-            # try to make a gate here. 
-            x = torch.cat([x, F.normalize(self.tax_model(x3))], dim=-1)
-
         output = self.fc(x)
+
+        if self.tax_model is not None:
+            tax_output = self.tax_model(x3)
+            output = bounded_taxonomy_residual(
+                output, tax_output, x3, self.alpha_tax
+            )
 
         if self.cov_model is not None:
             if self.pretrained_model is not None:
                 return output, self.cov_model(x2), kmeremb
             elif self.pretrained_model is None and self.tax_model is not None:
-                return output, self.cov_model(x2), self.tax_model(x3)
+                return output, self.cov_model(x2), tax_output
             return output, self.cov_model(x2)
         else:
             return output  # F.normalize(output) #output #/ torch.linalg.vector_norm(output, dim=-1, keepdim=True)

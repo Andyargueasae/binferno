@@ -9,7 +9,7 @@ from pydantic import Field
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, Dataset
 from torch.backends import cudnn
 import torch.nn.functional as F
 import numpy as np
@@ -21,6 +21,7 @@ import loguru
 
 from .models.barlow_twins import NeuralNetwork
 from .models.new_htax_encoder import HierarchicalTaxonomyEncoder
+from .models.taxonomy_gate import validate_rank_taxonomy_table
 from ..features.taxonomy import TAXONOMIC_RANKS
 from ..features import BinfernoFeatureBuilder
 from .base import (
@@ -34,10 +35,63 @@ from .base import (
 from .WeightedBTLoss import WeightedBTLoss
 from .scg import (
     SCGMarginLoss,
-    SCGPairDataset,
     build_scg_groups as build_shared_scg_groups,
-    prepare_scg_loader as prepare_shared_scg_loader,
+    prepare_scg_group_loader,
 )
+
+
+
+class PositivePairDataset(Dataset):
+    """Gather paired views from one canonical feature matrix."""
+
+    def __init__(self, features, pair_indices, base_ids, weights,
+                 taxonomy=None, taxonomy_mask=None):
+        self.features = torch.from_numpy(np.ascontiguousarray(features, dtype=np.float32))
+        index_dtype = np.int32 if len(features) < 2**31 else np.int64
+        self.pair_indices = torch.from_numpy(
+            np.ascontiguousarray(pair_indices, dtype=index_dtype)
+        )
+        self.base_ids = base_ids
+        self.weights = weights
+        self.taxonomy = (
+            None if taxonomy is None
+            else torch.from_numpy(np.ascontiguousarray(taxonomy, dtype=np.float32))
+        )
+        self.taxonomy_mask = taxonomy_mask
+
+    def __len__(self):
+        return len(self.pair_indices)
+
+    def __getitem__(self, index):
+        left, right = self.pair_indices[index].tolist()
+        batch = [self.features[left], self.features[right]]
+        if self.taxonomy is not None:
+            batch.extend([self.taxonomy[left], self.taxonomy[right]])
+        if self.taxonomy_mask is not None:
+            batch.append(self.taxonomy_mask[index])
+        batch.extend([self.base_ids[index], self.weights[index]])
+        return tuple(batch)
+
+    def __getitems__(self, indices):
+        """Gather one DataLoader batch with vectorized row lookup."""
+        pairs = self.pair_indices[indices].long()
+        left, right = pairs[:, 0], pairs[:, 1]
+        first = self.features[left]
+        second = self.features[right]
+        tax_first = tax_second = None
+        if self.taxonomy is not None:
+            tax_first = self.taxonomy[left]
+            tax_second = self.taxonomy[right]
+        samples = []
+        for offset, index in enumerate(indices):
+            sample = [first[offset], second[offset]]
+            if tax_first is not None:
+                sample.extend([tax_first[offset], tax_second[offset]])
+            if self.taxonomy_mask is not None:
+                sample.append(self.taxonomy_mask[index])
+            sample.extend([self.base_ids[index], self.weights[index]])
+            samples.append(tuple(sample))
+        return samples
 
 
 def build_fragment_length_map(fragment_dict: Dict) -> Dict[str, int]:
@@ -248,6 +302,13 @@ class BarlowTwinsTrainer(BaseTrainer):
         "pair set exceeds max_positive_pairs. False reproduces the uniform "
         "sampler, which starved 7,423 of 131,042 contigs on a real run.",
     )
+    # Weighting taxonomy embeddings inside barlowtwins model.
+    alpha_tax: float = Field(
+        default=0.10,
+        ge=0.0,
+        le=0.20, 
+        description="A small weight used to contrain taxonomy's impact on the resulting features."
+    )
     # SCG cannot-link loss.
     lambda_scg: float = Field(
         default=0.0,
@@ -265,6 +326,9 @@ class BarlowTwinsTrainer(BaseTrainer):
     )
     scg_update_freq: int = Field(
         default=2, ge=1, description="Apply one SCG batch every N standard batches."
+    )
+    scg_hard_pairs: int = Field(
+        default=1024, ge=1, description="Maximum hardest same-marker pairs per SCG update."
     )
     scg_loss_warmup: int = Field(
         default=10,
@@ -373,9 +437,9 @@ class BarlowTwinsTrainer(BaseTrainer):
                     f"{missing_rows[:5].tolist()}"
                 )
             taxonomy_df = taxonomy_df.reindex(feature_df.index)[expected_columns]
-            taxonomy_vocab_sizes = [
-                int(taxonomy_df[column].max()) + 1 for column in tax_columns
-            ]
+            taxonomy_vocab_sizes = validate_rank_taxonomy_table(
+                taxonomy_df, tax_columns, mask_columns
+            )
 
         self.unify_seeds(
             self.seed
@@ -414,6 +478,7 @@ class BarlowTwinsTrainer(BaseTrainer):
             proj_head_dim=self.proj_head_dim,
             corgi_dim=corgi_dim,
             output_dim=self.output_dim,
+            alpha_tax=self.alpha_tax,
             cnn=cnn,
             lstm=lstm,
         ).to(
@@ -805,11 +870,8 @@ class BarlowTwinsTrainer(BaseTrainer):
 
         def construct_tensordatasets_from_pairs(
             self, logger: loguru._logger.Logger = None
-        ) -> TensorDataset:
-            """
-            Convert selected positive pairs into a TensorDataset of:
-                (feature1, feature2, base_id)
-            """
+        ) -> PositivePairDataset:
+            """Keep one feature matrix and gather selected positive pairs on demand."""
             X = self.data_df.to_numpy(dtype=np.float32, copy=False)
             if isinstance(self.taxonomy_features, pd.DataFrame):
                 tax_X = self.taxonomy_features.to_numpy(dtype=np.float32, copy=False)
@@ -833,12 +895,10 @@ class BarlowTwinsTrainer(BaseTrainer):
                 X
             ).any(), "data_df contains Inf values before TensorDataset construction."
 
-            pair_indices = np.asarray(self.training_pairs, dtype=np.int64)
+            pair_dtype = np.int32 if len(X) < 2**31 else np.int64
+            pair_indices = np.asarray(self.training_pairs, dtype=pair_dtype)
             idx1 = pair_indices[:, 0]
             idx2 = pair_indices[:, 1]
-
-            features1 = torch.from_numpy(X[idx1].copy())
-            features2 = torch.from_numpy(X[idx2].copy())
 
             base_ids_np = np.fromiter(
                 (self.index_to_base_id[i] for i in idx1),
@@ -868,36 +928,27 @@ class BarlowTwinsTrainer(BaseTrainer):
                     f"min={w.min():.3f} max={w.max():.3f} "
                     f"n_eff_ratio={(1.0/((w/w.sum())**2).sum()/len(w)):.3f}"
                 )
-            if tax_X is not None:
-                tax_features1 = torch.from_numpy(tax_X[idx1].copy())
-                tax_features2 = torch.from_numpy(tax_X[idx2].copy())
-                if not self.h_tax:
-                    return TensorDataset(
-                        features1, features2, tax_features1, tax_features2, base_ids, w
+            mask = None
+            if tax_X is not None and self.h_tax:
+                # Keep the legacy hierarchical mask aligned with selected pairs.
+                mask = torch.zeros(len(idx1), dtype=torch.bool)
+                for i, idx in enumerate(idx1):
+                    base_name = self._extract_base_name(self.data_df.index[idx])
+                    tax = (
+                        taxonomy_df.loc[base_name]["tax_node_idx"]
+                        if base_name in taxonomy_df.index
+                        else node_indices.get("root", -1)
                     )
-                else:
-                    # turn idx1 to base name, and then reindex base names to get mask.
-                    mask = torch.zeros(len(idx1), dtype=torch.bool)
-                    for i, idx in enumerate(idx1):  # idx1 is the index
-                        base_name = self._extract_base_name(self.data_df.index[idx])
-                        tax = (
-                            taxonomy_df.loc[base_name]["tax_node_idx"]
-                            if base_name in taxonomy_df.index
-                            else node_indices.get("root", -1)
-                        )
-                        if tax != node_indices.get("root", -1):
-                            mask[i] = True
-                    return TensorDataset(
-                        features1,
-                        features2,
-                        tax_features1,
-                        tax_features2,
-                        mask,
-                        base_ids,
-                        w,
-                    )
-            else:
-                return TensorDataset(features1, features2, base_ids, w)
+                    if tax != node_indices.get("root", -1):
+                        mask[i] = True
+            return PositivePairDataset(
+                features=X,
+                pair_indices=pair_indices,
+                base_ids=base_ids,
+                weights=w,
+                taxonomy=tax_X,
+                taxonomy_mask=mask,
+            )
 
     def build_scg_groups(
         self,
@@ -926,13 +977,14 @@ class BarlowTwinsTrainer(BaseTrainer):
         num_workers: int = 0,
         logger=None,
     ) -> DataLoader:
-        return prepare_shared_scg_loader(
+        return prepare_scg_group_loader(
             data_df=data_df,
             marker_groups=marker_groups,
             original_suffix=".original",
             batch_size=self.scg_batch_size,
             seed=self.seed,
-            num_workers=num_workers,
+            # The iterator is recycled often; worker copies and restarts cost memory.
+            num_workers=0,
             logger=logger,
             worker_init_fn=self.seed_worker,
             auxiliary_df=(
@@ -1171,26 +1223,23 @@ class BarlowTwinsTrainer(BaseTrainer):
                 except StopIteration:
                     scg_iterator = iter(scg_dataloader)
                     scg_batch = next(scg_iterator)
-                scg_taxonomy = None
-                if len(scg_batch) == 8:
-                    scg_features1, scg_features2, tax1, tax2, _, _, _, scg_weights = (
-                        scg_batch
-                    )
-                    scg_taxonomy = torch.cat([tax1, tax2], dim=0).to(
-                        device, non_blocking=True
-                    )
+                if len(scg_batch) == 5:
+                    scg_features, scg_taxonomy, marker_ids, contig_ids, scg_weights = scg_batch
+                    scg_taxonomy = scg_taxonomy.to(device, non_blocking=True)
                 else:
-                    scg_features1, scg_features2, _, _, _, scg_weights = scg_batch
-                scg_features = torch.cat([scg_features1, scg_features2], dim=0).to(
-                    device, non_blocking=True
-                )
+                    scg_features, marker_ids, contig_ids, scg_weights = scg_batch
+                    scg_taxonomy = None
+                scg_features = scg_features.to(device, non_blocking=True)
+                marker_ids = marker_ids.to(device, non_blocking=True)
+                contig_ids = contig_ids.to(device, non_blocking=True)
                 scg_weights = scg_weights.to(device, non_blocking=True)
                 scg_embeddings = model.encode(scg_features, scg_taxonomy)
-                split = len(scg_features1)
-                scg_loss = scg_criterion.forward_pairs(
-                    scg_embeddings[:split],
-                    scg_embeddings[split:],
-                    scg_weights,
+                scg_loss = scg_criterion(
+                    scg_embeddings,
+                    marker_ids,
+                    contig_ids,
+                    pair_weights=scg_weights,
+                    max_hard_pairs=self.scg_hard_pairs,
                 )
                 total_loss = total_loss + self.lambda_scg * scg_scale * scg_loss
                 scg_loss_sum += scg_loss.detach().item()

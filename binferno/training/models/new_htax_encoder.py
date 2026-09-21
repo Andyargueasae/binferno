@@ -71,10 +71,6 @@ class HierarchicalTaxonomyEncoder(nn.Module):
 
         for rank_idx, embedding_layer in enumerate(self.embeddings):
             ids = tax_ids[:, rank_idx]
-            if ids.numel() and (
-                ids.min() < 0 or ids.max() >= embedding_layer.num_embeddings
-            ):
-                raise ValueError(f"Taxonomy ID is out of range at rank {rank_idx}.")
             emb = embedding_layer(ids)
             mask = tax_mask[:, rank_idx].unsqueeze(1)
             emb = emb * mask

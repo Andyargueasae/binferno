@@ -38,7 +38,14 @@ class SCGMarginLoss(nn.Module):
         weights = weights.to(device=losses.device, dtype=losses.dtype)
         return (losses * weights).sum() / weights.sum().clamp_min(1e-12)
 
-    def forward(self, embeddings, marker_ids, contig_ids, pair_weights=None):
+    def forward(
+        self, embeddings, marker_ids, contig_ids, pair_weights=None,
+        max_hard_pairs=None,
+    ):
+        """Use the hardest violating pairs when a cap is provided.
+
+        The cap changes the SCG loss scale, so tune its weight with the cap.
+        """
         embeddings = F.normalize(embeddings, dim=1)
         similarities = embeddings @ embeddings.T
         pair_mask = marker_ids[:, None].eq(marker_ids[None, :])
@@ -46,13 +53,18 @@ class SCGMarginLoss(nn.Module):
         pair_mask &= torch.triu(
             torch.ones_like(pair_mask, dtype=torch.bool), diagonal=1
         )
-        if not pair_mask.any():
-            return embeddings.sum() * 0.0
         losses = F.relu(similarities[pair_mask] - self.margin).square()
-        if pair_weights is None:
-            return losses.mean()
-        pair_weights = pair_weights.to(device=losses.device, dtype=losses.dtype)
-        weights = (pair_weights[:, None] * pair_weights[None, :])[pair_mask]
+        weights = None
+        if pair_weights is not None:
+            pair_weights = pair_weights.to(device=losses.device, dtype=losses.dtype)
+            weights = (pair_weights[:, None] * pair_weights[None, :])[pair_mask]
+        if max_hard_pairs is not None and losses.numel() > max_hard_pairs:
+            _, hard_indices = torch.topk(losses, max_hard_pairs)
+            losses = losses[hard_indices]
+            if weights is not None:
+                weights = weights[hard_indices]
+        if weights is None:
+            return losses.sum() / max(losses.numel(), 1)
         return (losses * weights).sum() / weights.sum().clamp_min(1e-12)
 
 
@@ -247,6 +259,111 @@ def prepare_scg_loader(
         dataset,
         batch_size=min(batch_size, len(dataset)),
         shuffle=True,
+        num_workers=max(0, num_workers),
+        worker_init_fn=worker_init_fn,
+        pin_memory=torch.cuda.is_available(),
+    )
+
+
+class SCGMarkerGroupDataset(Dataset):
+    """Sample unique contigs within one marker group at each access."""
+
+    def __init__(self, features, groups, memberships, max_contigs, seed,
+                 auxiliary_features=None):
+        self.features = torch.from_numpy(
+            np.ascontiguousarray(features, dtype=np.float32)
+        )
+        self.auxiliary_features = (
+            None if auxiliary_features is None
+            else torch.from_numpy(np.ascontiguousarray(auxiliary_features, dtype=np.float32))
+        )
+        self.groups = groups
+        self.memberships = torch.as_tensor(memberships, dtype=torch.float32)
+        self.max_contigs = max_contigs
+        self.rng = random.Random(seed)
+        # Repeat large groups to give them proportionate opportunities per epoch.
+        self.slots = [
+            marker_id
+            for marker_id, rows in enumerate(groups)
+            for _ in range((len(rows) + max_contigs - 1) // max_contigs)
+        ]
+
+    def __len__(self):
+        return len(self.slots)
+
+    def __getitem__(self, index):
+        marker_id = self.slots[index]
+        rows = self.groups[marker_id]
+        if len(rows) > self.max_contigs:
+            selected = self.rng.sample(rows, self.max_contigs)
+        else:
+            selected = rows
+        contig_ids = torch.as_tensor(selected, dtype=torch.long)
+        batch = [self.features[contig_ids]]
+        if self.auxiliary_features is not None:
+            batch.append(self.auxiliary_features[contig_ids])
+        batch.extend([
+            torch.full((len(selected),), marker_id, dtype=torch.long),
+            contig_ids,
+            self.memberships[contig_ids].reciprocal(),
+        ])
+        return tuple(batch)
+
+
+def prepare_scg_group_loader(
+    data_df: pd.DataFrame,
+    marker_groups: Dict[str, List[str]],
+    original_suffix: str,
+    batch_size: int,
+    seed: int,
+    num_workers: int = 0,
+    logger=None,
+    worker_init_fn=None,
+    auxiliary_df: Optional[pd.DataFrame] = None,
+) -> DataLoader:
+    """Build Barlow SCG batches without storing any contig pairs."""
+    original_rows = [
+        row for row, name in enumerate(data_df.index) if name.endswith(original_suffix)
+    ]
+    original_names = [
+        data_df.index[row][: -len(original_suffix)] for row in original_rows
+    ]
+    contig_to_id = {name: idx for idx, name in enumerate(original_names)}
+    groups = [
+        sorted({contig_to_id[name] for name in names if name in contig_to_id})
+        for _, names in sorted(marker_groups.items())
+    ]
+    groups = [rows for rows in groups if len(rows) >= 2]
+    if not groups:
+        raise ValueError("No SCG marker group overlaps at least two training contigs")
+    if auxiliary_df is not None and not auxiliary_df.index.equals(data_df.index):
+        raise ValueError("SCG auxiliary features must align with canonical features")
+    memberships = np.zeros(len(original_rows), dtype=np.int32)
+    for rows in groups:
+        memberships[rows] += 1
+    auxiliary = (
+        None if auxiliary_df is None
+        else auxiliary_df.iloc[original_rows].to_numpy(dtype=np.float32, copy=True)
+    )
+    dataset = SCGMarkerGroupDataset(
+        features=data_df.iloc[original_rows].to_numpy(dtype=np.float32, copy=True),
+        groups=groups,
+        memberships=memberships,
+        max_contigs=batch_size,
+        seed=seed,
+        auxiliary_features=auxiliary,
+    )
+    if logger is not None:
+        logger.info(
+            f"SCG loader: {len(dataset)} marker-group batches from "
+            f"{len(groups)} marker groups; no stored contig pairs."
+        )
+    generator = torch.Generator().manual_seed(seed)
+    return DataLoader(
+        dataset,
+        batch_size=None,
+        shuffle=True,
+        generator=generator,
         num_workers=max(0, num_workers),
         worker_init_fn=worker_init_fn,
         pin_memory=torch.cuda.is_available(),

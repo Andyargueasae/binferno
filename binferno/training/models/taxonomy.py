@@ -357,9 +357,3 @@ class TaxonomyFusion(nn.Module):
     ):
         # delegate to the head's masked hierarchical loss (optionally length-weighted)
         return self.head.loss(logits, target_idx, mask, weights=weights)
-
-
-# target index: the node index in integer.
-# mask: boolean mask for the contigs that have taxonomy labels.
-# logits: the output of the taxonomy head, which is a tensor of shape [B, n_leaf].
-# weights: optional tensor of shape [B] for weighting the loss per sample by contig length.

@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-
+from .taxonomy_gate import bounded_taxonomy_residual
 
 class NeuralNetwork(nn.Module):
     def __init__(
@@ -18,7 +18,7 @@ class NeuralNetwork(nn.Module):
         h_tax=False,
         tax_model=None,
         h_tax_model=None,
-        alpha: float = 0.0,
+        alpha_tax: float = 0.05,
     ):
         super(NeuralNetwork, self).__init__()
         self.coverage_dim = coverage_dim  # by default we ask users to provide coverage.
@@ -33,6 +33,9 @@ class NeuralNetwork(nn.Module):
         # Keep the development-time name as a compatibility alias.
         self.tax_model = tax_model if tax_model is not None else h_tax_model
         self.uses_rank_taxonomy = self.tax_model is not None
+        if not 0.0 <= alpha_tax <= 0.2:
+            raise ValueError("alpha_tax must be between 0 and 0.2.")
+        self.alpha_tax = alpha_tax
 
         if corgi_dim > 0:  # concat kmer with corgi and run single encoder.
             self.tnf_enc_dim += corgi_dim
@@ -42,31 +45,24 @@ class NeuralNetwork(nn.Module):
             cnn is True and lstm is True
         ), "Only one of cnn or lstm can be True."
         # may add more layers.
-        if not cnn and not lstm:
-            tnf_hidden1 = 512
-            tnf_hidden2 = 256
-            tnf_hidden3 = output_dim
-            self.tnf_encoder = nn.Sequential(
-                nn.Linear(self.tnf_enc_dim, tnf_hidden1),
-                nn.BatchNorm1d(tnf_hidden1),
-                nn.LeakyReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(tnf_hidden1, tnf_hidden2),
-                nn.BatchNorm1d(tnf_hidden2),
-                nn.LeakyReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(tnf_hidden2, tnf_hidden3),
-                nn.BatchNorm1d(tnf_hidden3),
-                nn.LeakyReLU(),
-            )
-        elif cnn:
-            self.tnf_encoder = build_tnf_encoder_cnn(
-                tnf_dim=self.tnf_enc_dim, output_dim=output_dim, dropout=dropout
-            )
-        elif lstm:
-            self.tnf_encoder = build_lstm_encoder(
-                tnf_dim=self.tnf_enc_dim, output_dim=output_dim, dropout=dropout
-            )
+        
+        tnf_hidden1 = 512
+        tnf_hidden2 = 256
+        tnf_hidden3 = output_dim
+        self.tnf_encoder = nn.Sequential(
+            nn.Linear(self.tnf_enc_dim, tnf_hidden1),
+            nn.BatchNorm1d(tnf_hidden1),
+            nn.LeakyReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(tnf_hidden1, tnf_hidden2),
+            nn.BatchNorm1d(tnf_hidden2),
+            nn.LeakyReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(tnf_hidden2, tnf_hidden3),
+            nn.BatchNorm1d(tnf_hidden3),
+            nn.LeakyReLU(),
+        )
+        
 
         # determined by coverage dim.
         self.coverage_encoder = _build_coverage_encoder(
@@ -90,15 +86,6 @@ class NeuralNetwork(nn.Module):
             dropout=0.0,
         )
 
-        if self.uses_rank_taxonomy:
-            self.fuse_tax_fusion = nn.Sequential(
-                nn.Linear(
-                    self.representation_dim + self.output_dim, self.representation_dim
-                ),
-                nn.BatchNorm1d(self.representation_dim),
-                nn.LeakyReLU(),
-            )
-
     def _encode(self, x: torch.Tensor, tax_emb: torch.Tensor = None) -> torch.Tensor:
         tnf_features = x[:, : self.tnf_enc_dim]
         cov_features = x[:, self.tnf_enc_dim :]
@@ -109,9 +96,9 @@ class NeuralNetwork(nn.Module):
             if tax_emb is None:
                 raise ValueError("Taxonomy features are required by this model.")
             tax_encode = self.tax_model(tax_emb)
-            fused_encode = self.fuse_tax_fusion(
-                torch.cat([fused_encode, tax_encode], dim=1)
-            ) # hey wait, the tax encode is finally fused with fused encode?
+            fused_encode = bounded_taxonomy_residual(
+                fused_encode, tax_encode, tax_emb, self.alpha_tax
+            )
         return fused_encode
 
     def encode(self, x: torch.Tensor, tax_emb: torch.Tensor = None) -> torch.Tensor:
@@ -445,84 +432,3 @@ def _build_coverage_encoder(coverage_dim: int, output_dim: int, dropout: float):
             nn.BatchNorm1d(output_dim),
             nn.LeakyReLU(),
         )
-
-
-def build_tnf_encoder_cnn(tnf_dim: int, output_dim: int, dropout: float):
-    """Parameter-efficient CNN encoder for flat TNF vectors.
-
-    Input:  [B, tnf_dim]
-    Output: [B, output_dim]
-
-    TNF is treated as a 1-D ordered feature vector for this architectural
-    ablation. Global average pooling avoids a very large flatten/projection
-    layer and keeps capacity comparable to the MLP baseline.
-    """
-    return TNFCNNEncoder(tnf_dim=tnf_dim, output_dim=output_dim, dropout=dropout)
-
-
-class TNFCNNEncoder(nn.Module):
-    def __init__(self, tnf_dim: int, output_dim: int, dropout: float = 0.05):
-        super().__init__()
-        self.encoder = nn.Sequential(
-            nn.Conv1d(1, 128, kernel_size=3, padding=1),
-            nn.BatchNorm1d(128),
-            nn.LeakyReLU(),
-            nn.Dropout(dropout),
-            nn.Conv1d(128, 192, kernel_size=3, padding=1),
-            nn.BatchNorm1d(192),
-            nn.LeakyReLU(),
-            nn.Dropout(dropout),
-            nn.Conv1d(192, 192, kernel_size=3, padding=1),
-            nn.BatchNorm1d(192),
-            nn.LeakyReLU(),
-            nn.AdaptiveAvgPool1d(1),
-        )
-        self.proj = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(192, output_dim),
-            nn.BatchNorm1d(output_dim),
-            nn.LeakyReLU(),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if x.ndim != 2:
-            raise ValueError(f"TNFCNNEncoder expects [B, D], got {tuple(x.shape)}")
-        x = x.unsqueeze(1)  # [B, 1, D]
-        return self.proj(self.encoder(x))
-
-
-def build_lstm_encoder(tnf_dim: int, output_dim: int, dropout: float):
-    """Parameter-efficient LSTM encoder for flat TNF vectors.
-
-    Input:  [B, tnf_dim]
-    Output: [B, output_dim]
-
-    Each TNF component is treated as one scalar time step. The final hidden
-    state is used instead of flattening all recurrent outputs, keeping the
-    model size comparable to the MLP baseline.
-    """
-    return TNFLSTMEncoder(tnf_dim=tnf_dim, output_dim=output_dim, dropout=dropout)
-
-
-class TNFLSTMEncoder(nn.Module):
-    def __init__(self, tnf_dim: int, output_dim: int, dropout: float = 0.05):
-        super().__init__()
-        self.lstm = nn.LSTM(
-            input_size=1,
-            hidden_size=128,
-            num_layers=2,
-            batch_first=True,
-            dropout=dropout,
-        )
-        self.proj = nn.Sequential(
-            nn.Linear(128, output_dim),
-            nn.BatchNorm1d(output_dim),
-            nn.LeakyReLU(),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if x.ndim != 2:
-            raise ValueError(f"TNFLSTMEncoder expects [B, D], got {tuple(x.shape)}")
-        x = x.unsqueeze(-1)  # [B, D, 1]
-        _, (h_n, _) = self.lstm(x)
-        return self.proj(h_n[-1])

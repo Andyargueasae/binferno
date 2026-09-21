@@ -21,7 +21,8 @@ from ..utils import calc_n50
 from .base import BaseTrainer
 from ..features import BinfernoFeatureBuilder
 from .models.COMEBin_models import SimCLRNet, EmbeddingNet, RankTaxonomyEncoder
-from .models.simclr import NeuralNetwork
+from .models.taxonomy_gate import validate_rank_taxonomy_table
+from .models.old_simclr import NeuralNetwork
 from .InfoNCEloss import info_nce_loss, InfoNCEHardNegative
 from .base import (
     BaseTrainer,
@@ -94,10 +95,12 @@ class SimCLRTrainer(BaseTrainer):
         default=False,
         description="Whether to include an auxiliary loss on the individual view embeddings in addition to the main InfoNCE loss on the fused embeddings. This can help encourage the model to learn useful representations in each view before fusion.",
     )
-    # weight_tax: float = Field(
-    #     default=0.5,
-    #     description="The weight applied to taxonomic embeddings within the neural network."
-    # )
+    alpha_tax: float = Field(
+        default=0.10,
+        ge=0.0,
+        le=0.20,
+        description="The weight applied to taxonomic embeddings within the neural network."
+    )
     # tax_dropout: float = Field(
     #     default=0.0, 
     #     description="The dropout probability is zeroed for the taxonomy encoding."
@@ -243,6 +246,7 @@ class SimCLRTrainer(BaseTrainer):
 
             tax_model = None
             in_size = composition_dim + self.output_dim
+            
             if tax_emb_dim > 0:
                 taxonomy_ranks = features.taxonomy.ranks()
                 tax_columns = [f"tax_{rank}" for rank in taxonomy_ranks]
@@ -256,11 +260,13 @@ class SimCLRTrainer(BaseTrainer):
                 # Older caches interleaved each ID with its mask. Canonicalize
                 # the layout before constructing datasets and inference tensors.
                 tax_df = tax_df[expected_columns]
-                vocab_sizes = [int(tax_df[column].max()) + 1 for column in tax_columns]
+                vocab_sizes = validate_rank_taxonomy_table(
+                    tax_df, tax_columns, mask_columns
+                )
                 tax_model = RankTaxonomyEncoder(
                     vocab_sizes=vocab_sizes, out_sz=self.output_dim
                 ).to(device)
-                in_size += self.output_dim
+
             model = SimCLRNet(
                 in_sz=in_size,
                 out_sz=self.output_dim,
@@ -270,6 +276,7 @@ class SimCLRTrainer(BaseTrainer):
                 actn=nn.LeakyReLU(),
                 cov_model=cov_model,
                 tax_model=tax_model,
+                alpha_tax=self.alpha_tax,
             ).to(device)
         else:
             model = NeuralNetwork(
