@@ -51,15 +51,33 @@ class HierarchicalTaxonomyEncoder(nn.Module):
             [batch, 7]
         """
 
+        if tax_mask is None:
+            expected_width = self.n_ranks * 2
+            if tax_ids.ndim != 2 or tax_ids.shape[1] != expected_width:
+                raise ValueError(
+                    f"Expected taxonomy tensor [B, {expected_width}], "
+                    f"got {tuple(tax_ids.shape)}"
+                )
+            tax_ids, tax_mask = tax_ids.split(self.n_ranks, dim=1)
+        elif tax_ids.ndim != 2 or tax_ids.shape[1] != self.n_ranks:
+            raise ValueError(
+                f"Expected taxonomy IDs [B, {self.n_ranks}], "
+                f"got {tuple(tax_ids.shape)}"
+            )
+
+        tax_ids = tax_ids.long()
+        tax_mask = tax_mask.float().clamp(0.0, 1.0)
         rank_embeddings = []
 
         for rank_idx, embedding_layer in enumerate(self.embeddings):
-
-            emb = embedding_layer(tax_ids[:, rank_idx])
-
-            if tax_mask is not None:
-                mask = tax_mask[:, rank_idx].unsqueeze(1)
-                emb = emb * mask
+            ids = tax_ids[:, rank_idx]
+            if ids.numel() and (
+                ids.min() < 0 or ids.max() >= embedding_layer.num_embeddings
+            ):
+                raise ValueError(f"Taxonomy ID is out of range at rank {rank_idx}.")
+            emb = embedding_layer(ids)
+            mask = tax_mask[:, rank_idx].unsqueeze(1)
+            emb = emb * mask
 
             rank_embeddings.append(emb)
 

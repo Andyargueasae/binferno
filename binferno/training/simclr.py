@@ -32,8 +32,7 @@ from .base import (
     TAX_NODE_INDICES,
     PARENTAL_ARRAY,
 )
-from ..clustering.marker_quality import parse_hmmout, resolve_orf_to_contig
-from ..utils import run_hmmsearch_pyhmmer, run_pyrodigal
+from .scg import SCGMarginLoss, build_scg_groups, prepare_scg_loader
 
 KMER_DIM = 136
 
@@ -111,6 +110,26 @@ class SimCLRTrainer(BaseTrainer):
         default=False,
         description="Decide whether to use taxonomy features only to get the resulting bins."
     )
+    lambda_scg: float = Field(
+        default=0.0,
+        ge=0.0,
+        description="Weight of the SCG cannot-link loss. Zero disables SCG search.",
+    )
+    cosine_margin: float = Field(
+        default=0.4,
+        ge=-1.0,
+        le=1.0,
+        description="Maximum tolerated cosine similarity for same-SCG contigs.",
+    )
+    scg_batch_size: int = Field(default=128, ge=2, description="The batch size of SCG.")
+    scg_update_freq: int = Field(default=2, ge=1, description="The update frequency of SCG.")
+    scg_loss_warmup: int = Field(default=10, ge=0, description="SCG loss's warmup epoch number.")
+    scg_marker_hmm: Path = Field(
+        default=Path(__file__).resolve().parent.parent / "auxiliary" / "marker.hmm",
+        description="The marker gene hmm used for scg detection."
+    )
+    scg_max_evalue: float = Field(default=1e-10, gt=0.0)
+    scg_min_hmm_coverage: float = Field(default=0.75, gt=0.0, le=1.0)
 
     def __call__(
         self,
@@ -277,6 +296,31 @@ class SimCLRTrainer(BaseTrainer):
             num_workers=threads,
         )
 
+        scg_dataloader = None
+        if self.lambda_scg > 0.0:
+            logger.info("Adding SCG cannot-link loss to SimCLR training.")
+            scg_groups = build_scg_groups(
+                contigs=contigs,
+                known_contigs=namelist,
+                output_dir=output_train_dir / "scg",
+                threads=threads,
+                marker_hmm=self.scg_marker_hmm,
+                max_evalue=self.scg_max_evalue,
+                min_hmm_coverage=self.scg_min_hmm_coverage,
+                logger=logger,
+            )
+            scg_dataloader = prepare_scg_loader(
+                data_df=feature_df,
+                auxiliary_df=tax_df,
+                marker_groups=scg_groups,
+                original_suffix=".0",
+                batch_size=self.scg_batch_size,
+                seed=self.seed,
+                num_workers=threads,
+                logger=logger,
+                worker_init_fn=self.seed_worker,
+            )
+
         model_path = output_train_dir / "best_model.pt"
         if model_path.exists():
             logger.info(
@@ -298,6 +342,7 @@ class SimCLRTrainer(BaseTrainer):
                 temperature=temperature,
                 output_dir=output_train_dir,
                 logger=logger,
+                scg_dataloader=scg_dataloader,
             )
         else:
             model = self.train(
@@ -306,12 +351,14 @@ class SimCLRTrainer(BaseTrainer):
                 scheduler=scheduler,
                 device=device,
                 method="simclr",
+                epochs=self.epochs,
                 model=model,
                 logger=logger,
                 n_cov=cov_dim,
                 output_dir=output_train_dir,
                 auxiliary_loss=self.auxiliary_loss,
                 temperature=temperature,
+                scg_dataloader=scg_dataloader,
             )
 
         # in case embeddings isn't exist, get embeddings from the trained model and save to file.
@@ -549,6 +596,49 @@ class SimCLRTrainer(BaseTrainer):
             )
         return contig_length
 
+    def _scg_weight_scale(self, epoch: int) -> float:
+        if self.scg_loss_warmup == 0:
+            return 1.0
+        return min(1.0, float(epoch + 1) / self.scg_loss_warmup)
+
+    @staticmethod
+    def _next_scg_batch(iterator, dataloader):
+        try:
+            return next(iterator), iterator
+        except StopIteration:
+            iterator = iter(dataloader)
+            return next(iterator), iterator
+
+    @staticmethod
+    def _scg_pair_loss(
+        model, batch, criterion, device, n_cov: int, simclrnet: bool
+    ):
+        """Encode an SCG pair in the same representation used for clustering."""
+        features1, features2 = batch[:2]
+        tax1 = tax2 = None
+        if len(batch) == 8:
+            tax1, tax2 = batch[2:4]
+        weights = batch[-1].to(device, non_blocking=True)
+        features = torch.cat([features1, features2], dim=0).to(
+            device, non_blocking=True
+        )
+        split = len(features1)
+        if simclrnet:
+            tax_features = None
+            if tax1 is not None:
+                tax_features = torch.cat([tax1, tax2], dim=0).to(
+                    device, non_blocking=True
+                )
+            encoded = model(
+                features[:, n_cov:], features[:, :n_cov], tax_features
+            )
+            embeddings = encoded[0] if isinstance(encoded, tuple) else encoded
+        else:
+            embeddings = model.get_embedding(features)
+        return criterion.forward_pairs(
+            embeddings[:split], embeddings[split:], weights
+        )
+
     def train(
         self,
         dataloader: torch.utils.data.DataLoader,
@@ -563,6 +653,7 @@ class SimCLRTrainer(BaseTrainer):
         output_dir: Path = None,
         auxiliary_loss: bool = False,
         temperature: float = 0.15,
+        scg_dataloader=None,
     ):
 
         MODEL_PATH = output_dir / "best_model.pt"
@@ -584,6 +675,8 @@ class SimCLRTrainer(BaseTrainer):
                 temperature=temperature,
                 n_cov=n_cov,
                 auxiliary_loss=auxiliary_loss,
+                scg_dataloader=scg_dataloader,
+                epoch=epoch,
             )
 
             scheduler.step()
@@ -630,6 +723,8 @@ class SimCLRTrainer(BaseTrainer):
         temperature=0.15,
         n_cov=0,
         auxiliary_loss=False,
+        scg_dataloader=None,
+        epoch=0,
     ):
         # get the info nce loss, and see if auxiliary loss is needed.
         if not self.hard_weighted_nce:
@@ -643,6 +738,11 @@ class SimCLRTrainer(BaseTrainer):
         stats = None
         total_loss = 0.0
         total_acc = 0.0
+        scg_criterion = SCGMarginLoss(self.cosine_margin).to(device)
+        scg_iterator = iter(scg_dataloader) if scg_dataloader is not None else None
+        scg_loss_sum = 0.0
+        scg_updates = 0
+        scg_scale = self._scg_weight_scale(epoch)
         if n_cov < 0 or n_cov == 0:
             raise ValueError("n_cov must be non-negative.")
 
@@ -675,6 +775,22 @@ class SimCLRTrainer(BaseTrainer):
                 )
                 loss = loss + L_kmer * kmer_loss + L_cov * cov_loss
 
+            if scg_iterator is not None and i % self.scg_update_freq == 0:
+                scg_batch, scg_iterator = self._next_scg_batch(
+                    scg_iterator, scg_dataloader
+                )
+                scg_loss = self._scg_pair_loss(
+                    model=model,
+                    batch=scg_batch,
+                    criterion=scg_criterion,
+                    device=device,
+                    n_cov=n_cov,
+                    simclrnet=False,
+                )
+                loss = loss + self.lambda_scg * scg_scale * scg_loss
+                scg_loss_sum += scg_loss.detach().item()
+                scg_updates += 1
+
             loss.backward()
             optimizer.step()
 
@@ -687,6 +803,12 @@ class SimCLRTrainer(BaseTrainer):
                     "loss": total_loss / len(dataloader),
                     "top1_acc": total_acc / len(dataloader),
                 }
+                if scg_updates:
+                    stats.update(
+                        scg_loss=scg_loss_sum / scg_updates,
+                        scg_weight_scale=self.lambda_scg * scg_scale,
+                        scg_updates=scg_updates,
+                    )
 
         return total_loss / len(dataloader), stats
 
@@ -718,6 +840,8 @@ class SimCLRTrainer(BaseTrainer):
         model_path = output_dir / "best_model.pt"
 
         info_nceloss_fn = info_nce_loss(temperature=temperature).to(device)
+        scg_dataloader = kwargs.get("scg_dataloader")
+        scg_criterion = SCGMarginLoss(self.cosine_margin).to(device)
 
         use_cuda = device.type == "cuda"
         use_fp16 = use_cuda and amp_dtype == torch.float16
@@ -725,7 +849,8 @@ class SimCLRTrainer(BaseTrainer):
 
         logger.info(
             f"Starting SimCLR training: {epochs} epochs, T={temperature}, "
-            f"amp={'off' if not use_cuda else str(amp_dtype)}"
+            f"amp={'off' if not use_cuda else str(amp_dtype)},"
+            f"SCG loss lambda={self.lambda_scg}"
         )
 
         # ---- state that must survive across epochs -------------------------
@@ -744,8 +869,14 @@ class SimCLRTrainer(BaseTrainer):
             total_acc1 = 0.0
             num_steps = 0
             num_skipped = 0
+            scg_iterator = (
+                iter(scg_dataloader) if scg_dataloader is not None else None
+            )
+            scg_loss_sum = 0.0
+            scg_updates = 0
+            scg_scale = self._scg_weight_scale(epoch_counter)
 
-            for contig_features in dataloader:
+            for batch_i, contig_features in enumerate(dataloader):
                 tax_features = None
                 # identify whether contig_features is a list of tensors.
                 if len(contig_features) > n_views:
@@ -773,7 +904,8 @@ class SimCLRTrainer(BaseTrainer):
                 with torch.amp.autocast(
                     enabled=use_cuda, device_type=device.type, dtype=amp_dtype
                 ):
-                    features, _ = model(x_comp, x_cov, tax_features)
+                    encoded = model(x_comp, x_cov, tax_features)
+                    features = encoded[0] if isinstance(encoded, tuple) else encoded
 
                 actual_batch_size = contig_features.shape[0] // n_views
                 loss, batch_acc = info_nceloss_fn(
@@ -782,6 +914,22 @@ class SimCLRTrainer(BaseTrainer):
                     device=device,
                     n_views=n_views,
                 )
+
+                if scg_iterator is not None and batch_i % self.scg_update_freq == 0:
+                    scg_batch, scg_iterator = self._next_scg_batch(
+                        scg_iterator, scg_dataloader
+                    )
+                    scg_loss = self._scg_pair_loss(
+                        model=model,
+                        batch=scg_batch,
+                        criterion=scg_criterion,
+                        device=device,
+                        n_cov=n_cov,
+                        simclrnet=True,
+                    )
+                    loss = loss + self.lambda_scg * scg_scale * scg_loss
+                    scg_loss_sum += scg_loss.detach().item()
+                    scg_updates += 1
 
                 if not torch.isfinite(loss):
                     num_skipped += 1
@@ -829,6 +977,12 @@ class SimCLRTrainer(BaseTrainer):
                 f"Epoch {epoch_counter + 1}/{epochs} - SimCLR Loss: {avg_loss:.4f}, "
                 f"Top-1: {avg_acc1:.2f}%, LR: {optimizer.param_groups[0]['lr']:.2e}, "
                 f"skipped {num_skipped}/{total_batches} ({skip_frac:.1%})"
+                + (
+                    f", SCG: {scg_loss_sum / scg_updates:.4f} "
+                    f"(weight {self.lambda_scg * scg_scale:.4g})"
+                    if scg_updates
+                    else ""
+                )
             )
 
             # Reported loss/acc are averages over surviving batches only. Once a

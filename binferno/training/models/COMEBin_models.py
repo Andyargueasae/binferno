@@ -342,6 +342,8 @@ class SimCLRNet(nn.Module):
                 raise ValueError(
                     "Taxonomic features are required when SimCLRNet has a tax_model."
                 )
+            # taxonomy, if too vague for some contigs, can split genomes.
+            # try to make a gate here. 
             x = torch.cat([x, F.normalize(self.tax_model(x3))], dim=-1)
 
         output = self.fc(x)
@@ -351,5 +353,6 @@ class SimCLRNet(nn.Module):
                 return output, self.cov_model(x2), kmeremb
             elif self.pretrained_model is None and self.tax_model is not None:
                 return output, self.cov_model(x2), self.tax_model(x3)
+            return output, self.cov_model(x2)
         else:
             return output  # F.normalize(output) #output #/ torch.linalg.vector_norm(output, dim=-1, keepdim=True)

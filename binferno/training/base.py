@@ -33,6 +33,11 @@ class BaseTrainer(BaseModel):
         raise NotImplementedError(
             "The __call__ method must be implemented by the subclass."
         )
+    def seed_worker(self, worker_id: int):
+        """Seed worker processes for DataLoader reproducibility."""
+        worker_seed = torch.initial_seed() % 2**10
+        np.random.seed(worker_seed)
+        random.seed(worker_seed)
 
     def unify_seeds(self, seed):
         # synchronize random seeds for reproducibility.

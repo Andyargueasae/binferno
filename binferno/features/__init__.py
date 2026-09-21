@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import pickle
@@ -164,8 +165,10 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
             if not contig_taxonomy_df.index.is_unique:
                 raise ValueError("Taxonomy TSV contains duplicate contig IDs.")
             if fragment_ids:
+                # replace everything after a full stop to void.
                 base_contig_ids = [
-                    fragment_id.rsplit(".", 1)[0] for fragment_id in fragment_ids
+                    re.sub(r"\.(?:h[12]\.)?(?:original|\d+)$", "", fragment_id)
+                    for fragment_id in fragment_ids
                 ]
                 missing_taxonomy = sorted(
                     set(base_contig_ids) - set(contig_taxonomy_df.index)

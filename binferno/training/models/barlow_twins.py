@@ -16,6 +16,9 @@ class NeuralNetwork(nn.Module):
         cnn=False,
         lstm=False,
         h_tax=False,
+        tax_model=None,
+        h_tax_model=None,
+        alpha: float = 0.0,
     ):
         super(NeuralNetwork, self).__init__()
         self.coverage_dim = coverage_dim  # by default we ask users to provide coverage.
@@ -27,6 +30,9 @@ class NeuralNetwork(nn.Module):
         self.corgi_dim = corgi_dim
         self.tax_emb_dim = tax_emb_dim
         self.hierarchical_taxonomy = h_tax
+        # Keep the development-time name as a compatibility alias.
+        self.tax_model = tax_model if tax_model is not None else h_tax_model
+        self.uses_rank_taxonomy = self.tax_model is not None
 
         if corgi_dim > 0:  # concat kmer with corgi and run single encoder.
             self.tnf_enc_dim += corgi_dim
@@ -84,7 +90,7 @@ class NeuralNetwork(nn.Module):
             dropout=0.0,
         )
 
-        if self.tax_emb_dim > 0:
+        if self.uses_rank_taxonomy:
             self.fuse_tax_fusion = nn.Sequential(
                 nn.Linear(
                     self.representation_dim + self.output_dim, self.representation_dim
@@ -99,14 +105,21 @@ class NeuralNetwork(nn.Module):
         tnf_encode = self.tnf_encoder(tnf_features)
         cov_encode = self.coverage_encoder(cov_features)
         fused_encode = self.fusion_network(tnf_encode, cov_encode)  # 128
+        if self.uses_rank_taxonomy:
+            if tax_emb is None:
+                raise ValueError("Taxonomy features are required by this model.")
+            tax_encode = self.tax_model(tax_emb)
+            fused_encode = self.fuse_tax_fusion(
+                torch.cat([fused_encode, tax_encode], dim=1)
+            ) # hey wait, the tax encode is finally fused with fused encode?
         return fused_encode
 
     def encode(self, x: torch.Tensor, tax_emb: torch.Tensor = None) -> torch.Tensor:
         """Return the fused, pre-projector representation used for clustering."""
         return self._encode(x, tax_emb)
 
-    def get_embedding(self, x):
-        return self.encode(x)
+    def get_embedding(self, x, tax_emb: torch.Tensor = None):
+        return self.encode(x, tax_emb)
 
     def get_separate_modality_embs(self, x):
         kmer_features = x[:, : self.tnf_enc_dim]
@@ -131,29 +144,6 @@ class NeuralNetwork(nn.Module):
         z1 = self.forward_one(x1, tax_emb1)
         z2 = self.forward_one(x2, tax_emb2)
         return z1, z2
-
-    def forward_htax(
-        self,
-        x1: torch.Tensor,
-        x2: torch.Tensor,
-        tax_emb1: torch.Tensor,
-        tax_emb2: torch.Tensor,
-    ):
-        z1 = self.forward_one(x1, tax_emb1)
-        z2 = self.forward_one(x2, tax_emb2)
-        return z1, z2
-
-    def forward_with_embs(
-        self,
-        x1: torch.Tensor,
-        x2: torch.Tensor,
-        tax_emb1: torch.Tensor = None,
-        tax_emb2: torch.Tensor = None,
-    ):
-        z1 = self.forward_one(x1, tax_emb1)
-        z2 = self.forward_one(x2, tax_emb2)
-        return z1, z2
-
 
 # The projection head: which directly gives barlow twin loss the projected embeddings, should be looked with careful caution.
 def _build_bt_projector(in_dim, proj_dim=768, n_layers=3, dropout=0.0):
