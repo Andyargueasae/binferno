@@ -34,6 +34,7 @@ class BinfernoClustering(BaseClustering):
         output_path: Path = None,
         logger: loguru._logger.Logger = None,  # type: ignore
         threads: int = 1,
+        taxonomy: pd.DataFrame | None = None,
     ) -> ClusterResult:
 
         match self.cluster_method:
@@ -46,6 +47,7 @@ class BinfernoClustering(BaseClustering):
                     threads=threads,
                     plastid=self.plastid,
                     longread=self.longread,
+                    taxonomy=taxonomy,
                 )
             case ClusterMethod.dbscan:
                 result = self.dbscan(

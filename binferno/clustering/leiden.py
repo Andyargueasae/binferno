@@ -22,6 +22,8 @@ from .cluster_utils import (
     gen_seed_idx,
     _read_seed_count,
 )
+from .taxonomy_cluster import penalize_taxonomy_conflicts, prepare_taxonomy_arrays
+from ..features.taxonomy import TAXONOMIC_RANKS
 
 
 class LeidenClustering(BaseClustering):
@@ -39,6 +41,12 @@ class LeidenClustering(BaseClustering):
         False,
         description="Whether to use CPM (Constant Potts Model) for Leiden clustering instead of RBER (Reichardt-Bornholdt).",
     )
+    taxonomy_edge_factor: float = Field(
+        default=1.0,
+        gt=0.0,
+        le=1.0,
+        description="Genus conflict edge multiplier; 1.0 disables taxonomy refinement.",
+    )
 
     def __call__(
         self,
@@ -49,7 +57,14 @@ class LeidenClustering(BaseClustering):
         threads: int = 1,
         plastid: bool = False,
         longread: bool = False,
+        taxonomy: pd.DataFrame | None = None,
     ) -> ClusterResult:
+        use_taxonomy = self.taxonomy_edge_factor < 1.0
+        if use_taxonomy and taxonomy is None:
+            raise ValueError(
+                "Taxonomy edge refinement requires a taxonomy table. "
+                "Set taxonomy_edge_factor=1.0 to use ordinary Leiden clustering."
+            )
         np.random.seed(self.seed)
 
         result = ClusterResult(
@@ -174,6 +189,25 @@ class LeidenClustering(BaseClustering):
         np.save(length_weight_path, np.asarray(length_weight, dtype=np.float64))
         np.save(fixed_path, np.asarray(is_membership_fixed, dtype=bool))
 
+        ids_path = masks_path = None
+        if use_taxonomy:
+            tax_ids, tax_masks = prepare_taxonomy_arrays(
+                taxonomy, namelist, TAXONOMIC_RANKS
+            )
+            ids_path = memmap_dir / "taxonomy_ids.npy"
+            masks_path = memmap_dir / "taxonomy_masks.npy"
+            np.save(ids_path, tax_ids)
+            np.save(masks_path, tax_masks)
+            logger.info(
+                "Taxonomy edge refinement enabled: genus conflict factor {}",
+                self.taxonomy_edge_factor,
+            )
+
+        output_prefix = (
+            f"Leiden_taxedge_genus_factor_{self.taxonomy_edge_factor:g}_"
+            if use_taxonomy else "Leiden_"
+        )
+
         jobs = []
         # after the last two runs, update clustering. Also, debug the "both" mode, and add-corgi mode.
         with mp.Pool(processes=num_workers) as pool:
@@ -208,7 +242,7 @@ class LeidenClustering(BaseClustering):
                 ):
                     output_file = (
                         output_path
-                        / f"Leiden_bandwidth_{bandwidth}_maxedges_{max_edges}"
+                        / f"{output_prefix}bandwidth_{bandwidth}_maxedges_{max_edges}"
                         f"_respara_{resolution}_partgraph_ratio_{partgraph_ratio}.tsv"
                     )
 
@@ -239,6 +273,8 @@ class LeidenClustering(BaseClustering):
                             "is_membership_fixed_path": str(fixed_path),
                             "resolution_parameter": resolution,
                             "partgraph_ratio": partgraph_ratio,
+                            "ids_path": ids_path,
+                            "masks_path": masks_path,
                         },
                     )
                     jobs.append(cluster_res)
@@ -247,7 +283,9 @@ class LeidenClustering(BaseClustering):
                 cluster_res.get()
 
         # save the leiden clustering results to ClusterResult.
-        for file in output_path.glob("Leiden_*.tsv"):
+        for file in output_path.glob(f"{output_prefix}*.tsv"):
+            if not use_taxonomy and file.name.startswith("Leiden_taxedge_"):
+                continue
             df = pd.read_csv(
                 file, sep="\t", header=None, names=["contig_id", "cluster_id"]
             )
@@ -268,6 +306,8 @@ class LeidenClustering(BaseClustering):
         is_membership_fixed: Optional[Sequence[bool]] = None,
         resolution_parameter: float = 1.0,
         partgraph_ratio: int = 50,
+        taxonomy_ids: Optional[np.ndarray] = None,
+        taxonomy_mask: Optional[np.ndarray] = None,
     ) -> None:
         """
         Run Leiden on a sparsified ANN graph and write TSV assignments.
@@ -280,6 +320,19 @@ class LeidenClustering(BaseClustering):
             partgraph_ratio=partgraph_ratio,
             mutual=self.mutual,
         )
+
+        if taxonomy_ids is not None and self.taxonomy_edge_factor < 1.0:
+            if taxonomy_mask is None:
+                raise ValueError("Taxonomy masks are required with taxonomy IDs.")
+            weights, _ = penalize_taxonomy_conflicts(
+                sources,
+                targets,
+                weights,
+                taxonomy_ids,
+                taxonomy_masks,
+                conflict_rank="genus",
+                conflict_factor=self.taxonomy_edge_factor,
+            )
 
         vcount = len(namelist)
         graph = Graph(
@@ -440,11 +493,18 @@ class LeidenClustering(BaseClustering):
         is_membership_fixed_path: str,
         resolution_parameter: float,
         partgraph_ratio: int,
+        ids_path: Optional[Path] = None,
+        masks_path: Optional[Path] = None,
     ) -> None:
         ann_neighbor_indices = np.load(neighbor_path, mmap_mode="r")
         ann_distances = np.load(distance_path, mmap_mode="r")
         length_weight = np.load(length_weight_path, mmap_mode="r")
         is_membership_fixed = np.load(is_membership_fixed_path, mmap_mode="r")
+
+        taxonomy_ids = np.load(ids_path, mmap_mode="r") if ids_path is not None else None
+        taxonomy_mask = (
+            np.load(masks_path, mmap_mode="r") if masks_path is not None else None
+        )
 
         self.run_leiden(
             output_file=output_file,
@@ -458,6 +518,8 @@ class LeidenClustering(BaseClustering):
             is_membership_fixed=is_membership_fixed,
             resolution_parameter=resolution_parameter,
             partgraph_ratio=partgraph_ratio,
+            taxonomy_ids=taxonomy_ids,
+            taxonomy_mask=taxonomy_mask,
         )
 
     def recruit_short(

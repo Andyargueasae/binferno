@@ -84,6 +84,15 @@ def binferno(
         )
         return
 
+    taxonomy = None
+    if (
+        clustering.cluster_method.value == "leiden"
+        and features.use_taxonomy
+        and clustering.leiden.taxonomy_edge_factor < 1.0
+        and training.use_barlowtwins # currently, we only apply taxonomy to barlow twins branch.
+    ):
+        taxonomy, _ = features.taxonomy(contigs=contigs, logger=logger)
+
     logger.info("Starting clustering and writing MAGs.")
     cluster_output_dir = output_dir / "cluster_res"
     if cluster_output_dir.exists():
@@ -94,6 +103,7 @@ def binferno(
     cluster_result = clustering(
         contigs=contigs,
         embeddings=embeddings,
+        taxonomy=taxonomy,
         output_path=cluster_output_dir,
         threads=threads,
         logger=logger,

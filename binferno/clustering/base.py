@@ -43,6 +43,7 @@ class BaseClustering(BaseModel):
         logger: loguru._logger.Logger,
         threads: int = 1,
         plastid: bool = False,
+        taxonomy: pd.DataFrame | None = None,
     ) -> ClusterResult:
         raise NotImplementedError("Subclasses must implement __call__ method.")
 
