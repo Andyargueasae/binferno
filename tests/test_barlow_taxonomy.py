@@ -82,6 +82,49 @@ def test_barlow_rank_taxonomy_is_opt_in():
         taxonomy_model.get_embedding(features)
 
 
+def test_barlow_taxonomy_auxiliary_loss_updates_canonical_encoder():
+    trainer = BarlowTwinsTrainer(lambda_taxonomy=0.25)
+    model = _taxonomy_model().train()
+    criterion = trainer.BT_loss(lambda_bt=1e-3)
+    features1 = torch.randn(4, 6)
+    features2 = torch.randn(4, 6)
+    taxonomy = torch.as_tensor(
+        _taxonomy_features(["a", "b", "c", "d"]).to_numpy(),
+        dtype=torch.float32,
+    )
+
+    loss, stats = trainer.calculate_loss(
+        criterion,
+        model,
+        features1,
+        features2,
+        tax_1=taxonomy,
+        tax_2=taxonomy,
+        last_batch=True,
+        w=torch.ones(4),
+    )
+    loss.backward()
+
+    assert torch.isfinite(loss)
+    assert stats["taxonomy_loss"] > 0.0
+    assert stats["weighted_taxonomy_loss"] == pytest.approx(
+        0.25 * stats["taxonomy_loss"]
+    )
+    assert all(head.weight.grad is not None for head in model.taxonomy_classifiers)
+    assert model.tnf_encoder[0].weight.grad is not None
+
+
+def test_barlow_taxonomy_auxiliary_loss_ignores_unknown_ranks():
+    trainer = BarlowTwinsTrainer()
+    model = _taxonomy_model().eval()
+    canonical = torch.randn(4, 8)
+    taxonomy = torch.zeros(4, 6)
+
+    loss = trainer.rank_taxonomy_loss(model, canonical, taxonomy)
+
+    assert loss.item() == 0.0
+
+
 def test_barlow_dataset_and_embeddings_keep_taxonomy_separate(tmp_path):
     index = ["c1.original", "c1.1", "c2.original", "c2.1"]
     canonical = pd.DataFrame(

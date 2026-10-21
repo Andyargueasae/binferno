@@ -20,7 +20,7 @@ from typing import Dict, List, Tuple, Optional
 from ..utils import calc_n50
 from .base import BaseTrainer
 from ..features import BinfernoFeatureBuilder
-from .models.COMEBin_models import SimCLRNet, EmbeddingNet, RankTaxonomyEncoder
+from .models.simclr import SimCLRNet, EmbeddingNet, RankTaxonomyEncoder
 from .models.taxonomy_gate import validate_rank_taxonomy_table
 from .models.old_simclr import NeuralNetwork
 from .InfoNCEloss import info_nce_loss, InfoNCEHardNegative
@@ -33,6 +33,7 @@ from .base import (
     TAX_NODE_INDICES,
     PARENTAL_ARRAY,
 )
+from .esmc import prepare_esmc_features
 from .scg import SCGMarginLoss, build_scg_groups, prepare_scg_loader
 
 KMER_DIM = 136
@@ -50,20 +51,8 @@ class SimCLRTrainer(BaseTrainer):
     learning_rate: float = Field(
         default=1e-3, description="Learning rate for training."
     )
-    batch_size: int = Field(default=1024, description="Batch size for training.")
-    epochs: int = Field(default=300, description="Number of epochs for training.")
-    weight_decay: float = Field(default=1e-4, description="Weight decay for training.")
-    output_dim: int = Field(
-        default=128, description="Output dimension for the embeddings."
-    )
-    contig_length: int = Field(
-        default=1000, description="Minimum contig length to be included in training."
-    )
     view_num: int = Field(
         default=6, description="Number of augmented views to generate for each contig."
-    )
-    seed: int = Field(
-        default=42, description="Random seed for training and augmentation."
     )
     attention: bool = Field(
         default=False,
@@ -83,10 +72,6 @@ class SimCLRTrainer(BaseTrainer):
         default=False,
         description="Whether to use the hard weighted InfoNCE loss instead of the standard InfoNCE loss. This loss gives more weight to hard negative samples during training.",
     )
-    get_individual_embs: bool = Field(
-        default=False,
-        description="Whether to save individual embeddings for each view separately. If False, only the final embeddings after fusion are saved.",
-    )
     get_covout: bool = Field(
         default=False,
         description="Whether to save coverage embeddings separately.",
@@ -101,10 +86,6 @@ class SimCLRTrainer(BaseTrainer):
         le=0.20,
         description="The weight applied to taxonomic embeddings within the neural network."
     )
-    # tax_dropout: float = Field(
-    #     default=0.0, 
-    #     description="The dropout probability is zeroed for the taxonomy encoding."
-    # )
     get_taxout: bool = Field(
         default=False,
         description="The switch for getting taxonomy embeddings."
@@ -113,27 +94,6 @@ class SimCLRTrainer(BaseTrainer):
         default=False,
         description="Decide whether to use taxonomy features only to get the resulting bins."
     )
-    lambda_scg: float = Field(
-        default=0.0,
-        ge=0.0,
-        description="Weight of the SCG cannot-link loss. Zero disables SCG search.",
-    )
-    cosine_margin: float = Field(
-        default=0.4,
-        ge=-1.0,
-        le=1.0,
-        description="Maximum tolerated cosine similarity for same-SCG contigs.",
-    )
-    scg_batch_size: int = Field(default=128, ge=2, description="The batch size of SCG.")
-    scg_update_freq: int = Field(default=2, ge=1, description="The update frequency of SCG.")
-    scg_loss_warmup: int = Field(default=10, ge=0, description="SCG loss's warmup epoch number.")
-    scg_marker_hmm: Path = Field(
-        default=Path(__file__).resolve().parent.parent / "auxiliary" / "marker.hmm",
-        description="The marker gene hmm used for scg detection."
-    )
-    scg_max_evalue: float = Field(default=1e-10, gt=0.0)
-    scg_min_hmm_coverage: float = Field(default=0.75, gt=0.0, le=1.0)
-
     def __call__(
         self,
         contigs: Path,
@@ -142,14 +102,18 @@ class SimCLRTrainer(BaseTrainer):
         features: BinfernoFeatureBuilder = None,
         threads: int = 4,
         logger: loguru._logger.Logger = None,
-        cnn: bool = False,  # all applied to model.
-        lstm: bool = False,
     ) -> pd.DataFrame:
         """
         Args:
          - contigs: path to the contigs fasta file.
          - bam: path to the bam file for coverage information.
         """
+        seed = self._common.seed
+        contig_length = self._common.contig_length
+        batch_size = self._common.batch_size
+        output_dim = self._common.output_dim
+        get_individual_embs = self._common.get_individual_embs
+
         # Set the temperature based on the N50 of the input contigs if not provided.
         if self.temperature:
             temperature = self.temperature
@@ -164,6 +128,12 @@ class SimCLRTrainer(BaseTrainer):
         output_aug_dir = output_dir / "augmentation"
         output_aug_dir.mkdir(parents=True, exist_ok=True)
         output_train_dir = output_dir / "training"
+        annotation_dir = output_train_dir / "scg"
+        if self._esmc.enabled:
+            # Keep existing checkpoints separate from models with a protein branch.
+            import hashlib
+            key = hashlib.sha256(self._esmc.model_dump_json().encode()).hexdigest()[:12]
+            output_train_dir = output_train_dir / f"esmc-{key}"
         output_train_dir.mkdir(parents=True, exist_ok=True)
         embedding_path = output_train_dir / "embeddings.tsv"
 
@@ -175,13 +145,13 @@ class SimCLRTrainer(BaseTrainer):
             return embeddings
 
         self.unify_seeds(
-            self.seed
+            seed
         )  # ensure reproducibility by unifying seeds across random, numpy, and torch.
         fragment_dict, all_fragments, namelist = self.gen_views(
             contigs=contigs,
             output_dir=output_aug_dir,
             view_num=self.view_num,
-            contig_length=self.contig_length,
+            contig_length=contig_length,
         )
 
         # after getting the augmented views, pass to binfernofeatures to get the features pooled.
@@ -215,7 +185,7 @@ class SimCLRTrainer(BaseTrainer):
             tax_df = None
 
         # self.unify_seeds(
-        #     self.seed
+        #     seed
         # )  # ensure reproducibility by unifying seeds across random, numpy, and torch.
 
         if torch.cuda.is_available():
@@ -233,11 +203,18 @@ class SimCLRTrainer(BaseTrainer):
         kmer_dim = kmer_dim if kmer_dim != KMER_DIM else KMER_DIM
         tax_emb_dim = tax_df.shape[1] if tax_df is not None else 0
 
+        feature_df, protein_encoder = prepare_esmc_features(
+            feature_df, contigs, namelist, annotation_dir, threads, self._esmc,
+            output_dim if self.simclrnet else 256, logger, fragment_dict=fragment_dict,
+        )
+
+        corgi_dim = composition_dim - kmer_dim
+
         # prepare model.
         if self.simclrnet:
             cov_model = EmbeddingNet(
                 in_sz=cov_dim,
-                out_sz=self.output_dim,  # 128
+                out_sz=output_dim,  # 128
                 emb_szs=[2048] * 3,
                 ps=[0.2] * 2,
                 actn=nn.LeakyReLU(),
@@ -245,7 +222,7 @@ class SimCLRTrainer(BaseTrainer):
             ).to(device)
 
             tax_model = None
-            in_size = composition_dim + self.output_dim
+            in_size = composition_dim + output_dim
             
             if tax_emb_dim > 0:
                 taxonomy_ranks = features.taxonomy.ranks()
@@ -264,12 +241,13 @@ class SimCLRTrainer(BaseTrainer):
                     tax_df, tax_columns, mask_columns
                 )
                 tax_model = RankTaxonomyEncoder(
-                    vocab_sizes=vocab_sizes, out_sz=self.output_dim
+                    vocab_sizes=vocab_sizes, out_sz=output_dim
                 ).to(device)
 
             model = SimCLRNet(
+                protein_encoder=protein_encoder,
                 in_sz=in_size,
-                out_sz=self.output_dim,
+                out_sz=output_dim,
                 emb_szs=[2048] * 3,
                 use_bn=True,
                 ps=[0.2] * 2,
@@ -280,9 +258,10 @@ class SimCLRTrainer(BaseTrainer):
             ).to(device)
         else:
             model = NeuralNetwork(
+                protein_encoder=protein_encoder,
                 tnf_dim=composition_dim,
                 coverage_dim=cov_dim,
-                output_dim=self.output_dim,
+                output_dim=output_dim,
                 kmer_dim=kmer_dim,
                 attention=self.attention,
                 corgi_dim=corgi_dim,
@@ -294,26 +273,27 @@ class SimCLRTrainer(BaseTrainer):
         train_loader, optimizer, scheduler, dataset = self.prepare_trainer(
             data_df=feature_df,
             tax_df=tax_df,
-            batch_size=self.batch_size,
-            contig_length=self.contig_length,
+            batch_size=batch_size,
+            contig_length=contig_length,
             model=model,
             n_views=self.view_num,
             simclrnet=self.simclrnet,
             contigs=contigs,
             num_workers=threads,
+            epochs=self._common.epochs,
         )
 
         scg_dataloader = None
-        if self.lambda_scg > 0.0:
+        if self._scg.lambda_scg > 0.0:
             logger.info("Adding SCG cannot-link loss to SimCLR training.")
             scg_groups = build_scg_groups(
                 contigs=contigs,
                 known_contigs=namelist,
-                output_dir=output_train_dir / "scg",
+                output_dir=annotation_dir,
                 threads=threads,
-                marker_hmm=self.scg_marker_hmm,
-                max_evalue=self.scg_max_evalue,
-                min_hmm_coverage=self.scg_min_hmm_coverage,
+                marker_hmm=self._scg.scg_marker_hmm,
+                max_evalue=self._scg.scg_max_evalue,
+                min_hmm_coverage=self._scg.scg_min_hmm_coverage,
                 logger=logger,
             )
             scg_dataloader = prepare_scg_loader(
@@ -321,8 +301,8 @@ class SimCLRTrainer(BaseTrainer):
                 auxiliary_df=tax_df,
                 marker_groups=scg_groups,
                 original_suffix=".0",
-                batch_size=self.scg_batch_size,
-                seed=self.seed,
+                batch_size=self._scg.scg_batch_size,
+                seed=seed,
                 num_workers=threads,
                 logger=logger,
                 worker_init_fn=self.seed_worker,
@@ -341,7 +321,8 @@ class SimCLRTrainer(BaseTrainer):
                 optimizer=optimizer,
                 scheduler=scheduler,
                 device=device,
-                epochs=self.epochs,
+                epochs=self._common.epochs,
+                seed=seed,
                 model=model,
                 kmer_dim=kmer_dim,
                 n_cov=cov_dim,
@@ -358,7 +339,7 @@ class SimCLRTrainer(BaseTrainer):
                 scheduler=scheduler,
                 device=device,
                 method="simclr",
-                epochs=self.epochs,
+                epochs=self._common.epochs,
                 model=model,
                 logger=logger,
                 n_cov=cov_dim,
@@ -379,14 +360,16 @@ class SimCLRTrainer(BaseTrainer):
                 kmer_len=kmer_dim,
                 n_cov=cov_dim,
                 tax_emb_dim=tax_emb_dim,
+                batch_size=batch_size,
+                save_individual_embs=get_individual_embs,
             )
         else:
             embeddings = self.get_embeddings(
                 model=model,
                 data_df=feature_df,
                 output_path=embedding_path,
-                batch_size=self.batch_size,
-                save_individual_embs=self.get_individual_embs,
+                batch_size=batch_size,
+                save_individual_embs=get_individual_embs,
             )
 
         return embeddings
@@ -458,7 +441,7 @@ class SimCLRTrainer(BaseTrainer):
             torch.split(torch.from_numpy(data_df.values).float(), len(namelist))
         )
 
-        epochs = kwargs.get("epochs", 300)
+        epochs = kwargs.get("epochs", self._common.epochs)
         assert (
             len(dataset) == n_views
         ), f"Number of views in the dataset ({len(dataset)}) does not match the expected number of views ({n_views}). \
@@ -604,9 +587,9 @@ class SimCLRTrainer(BaseTrainer):
         return contig_length
 
     def _scg_weight_scale(self, epoch: int) -> float:
-        if self.scg_loss_warmup == 0:
+        if self._scg.scg_loss_warmup == 0:
             return 1.0
-        return min(1.0, float(epoch + 1) / self.scg_loss_warmup)
+        return min(1.0, float(epoch + 1) / self._scg.scg_loss_warmup)
 
     @staticmethod
     def _next_scg_batch(iterator, dataloader):
@@ -737,7 +720,7 @@ class SimCLRTrainer(BaseTrainer):
         if not self.hard_weighted_nce:
             info_nceloss_fn = info_nce_loss(temperature=temperature).to(device)
         else:
-            info_nceloss_fn = info_nce_loss_hard_weight(temperature=temperature).to(
+            info_nceloss_fn = InfoNCEHardNegative(temperature=temperature).to(
                 device
             )
 
@@ -745,7 +728,7 @@ class SimCLRTrainer(BaseTrainer):
         stats = None
         total_loss = 0.0
         total_acc = 0.0
-        scg_criterion = SCGMarginLoss(self.cosine_margin).to(device)
+        scg_criterion = SCGMarginLoss(self._scg.cosine_margin).to(device)
         scg_iterator = iter(scg_dataloader) if scg_dataloader is not None else None
         scg_loss_sum = 0.0
         scg_updates = 0
@@ -782,7 +765,7 @@ class SimCLRTrainer(BaseTrainer):
                 )
                 loss = loss + L_kmer * kmer_loss + L_cov * cov_loss
 
-            if scg_iterator is not None and i % self.scg_update_freq == 0:
+            if scg_iterator is not None and i % self._scg.scg_update_freq == 0:
                 scg_batch, scg_iterator = self._next_scg_batch(
                     scg_iterator, scg_dataloader
                 )
@@ -794,7 +777,7 @@ class SimCLRTrainer(BaseTrainer):
                     n_cov=n_cov,
                     simclrnet=False,
                 )
-                loss = loss + self.lambda_scg * scg_scale * scg_loss
+                loss = loss + self._scg.lambda_scg * scg_scale * scg_loss
                 scg_loss_sum += scg_loss.detach().item()
                 scg_updates += 1
 
@@ -813,7 +796,7 @@ class SimCLRTrainer(BaseTrainer):
                 if scg_updates:
                     stats.update(
                         scg_loss=scg_loss_sum / scg_updates,
-                        scg_weight_scale=self.lambda_scg * scg_scale,
+                        scg_weight_scale=self._scg.lambda_scg * scg_scale,
                         scg_updates=scg_updates,
                     )
 
@@ -836,7 +819,7 @@ class SimCLRTrainer(BaseTrainer):
         max_skip_fraction: float = 0.02,
         **kwargs,
     ):
-        self.unify_seeds(self.seed)
+        self.unify_seeds(kwargs.get("seed", self._common.seed))
         logger = kwargs.get("logger", None)
         if logger is None:
             raise ValueError("Logger is not provided for training.")
@@ -848,7 +831,7 @@ class SimCLRTrainer(BaseTrainer):
 
         info_nceloss_fn = info_nce_loss(temperature=temperature).to(device)
         scg_dataloader = kwargs.get("scg_dataloader")
-        scg_criterion = SCGMarginLoss(self.cosine_margin).to(device)
+        scg_criterion = SCGMarginLoss(self._scg.cosine_margin).to(device)
 
         use_cuda = device.type == "cuda"
         use_fp16 = use_cuda and amp_dtype == torch.float16
@@ -857,7 +840,7 @@ class SimCLRTrainer(BaseTrainer):
         logger.info(
             f"Starting SimCLR training: {epochs} epochs, T={temperature}, "
             f"amp={'off' if not use_cuda else str(amp_dtype)},"
-            f"SCG loss lambda={self.lambda_scg}"
+            f"SCG loss lambda={self._scg.lambda_scg}"
         )
 
         # ---- state that must survive across epochs -------------------------
@@ -922,7 +905,7 @@ class SimCLRTrainer(BaseTrainer):
                     n_views=n_views,
                 )
 
-                if scg_iterator is not None and batch_i % self.scg_update_freq == 0:
+                if scg_iterator is not None and batch_i % self._scg.scg_update_freq == 0:
                     scg_batch, scg_iterator = self._next_scg_batch(
                         scg_iterator, scg_dataloader
                     )
@@ -934,7 +917,7 @@ class SimCLRTrainer(BaseTrainer):
                         n_cov=n_cov,
                         simclrnet=True,
                     )
-                    loss = loss + self.lambda_scg * scg_scale * scg_loss
+                    loss = loss + self._scg.lambda_scg * scg_scale * scg_loss
                     scg_loss_sum += scg_loss.detach().item()
                     scg_updates += 1
 
@@ -986,7 +969,7 @@ class SimCLRTrainer(BaseTrainer):
                 f"skipped {num_skipped}/{total_batches} ({skip_frac:.1%})"
                 + (
                     f", SCG: {scg_loss_sum / scg_updates:.4f} "
-                    f"(weight {self.lambda_scg * scg_scale:.4g})"
+                    f"(weight {self._scg.lambda_scg * scg_scale:.4g})"
                     if scg_updates
                     else ""
                 )
@@ -1077,11 +1060,17 @@ class SimCLRTrainer(BaseTrainer):
         kmer_len: int,
         n_cov: int,
         tax_emb_dim: int,
+        batch_size: int | None = None,
+        save_individual_embs: bool | None = None,
     ) -> pd.DataFrame:
 
         with torch.no_grad():
             model.eval()
-            bs_ = 1024
+            bs_ = self._common.batch_size if batch_size is None else batch_size
+            save_individual_embs = (
+                self._common.get_individual_embs
+                if save_individual_embs is None else save_individual_embs
+            )
 
             print(f"length of original dataset: {len(data)}")
 
@@ -1103,7 +1092,7 @@ class SimCLRTrainer(BaseTrainer):
                 embeddings_df.to_csv(
                     str(output_path), sep="\t", header=True, index=True
                 )
-                if self.get_covout:
+                if self.get_covout or save_individual_embs:
                     covout = np.concatenate(
                         [
                             model(
@@ -1145,7 +1134,7 @@ class SimCLRTrainer(BaseTrainer):
                 embeddings_df.to_csv(
                     str(output_path), sep="\t", header=True, index=True
                 )
-                if self.get_covout:
+                if self.get_covout or save_individual_embs:
                     covout = np.concatenate(
                         [
                             model(
@@ -1164,7 +1153,7 @@ class SimCLRTrainer(BaseTrainer):
                     cov_embeddings_df.to_csv(
                         str(outfile), sep="\t", header=True, index=True
                     )
-                if self.get_taxout:
+                if self.get_taxout or save_individual_embs:
                     taxout = np.concatenate(
                         [
                             model(

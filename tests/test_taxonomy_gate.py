@@ -3,7 +3,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from binferno.training.models.COMEBin_models import RankTaxonomyEncoder, SimCLRNet
+from binferno.training.models.simclr import RankTaxonomyEncoder, SimCLRNet
 from binferno.training.models.barlow_twins import NeuralNetwork
 from binferno.training.models.new_htax_encoder import HierarchicalTaxonomyEncoder
 from binferno.training.models.taxonomy_gate import (

@@ -13,15 +13,15 @@ class NeuralNetwork(nn.Module):
         kmer_dim=136,
         tax_emb_dim=0,
         proj_head_dim=512,
-        cnn=False,
-        lstm=False,
         h_tax=False,
         tax_model=None,
         h_tax_model=None,
         alpha_tax: float = 0.05,
+        protein_encoder=None,
     ):
         super(NeuralNetwork, self).__init__()
         self.coverage_dim = coverage_dim  # by default we ask users to provide coverage.
+        self.protein_encoder = protein_encoder
         self.output_dim = output_dim
         self.kmer_dim = kmer_dim
         self.proj_head_dim = proj_head_dim
@@ -33,18 +33,20 @@ class NeuralNetwork(nn.Module):
         # Keep the development-time name as a compatibility alias.
         self.tax_model = tax_model if tax_model is not None else h_tax_model
         self.uses_rank_taxonomy = self.tax_model is not None
+        self.taxonomy_vocab_sizes = (
+            [layer.num_embeddings for layer in self.tax_model.embeddings]
+            if self.uses_rank_taxonomy
+            else []
+        )
+        self.taxonomy_classifiers = nn.ModuleList(
+            [nn.Linear(output_dim, size) for size in self.taxonomy_vocab_sizes]
+        )
         if not 0.0 <= alpha_tax <= 0.2:
             raise ValueError("alpha_tax must be between 0 and 0.2.")
         self.alpha_tax = alpha_tax
 
         if corgi_dim > 0:  # concat kmer with corgi and run single encoder.
             self.tnf_enc_dim += corgi_dim
-
-        # assert cnn and lstm are not both True, as we only support one of them at a time.
-        assert not (
-            cnn is True and lstm is True
-        ), "Only one of cnn or lstm can be True."
-        # may add more layers.
         
         tnf_hidden1 = 512
         tnf_hidden2 = 256
@@ -86,12 +88,23 @@ class NeuralNetwork(nn.Module):
             dropout=0.0,
         )
 
-    def _encode(self, x: torch.Tensor, tax_emb: torch.Tensor = None) -> torch.Tensor:
+    def encode_canonical(self, x: torch.Tensor) -> torch.Tensor:
+        """Encode composition and coverage without exposing taxonomy labels."""
+        protein_ids = None
+        if self.protein_encoder is not None:
+            x, protein_ids = x[:, :-1], x[:, -1]
         tnf_features = x[:, : self.tnf_enc_dim]
         cov_features = x[:, self.tnf_enc_dim :]
         tnf_encode = self.tnf_encoder(tnf_features)
         cov_encode = self.coverage_encoder(cov_features)
-        fused_encode = self.fusion_network(tnf_encode, cov_encode)  # 128
+        fused = self.fusion_network(tnf_encode, cov_encode)
+        if self.protein_encoder is not None:
+            fused = self.protein_encoder.fuse(fused, protein_ids)
+        return fused
+
+    def _add_taxonomy(
+        self, fused_encode: torch.Tensor, tax_emb: torch.Tensor = None
+    ) -> torch.Tensor:
         if self.uses_rank_taxonomy:
             if tax_emb is None:
                 raise ValueError("Taxonomy features are required by this model.")
@@ -101,6 +114,15 @@ class NeuralNetwork(nn.Module):
             )
         return fused_encode
 
+    def _encode(self, x: torch.Tensor, tax_emb: torch.Tensor = None) -> torch.Tensor:
+        return self._add_taxonomy(self.encode_canonical(x), tax_emb)
+
+    def taxonomy_logits(self, canonical_embedding: torch.Tensor):
+        """Predict every taxonomy rank from canonical features only."""
+        if not self.uses_rank_taxonomy:
+            raise RuntimeError("This model has no rank-taxonomy prediction heads.")
+        return [head(canonical_embedding) for head in self.taxonomy_classifiers]
+
     def encode(self, x: torch.Tensor, tax_emb: torch.Tensor = None) -> torch.Tensor:
         """Return the fused, pre-projector representation used for clustering."""
         return self._encode(x, tax_emb)
@@ -109,6 +131,8 @@ class NeuralNetwork(nn.Module):
         return self.encode(x, tax_emb)
 
     def get_separate_modality_embs(self, x):
+        if self.protein_encoder is not None:
+            x = x[:, :-1]
         kmer_features = x[:, : self.tnf_enc_dim]
         kmer_encoded = self.tnf_encoder(kmer_features)
         coverage_features = x[:, self.tnf_enc_dim :]
@@ -127,9 +151,14 @@ class NeuralNetwork(nn.Module):
         x2: torch.Tensor,
         tax_emb1: torch.Tensor = None,
         tax_emb2: torch.Tensor = None,
+        return_canonical: bool = False,
     ):
-        z1 = self.forward_one(x1, tax_emb1)
-        z2 = self.forward_one(x2, tax_emb2)
+        canonical1 = self.encode_canonical(x1)
+        canonical2 = self.encode_canonical(x2)
+        z1 = self.proj_head(self._add_taxonomy(canonical1, tax_emb1))
+        z2 = self.proj_head(self._add_taxonomy(canonical2, tax_emb2))
+        if return_canonical:
+            return z1, z2, canonical1, canonical2
         return z1, z2
 
 # The projection head: which directly gives barlow twin loss the projected embeddings, should be looked with careful caution.
@@ -360,7 +389,6 @@ def _build_coverage_encoder(coverage_dim: int, output_dim: int, dropout: float):
     coverage_dim is always 2 * n_samples (mean + std per sample).
     n_samples drives capacity, not coverage_dim directly.
 
-    Coverage feature has sometimes very low dimensionality, only consider mlp but not cnn and lstm.
     """
     n_samples = max(1, coverage_dim // 2)
 

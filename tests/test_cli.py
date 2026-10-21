@@ -111,9 +111,9 @@ def test_cli_help_contains_pydantic_defaults():
     # Tyro + Pydantic usually include "(default: ...)".
     _assert_any(out, ["default", "(default:"])
     _assert_any(
-        out, ["training.simclr.batch-size", "training.simclr.batch_size", "batch-size"]
+        out, ["training.common.batch-size"]
     )
-    _assert_any(out, ["training.barlowtwins.epochs", "training.barlowtwins.epochs"])
+    _assert_any(out, ["training.common.epochs"])
 
 
 def test_version_module_format():

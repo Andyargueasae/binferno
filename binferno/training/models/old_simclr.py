@@ -24,9 +24,11 @@ class NeuralNetwork(nn.Module):
         proj: bool = False,
         gated: bool = False,
         attention: bool = False,
+        protein_encoder=None,
     ):
         super(NeuralNetwork, self).__init__()
         self.coverage_dim = coverage_dim  # by default we ask users to provide coverage.
+        self.protein_encoder = protein_encoder
         self.output_dim = output_dim
         self.kmer_dim = kmer_dim
         self.proj_head_dim = proj_head_dim
@@ -85,18 +87,25 @@ class NeuralNetwork(nn.Module):
         )
 
     def _encode(self, x):
+        protein_ids = None
+        if self.protein_encoder is not None:
+            x, protein_ids = x[:, :-1], x[:, -1]
         # encode tnf and coverage features separately, then fuse them together.
         tnf_features = x[:, : self.tnf_enc_dim]
         tnf_encode = self.tnf_encoder(tnf_features)  # not normalized anymore.
         cov_features = x[:, self.tnf_enc_dim :]
         cov_encode = self.coverage_encoder(cov_features)  # not normalized anymore.
         fused_encode = self.fusion_network(tnf_encode, cov_encode)
+        if self.protein_encoder is not None:
+            fused_encode = self.protein_encoder.fuse(fused_encode, protein_ids)
         return fused_encode, tnf_encode, cov_encode
 
     def get_embedding(self, x):
         return self._encode(x)[0]
 
     def get_separate_modality_embs(self, x):
+        if self.protein_encoder is not None:
+            x = x[:, :-1]
         kmer_features = x[:, : self.tnf_enc_dim]
         kmer_encoded = F.normalize(self.tnf_encoder(kmer_features), dim=-1)
         coverage_features = x[:, self.tnf_enc_dim :]

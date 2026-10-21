@@ -139,8 +139,10 @@ class SimCLRNet(nn.Module):
         lstm=False,
         get_taxout=False,
         alpha_tax: float = 0.05,
+        protein_encoder=None,
     ):
         super(SimCLRNet, self).__init__()
+        self.protein_encoder = protein_encoder
         self.pretrained_model = pretrained_model
         self.cov_model = cov_model
         self.tax_model = tax_model
@@ -173,6 +175,9 @@ class SimCLRNet(nn.Module):
         return _bn_drop_lin(n_in=n_in, n_out=n_out, bn=bn, p=p, actn=actn)
 
     def forward(self, x, x2=None, x3=None):
+        protein_ids = None
+        if self.protein_encoder is not None:
+            x, protein_ids = x[:, :-1], x[:, -1]
         if self.pretrained_model is not None and self.cov_model is None:
             kmeremb = self.pretrained_model(x)
             x = torch.cat([F.normalize(self.pretrained_model(x)), x2], dim=-1)
@@ -212,6 +217,9 @@ class SimCLRNet(nn.Module):
             output = bounded_taxonomy_residual(
                 output, tax_output, x3, self.alpha_tax
             )
+
+        if self.protein_encoder is not None:
+            output = self.protein_encoder.fuse(output, protein_ids)
 
         if self.cov_model is not None:
             if self.pretrained_model is not None:

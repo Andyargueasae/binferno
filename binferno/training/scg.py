@@ -17,6 +17,16 @@ from ..clustering.marker_quality import parse_hmmout, resolve_orf_to_contig
 from ..utils import run_hmmsearch_pyhmmer, run_pyrodigal
 
 
+def prepare_gene_annotations(contigs: Path, output_dir: Path, threads: int) -> Path:
+    """Reuse the same Pyrodigal translations for SCG search and ESM-C."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    faa_path = output_dir / f"{Path(contigs).name}.scg.faa"
+    if not faa_path.exists():
+        run_pyrodigal(contig_file=contigs, faa_path=faa_path, threads=threads)
+    return faa_path
+
+
 class SCGMarginLoss(nn.Module):
     """Soft cannot-link loss for contigs carrying the same SCG.
 
@@ -127,10 +137,8 @@ def build_scg_groups(
     if not marker_hmm.is_file():
         raise FileNotFoundError(f"SCG marker HMM does not exist: {marker_hmm}")
     output_dir.mkdir(parents=True, exist_ok=True)
-    faa_path = output_dir / f"{Path(contigs).name}.scg.faa"
+    faa_path = prepare_gene_annotations(contigs, output_dir, threads)
     hmmout_path = output_dir / f"{Path(contigs).name}.scg.domtblout"
-    if not faa_path.exists():
-        run_pyrodigal(contig_file=contigs, faa_path=faa_path, threads=threads)
     if not hmmout_path.exists() or hmmout_path.stat().st_size == 0:
         run_hmmsearch_pyhmmer(
             hmm_path=marker_hmm,

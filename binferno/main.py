@@ -62,6 +62,29 @@ def binferno(
     output_dir.mkdir(parents=True, exist_ok=True)
     logger.add(f"{output_dir}/binferno.log", rotation="1 MB", retention="10 days")
 
+    taxonomy_in_barlow = (
+        features.use_taxonomy
+        and training.use_barlowtwins
+        and (
+            training.barlowtwins.alpha_tax > 0.0
+            or training.barlowtwins.lambda_taxonomy > 0.0
+        )
+    )
+    taxonomy_in_clustering = (
+        not train_only
+        and clustering.cluster_method.value == "leiden"
+        and features.use_taxonomy
+        and clustering.leiden.taxonomy_edge_factor < 1.0
+    )
+    if taxonomy_in_barlow and taxonomy_in_clustering:
+        raise ValueError(
+            "Taxonomy can be used in either Barlow Twins training or Leiden "
+            "clustering, not both. For training-only taxonomy, set "
+            "--clustering.leiden.taxonomy-edge-factor 1.0. For clustering-only "
+            "taxonomy, set --training.barlowtwins.alpha-tax 0 and "
+            "--training.barlowtwins.lambda-taxonomy 0."
+        )
+
     embeddings = training(
         contigs=contigs,
         bam=bam_dir,

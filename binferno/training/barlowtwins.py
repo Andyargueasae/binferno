@@ -33,13 +33,12 @@ from .base import (
     label_augmented_views,
 )
 from .WeightedBTLoss import WeightedBTLoss
+from .esmc import prepare_esmc_features
 from .scg import (
     SCGMarginLoss,
     build_scg_groups as build_shared_scg_groups,
     prepare_scg_group_loader,
 )
-
-
 
 class PositivePairDataset(Dataset):
     """Gather paired views from one canonical feature matrix."""
@@ -118,12 +117,6 @@ def build_fragment_length_map(fragment_dict: Dict) -> Dict[str, int]:
             length = info.get("length")
             lengths[frag_header] = int(length) if length else contig_len
     return lengths
-
-
-# ---------------------------------------------------------------------------
-# Step 2: {header: length} + pair indices -> per-pair weights
-# ---------------------------------------------------------------------------
-
 
 def make_pair_weights(
     index: Sequence[str],
@@ -215,7 +208,6 @@ def make_pair_weights(
     prec = prec / prec.mean()  # mean 1.0 keeps the loss on the tau=0 scale
     return prec.astype(np.float32)
 
-
 def weight_diagnostics(w: np.ndarray, batch_size: int = 1024) -> Dict[str, float]:
     """Report N_eff for a given weight vector, at batch scale.
 
@@ -243,26 +235,13 @@ def weight_diagnostics(w: np.ndarray, batch_size: int = 1024) -> Dict[str, float
         "n_eff_ratio": n_eff / min(batch_size, len(w)),
     }
 
-
 class BarlowTwinsTrainer(BaseTrainer):
     # Basic parameters.
     learning_rate: float = Field(
         default=2.5e-3, description="Learning rate for training."
     )
-    batch_size: int = Field(default=1024, description="Batch size for training.")
-    epochs: int = Field(default=300, description="Number of epochs for training.")
-    weight_decay: float = Field(default=1e-4, description="Weight decay for training.")
-    output_dim: int = Field(
-        default=128, description="Output dimension for the embeddings."
-    )
-    contig_length: int = Field(
-        default=1000, description="Minimum contig length to be included in training."
-    )  # additional length-weighted loss: filter out noises in clustering.
     view_num: int = Field(
         default=8, description="Number of augmented views to generate for each contig."
-    )
-    seed: int = Field(
-        default=42, description="Random seed for training and augmentation."
     )
     warmup_epochs: int = Field(
         default=10,
@@ -271,10 +250,6 @@ class BarlowTwinsTrainer(BaseTrainer):
     max_lr_epochs: int = Field(
         default=0,
         description="Number of epochs to wait before resuming learning rate scheduling after reaching the maximum learning rate.",
-    )
-    get_individual_embs: bool = Field(
-        default=False,
-        description="Whether to save individual embeddings for each view separately. If False, only the final embeddings after fusion are saved.",
     )
     proj_head_dim: int = Field(
         default=2048,
@@ -307,51 +282,15 @@ class BarlowTwinsTrainer(BaseTrainer):
         default=0.10,
         ge=0.0,
         le=0.20, 
-        description="A small weight used to contrain taxonomy's impact on the resulting features."
+        description="A small weight used to constrain taxonomy embedding fusion."
+    )
+    lambda_taxonomy: float = Field(
+        default=0.1,
+        ge=0.0,
+        description="Weight of the masked multi-rank taxonomy prediction loss. "
+        "Zero disables the auxiliary loss while retaining taxonomy embedding fusion.",
     )
     # SCG cannot-link loss.
-    lambda_scg: float = Field(
-        default=0.0,
-        ge=0.0,
-        description="Weight of the SCG cannot-link loss. Zero disables marker search and all SCG computation.",
-    )
-    cosine_margin: float = Field(
-        default=0.4,
-        ge=-1.0,
-        le=1.0,
-        description="Maximum tolerated cosine similarity for same-SCG contigs.",
-    )
-    scg_batch_size: int = Field(
-        default=128, ge=2, description="Maximum contigs retained per marker group."
-    )
-    scg_update_freq: int = Field(
-        default=2, ge=1, description="Apply one SCG batch every N standard batches."
-    )
-    scg_hard_pairs: int = Field(
-        default=1024, ge=1, description="Maximum hardest same-marker pairs per SCG update."
-    )
-    scg_loss_warmup: int = Field(
-        default=10,
-        ge=0,
-        description="Epochs used to linearly warm up the SCG loss weight.",
-    )
-    scg_marker_hmm: Path = Field(
-        default=Path(__file__).resolve().parent.parent
-        / "auxiliary"
-        / "marker.hmm",
-        description="Prokaryotic single-copy marker HMM collection.",
-    )
-    scg_max_evalue: float = Field(
-        default=1e-10,
-        gt=0.0,
-        description="Full-sequence E-value threshold for accepted SCG hits.",
-    )
-    scg_min_hmm_coverage: float = Field(
-        default=0.75,
-        gt=0.0,
-        le=1.0,
-        description="Minimum fraction of the marker HMM covered by an accepted domain.",
-    )
 
     def __call__(
         self,
@@ -361,8 +300,6 @@ class BarlowTwinsTrainer(BaseTrainer):
         features: BinfernoFeatureBuilder = None,
         threads: int = 4,
         logger: loguru._logger.Logger = None,
-        cnn: bool = False,
-        lstm: bool = False,
     ) -> pd.DataFrame:
         """
         Args:
@@ -375,6 +312,12 @@ class BarlowTwinsTrainer(BaseTrainer):
         output_aug_dir = output_dir / "augmentation"
         output_aug_dir.mkdir(parents=True, exist_ok=True)
         output_train_dir = output_dir / "training"
+        annotation_dir = output_train_dir / "scg"
+        if self._esmc.enabled:
+            # Keep existing checkpoints separate from models with a protein branch.
+            import hashlib
+            key = hashlib.sha256(self._esmc.model_dump_json().encode()).hexdigest()[:12]
+            output_train_dir = output_train_dir / f"esmc-{key}"
         output_train_dir.mkdir(parents=True, exist_ok=True)
         embedding_path = output_train_dir / "embeddings.tsv"
         if embedding_path.exists():
@@ -388,7 +331,7 @@ class BarlowTwinsTrainer(BaseTrainer):
             contigs=contigs,
             output_dir=output_aug_dir,
             view_num=self.view_num,
-            contig_length=self.contig_length,
+            contig_length=self._common.contig_length,
         )
 
         self._frag_lengths = build_fragment_length_map(fragment_dict)
@@ -442,14 +385,14 @@ class BarlowTwinsTrainer(BaseTrainer):
             )
 
         self.unify_seeds(
-            self.seed
+            self._common.seed
         )  # ensure reproducibility by unifying seeds across random, numpy, and torch.
 
         taxonomy_model = None
         if taxonomy_vocab_sizes is not None:
             taxonomy_model = HierarchicalTaxonomyEncoder(
                 vocab_sizes=taxonomy_vocab_sizes,
-                output_dim=self.output_dim,
+                output_dim=self._common.output_dim,
             )
 
         if torch.cuda.is_available():
@@ -466,9 +409,15 @@ class BarlowTwinsTrainer(BaseTrainer):
 
         corgi_dim = composition_dim - kmer_dim
 
+        feature_df, protein_encoder = prepare_esmc_features(
+            feature_df, contigs, namelist, annotation_dir, threads, self._esmc,
+            self._common.output_dim, logger, fragment_dict=fragment_dict,
+        )
+
         h_tax = isinstance(taxonomy_df, dict)
 
         model = NeuralNetwork(
+            protein_encoder=protein_encoder,
             h_tax=h_tax,
             tax_model=taxonomy_model,
             tax_emb_dim=taxonomy_df.shape[1] if taxonomy_model is not None else 0,
@@ -477,33 +426,36 @@ class BarlowTwinsTrainer(BaseTrainer):
             kmer_dim=kmer_dim,
             proj_head_dim=self.proj_head_dim,
             corgi_dim=corgi_dim,
-            output_dim=self.output_dim,
+            output_dim=self._common.output_dim,
             alpha_tax=self.alpha_tax,
-            cnn=cnn,
-            lstm=lstm,
         ).to(
             device
         )  # can weights be reproducible?
 
         logger.info(f"Model architecture:\n{model}")
+        if taxonomy_model is not None and self.lambda_taxonomy > 0.0:
+            logger.info(
+                "Adding canonical-to-taxonomy auxiliary loss to Barlow Twins "
+                f"training (lambda_taxonomy={self.lambda_taxonomy:g})."
+            )
 
         dataloader, optimizer, scheduler = self.prepare_trainer(
             model=model,
             data_df=feature_df,
-            batch_size=self.batch_size,
-            epochs=self.epochs,
+            batch_size=self._common.batch_size,
+            epochs=self._common.epochs,
             num_workers=threads,
             logger=logger,
             taxonomy_features=taxonomy_df,
         )
 
         scg_dataloader = None
-        if self.lambda_scg > 0.0:
+        if self._scg.lambda_scg > 0.0:
             logger.info("Adding SCG cannot-link loss to Barlow Twins training.")
             scg_groups = self.build_scg_groups(
                 contigs=contigs,
                 known_contigs=namelist,
-                output_dir=output_train_dir / "scg",
+                output_dir=annotation_dir,
                 threads=threads,
                 logger=logger,
             )
@@ -523,7 +475,7 @@ class BarlowTwinsTrainer(BaseTrainer):
                 scheduler=scheduler,
                 device=device,
                 method="barlow_twins",
-                epochs=self.epochs,
+                epochs=self._common.epochs,
                 model=model,
                 output_dir=output_train_dir,
                 logger=logger,
@@ -542,8 +494,8 @@ class BarlowTwinsTrainer(BaseTrainer):
                 model=model,
                 data_df=feature_df,
                 output_path=embedding_path,
-                batch_size=self.batch_size,
-                save_individual_embs=self.get_individual_embs,
+                batch_size=self._common.batch_size,
+                save_individual_embs=self._common.get_individual_embs,
                 taxonomy_features=taxonomy_df,
             )
 
@@ -638,37 +590,12 @@ class BarlowTwinsTrainer(BaseTrainer):
             )
         return embeddings_df
 
-    # def weighted_barlow_twins(z1, z2, w, lambd=5e-3, eps=1e-6):
-    #     """
-    #     z1, z2: (B, D) projector outputs
-    #     w:      (B,) non-negative weights, e.g. log(length)
-    #     """
-    #     w = w / w.sum()
-    #     w_ = w.unsqueeze(1)
-
-    #     mu1 = (w_ * z1).sum(0, keepdim=True)
-    #     mu2 = (w_ * z2).sum(0, keepdim=True)
-    #     v1 = (w_ * (z1 - mu1) ** 2).sum(0, keepdim=True)
-    #     v2 = (w_ * (z2 - mu2) ** 2).sum(0, keepdim=True)
-
-    #     z1n = (z1 - mu1) / (v1.sqrt() + eps)
-    #     z2n = (z2 - mu2) / (v2.sqrt() + eps)
-
-    #     c = (w_ * z1n).T @ z2n            # (D, D), already normalized by sum(w)=1
-
-    #     on = torch.diagonal(c).add_(-1).pow_(2).sum()
-    #     off = c.pow(2).sum() - torch.diagonal(c).pow(2).sum()
-    #     return on + lambd * off
     class BT_loss(nn.Module):
         def __init__(self, lambda_bt=5e-3, alpha=1.0, eps=1e-6):
             super().__init__()
             self.lambda_bt = lambda_bt  # lambda barlow twins tunes the importance of the redundancy reduction term relative to the invariance term. A higher lambda_bt encourages the model to produce more decorrelated features, while a lower lambda_bt allows for more redundancy in the features.
             self.alpha = alpha  # alpha tunes the importance of the invariance loss relative to the redundancy loss. A higher alpha emphasizes the importance of making the diagonal elements of the correlation matrix close to 1, while a lower alpha allows for more flexibility in the diagonal elements.
             self.eps = eps
-            # self.register_buffer(
-            #     'off_diag_mask',
-            #     ~torch.eye(proj_dim, dtype=torch.bool)
-            # )
             self._cache = {}
 
         def forward(
@@ -699,7 +626,7 @@ class BarlowTwinsTrainer(BaseTrainer):
             diag = torch.diagonal(C)
             invariance_loss = (
                 (diag - 1.0).pow(2).sum()
-            )  # this is the invariance loss, which encourages the diagonal elements of the correlation matrix to be close to 1, meaning that the corresponding features in the two views are highly correlated.
+            )  # invariance loss
 
             redundancy_loss = loss_matrix.sum() - torch.diagonal(loss_matrix).sum()
             loss = self.alpha * invariance_loss + self.lambda_bt * redundancy_loss
@@ -963,9 +890,9 @@ class BarlowTwinsTrainer(BaseTrainer):
             known_contigs=known_contigs,
             output_dir=output_dir,
             threads=threads,
-            marker_hmm=self.scg_marker_hmm,
-            max_evalue=self.scg_max_evalue,
-            min_hmm_coverage=self.scg_min_hmm_coverage,
+            marker_hmm=self._scg.scg_marker_hmm,
+            max_evalue=self._scg.scg_max_evalue,
+            min_hmm_coverage=self._scg.scg_min_hmm_coverage,
             logger=logger,
         )
 
@@ -981,8 +908,8 @@ class BarlowTwinsTrainer(BaseTrainer):
             data_df=data_df,
             marker_groups=marker_groups,
             original_suffix=".original",
-            batch_size=self.scg_batch_size,
-            seed=self.seed,
+            batch_size=self._scg.scg_batch_size,
+            seed=self._common.seed,
             # The iterator is recycled often; worker copies and restarts cost memory.
             num_workers=0,
             logger=logger,
@@ -1146,14 +1073,14 @@ class BarlowTwinsTrainer(BaseTrainer):
         stats = None
         is_htax = model.hierarchical_taxonomy
         num_batches = len(dataloader)
-        scg_criterion = SCGMarginLoss(self.cosine_margin).to(device)
+        scg_criterion = SCGMarginLoss(self._scg.cosine_margin).to(device)
         scg_iterator = iter(scg_dataloader) if scg_dataloader is not None else None
         scg_loss_sum = 0.0
         scg_updates = 0
         scg_scale = (
             1.0
-            if self.scg_loss_warmup == 0
-            else min(1.0, float(epoch + 1) / self.scg_loss_warmup)
+            if self._scg.scg_loss_warmup == 0
+            else min(1.0, float(epoch + 1) / self._scg.scg_loss_warmup)
         )
 
         for batch_i, batch_data in enumerate(
@@ -1217,7 +1144,7 @@ class BarlowTwinsTrainer(BaseTrainer):
                     w=w,
                 )
 
-            if scg_iterator is not None and batch_i % self.scg_update_freq == 0:
+            if scg_iterator is not None and batch_i % self._scg.scg_update_freq == 0:
                 try:
                     scg_batch = next(scg_iterator)
                 except StopIteration:
@@ -1239,9 +1166,9 @@ class BarlowTwinsTrainer(BaseTrainer):
                     marker_ids,
                     contig_ids,
                     pair_weights=scg_weights,
-                    max_hard_pairs=self.scg_hard_pairs,
+                    max_hard_pairs=self._scg.scg_hard_pairs,
                 )
-                total_loss = total_loss + self.lambda_scg * scg_scale * scg_loss
+                total_loss = total_loss + self._scg.lambda_scg * scg_scale * scg_loss
                 scg_loss_sum += scg_loss.detach().item()
                 scg_updates += 1
 
@@ -1257,7 +1184,7 @@ class BarlowTwinsTrainer(BaseTrainer):
         avg_loss = sum_loss / len(dataloader)
         if stats is not None and scg_updates:
             stats["scg_loss"] = scg_loss_sum / scg_updates
-            stats["scg_weight_scale"] = self.lambda_scg * scg_scale
+            stats["scg_weight_scale"] = self._scg.lambda_scg * scg_scale
             stats["scg_updates"] = scg_updates
         return avg_loss, stats
 
@@ -1277,9 +1204,21 @@ class BarlowTwinsTrainer(BaseTrainer):
 
         if tax_1 is not None or tax_2 is not None:
             if getattr(model, "uses_rank_taxonomy", False):
-                output1, output2 = model(
-                    features1, features2, tax_emb1=tax_1, tax_emb2=tax_2
+                output1, output2, canonical1, canonical2 = model(
+                    features1,
+                    features2,
+                    tax_emb1=tax_1,
+                    tax_emb2=tax_2,
+                    return_canonical=True,
                 )
+                if self.lambda_taxonomy > 0.0:
+                    taxonomy_loss = self.rank_taxonomy_loss(
+                        model, canonical1, tax_1, w
+                    ).add(
+                        self.rank_taxonomy_loss(model, canonical2, tax_2, w)
+                    ).mul(0.5)
+                else:
+                    taxonomy_loss = output1.new_zeros(())
                 if last_batch:
                     loss, stats = criterion(
                         feature1=output1,
@@ -1287,8 +1226,13 @@ class BarlowTwinsTrainer(BaseTrainer):
                         return_stats=True,
                         w=w,
                     )
-                    return loss, stats
-                return criterion(feature1=output1, feature2=output2, w=w), None
+                    stats["taxonomy_loss"] = taxonomy_loss.detach().item()
+                    stats["weighted_taxonomy_loss"] = (
+                        self.lambda_taxonomy * taxonomy_loss.detach().item()
+                    )
+                    return loss + self.lambda_taxonomy * taxonomy_loss, stats
+                loss = criterion(feature1=output1, feature2=output2, w=w)
+                return loss + self.lambda_taxonomy * taxonomy_loss, None
 
             elif not is_htax:
                 output1, output2, tax_enc1, tax_enc2 = model(
@@ -1344,6 +1288,54 @@ class BarlowTwinsTrainer(BaseTrainer):
             else:
                 loss = criterion(feature1=output1, feature2=output2, w=w)
                 return loss, None
+
+    @staticmethod
+    def rank_taxonomy_loss(model, canonical_embedding, taxonomy, weights=None):
+        """Masked cross-entropy over every available rank.
+
+        The prediction heads only see canonical composition/coverage features.
+        Each rank is normalized by its random-classifier baseline and independently
+        averaged, so populous or well-annotated ranks cannot dominate the loss. Pair precision
+        weights are normalized within valid rows to preserve that scale.
+        """
+        n_ranks = len(model.taxonomy_vocab_sizes)
+        expected_width = 2 * n_ranks
+        if taxonomy.ndim != 2 or taxonomy.shape[1] != expected_width:
+            raise ValueError(
+                f"Expected taxonomy tensor [B, {expected_width}], "
+                f"got {tuple(taxonomy.shape)}"
+            )
+
+        tax_ids = taxonomy[:, :n_ranks].long()
+        tax_masks = taxonomy[:, n_ranks:] > 0
+        logits_by_rank = model.taxonomy_logits(canonical_embedding)
+        rank_losses = []
+
+        for rank, logits in enumerate(logits_by_rank):
+            valid = tax_masks[:, rank] & (tax_ids[:, rank] > 0)
+            if not torch.any(valid):
+                continue
+            per_row = F.cross_entropy(
+                logits[valid], tax_ids[valid, rank], reduction="none"
+            )
+            # A random classifier has CE=log(n_classes). Normalizing by that
+            # baseline prevents species/genus vocabularies from dominating
+            # broad ranks solely because they contain more categories.
+            per_row = per_row / np.log(logits.shape[1])
+            if weights is None:
+                rank_losses.append(per_row.mean())
+            else:
+                valid_weights = weights[valid].to(
+                    device=per_row.device, dtype=per_row.dtype
+                ).clamp_min(0.0)
+                rank_losses.append(
+                    (per_row * valid_weights).sum()
+                    / valid_weights.sum().clamp_min(1e-8)
+                )
+
+        if not rank_losses:
+            return canonical_embedding.sum() * 0.0
+        return torch.stack(rank_losses).mean()
 
     def barlow_twins_augmentation(
         self,
@@ -1672,7 +1664,5 @@ class BarlowTwinsTrainer(BaseTrainer):
                 for fragment_header, fragment_seq in view_fragments:
                     f.write(f">{fragment_header}\n")
                     f.write(f"{fragment_seq}\n")
-
-        # copy raw fasta file to augmented_fragments_view0.fasta.
 
         return FragMent_Dict, All_Fragments, namelist

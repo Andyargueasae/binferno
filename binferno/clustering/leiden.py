@@ -329,7 +329,7 @@ class LeidenClustering(BaseClustering):
                 targets,
                 weights,
                 taxonomy_ids,
-                taxonomy_masks,
+                taxonomy_mask,
                 conflict_rank="genus",
                 conflict_factor=self.taxonomy_edge_factor,
             )

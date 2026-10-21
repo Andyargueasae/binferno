@@ -2,7 +2,7 @@ import math
 import os
 import random
 import numpy as np
-from pydantic import BaseModel
+from pydantic import BaseModel, PrivateAttr
 import pandas as pd
 from pathlib import Path
 import torch
@@ -12,6 +12,7 @@ from loguru._logger import Logger
 from typing import List, Dict, Tuple
 
 from ..features import BinfernoFeatureBuilder
+from .config import CommonTrainingConfig, SCGConfig
 
 TAX_NODES = "tax_node"
 TAX_NODE_INDICES = "tax_node_index"
@@ -20,6 +21,9 @@ TAXONOMY_DF = "contig_taxonomy_df"
 
 
 class BaseTrainer(BaseModel):
+    # Defaults also support trainers invoked without the Binferno orchestrator.
+    _common: CommonTrainingConfig = PrivateAttr(default_factory=CommonTrainingConfig)
+    _scg: SCGConfig = PrivateAttr(default_factory=SCGConfig)
 
     def __call__(
         self,

@@ -9,9 +9,14 @@ from .barlowtwins import BarlowTwinsTrainer
 from .simclr import SimCLRTrainer
 from .base import BaseTrainer
 from ..features import BinfernoFeatureBuilder
+from .config import CommonTrainingConfig, SCGConfig
+from .esmc import ESMCConfig
 
 
 class BinfernoTrainer(BaseTrainer):
+    common: CommonTrainingConfig = Field(default_factory=CommonTrainingConfig)
+    scg: SCGConfig = Field(default_factory=SCGConfig)
+    esmc: ESMCConfig = Field(default_factory=ESMCConfig)
     simclr: SimCLRTrainer
     use_simclr: bool = Field(
         default=False,
@@ -65,6 +70,9 @@ class BinfernoTrainer(BaseTrainer):
             train_modules.append(self.barlowtwins)
 
         for out_dir, train_module in zip(output_dirs, train_modules):
+            train_module._common = self.common
+            train_module._scg = self.scg
+            train_module._esmc = self.esmc
             out_dir.mkdir(
                 parents=True, exist_ok=True
             )  # ensure now output directory exists for the training method.

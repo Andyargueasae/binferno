@@ -56,6 +56,10 @@ dependencies = [
 # - fraggenescan: Required for gene prediction in core gene analysis
 # - HMMER3 v3.4: Required for core gene analysis and taxonomic embedding generation
 
+[project.optional-dependencies]
+# Pin the SDK API used by the local ESM-C 300M/600M inference adapter.
+esmc = ["esm>=3.2.1,<3.3"]
+
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"

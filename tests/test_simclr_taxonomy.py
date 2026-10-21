@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-from binferno.training.models.COMEBin_models import RankTaxonomyEncoder
+from binferno.training.models.simclr import RankTaxonomyEncoder
 from binferno.training.simclr import SimCLRTrainer
 
 

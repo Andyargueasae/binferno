@@ -6,7 +6,7 @@ from torch import nn
 
 from binferno.training.scg import SCGMarginLoss, prepare_scg_loader
 from binferno.training.simclr import SimCLRTrainer
-from binferno.training.models.COMEBin_models import SimCLRNet
+from binferno.training.models.simclr import SimCLRNet
 
 
 @pytest.mark.parametrize("suffix", [".0", ".original"])
