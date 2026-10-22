@@ -23,6 +23,14 @@ from torch.nn.utils.rnn import pad_sequence
 from ..clustering.marker_quality import resolve_orf_to_contig
 from .scg import prepare_gene_annotations
 
+# if you want to add annotations in addition to predictions:
+        # run_hmmsearch_pyhmmer(
+        #     hmm_path=marker_hmm,
+        #     faa_path=faa_path,
+        #     domtblout_path=hmmout_path,
+        #     threads=threads,
+        #     e_value=max_evalue,
+        # )
 
 class ESMCConfig(BaseModel):
     enabled: bool = Field(default=False, description="Include the ESM-C protein modality.")
@@ -54,7 +62,7 @@ def _embed_proteins(sequences, config, device):
     counts = np.zeros(len(sequences), dtype=np.int64)
     pending = []
 
-    def flush():
+    def flush(): # where the actual embedding happens, and the latent sum is calculated for each protein
         tokens = model.tokenizer(
             [sequence for _, sequence in pending], padding=True, return_tensors="pt"
         )["input_ids"].to(device)
@@ -77,7 +85,7 @@ def _embed_proteins(sequences, config, device):
                 flush()
     if pending:
         flush()
-    return torch.stack([total / count for total, count in zip(sums, counts)]).numpy()
+    return torch.stack([total / count for total, count in zip(sums, counts)]).numpy() # return the mean latent for each protein
 
 
 def build_protein_latents(contigs, known_contigs, output_dir, threads, config, logger=None):
@@ -118,7 +126,7 @@ def build_protein_latents(contigs, known_contigs, output_dir, threads, config, l
         if logger is not None:
             logger.info(f"ESM-C: ORF-to-contig join {report.rate:.1%}.")
     sequences = [sequence for group in groups for sequence in group]
-    offsets = np.concatenate(([0], np.cumsum([len(group) for group in groups])))
+    offsets = np.concatenate(([0], np.cumsum([len(group) for group in groups]))) # offsets are used to know where each contig's proteins start and end in the flattened sequences list
     if sequences:
         device = torch.device(
             "cuda" if torch.cuda.is_available() else "cpu"
@@ -169,7 +177,7 @@ class ContigProteinEncoder(nn.Module):
                 if end > start:
                     self.means[index] = self.proteins[start:end].mean(0)
 
-    def forward(self, ids):
+    def forward(self, ids): # here lacks one potential change: what if the proteins across the views are lacking or subsampled?
         device = self.projection.weight.device
         # Pool each contig only once even when a batch contains multiple views.
         unique, inverse = torch.unique(ids.detach().long().cpu(), return_inverse=True)
@@ -197,7 +205,7 @@ class ContigProteinEncoder(nn.Module):
                 key_padding_mask=mask, need_weights=False,
             )
             pooled = pooled[:, 0]
-        pooled = pooled * valid[:, None]
+        pooled = pooled * valid[:, None] # zero out empty contigs so they do not contribute to the residual
         return pooled[inverse.to(device)]
 
     def fuse(self, representation, ids):
@@ -205,7 +213,7 @@ class ContigProteinEncoder(nn.Module):
         # Match representation scale so model-specific encoder norms do not
         # accidentally erase or amplify the protein residual.
         scale = representation.norm(dim=-1, keepdim=True).detach().clamp_min(1e-6)
-        return representation + self.weight * scale * F.normalize(protein, dim=-1)
+        return representation + self.weight * scale * F.normalize(protein, dim=-1) # weight is used to weigh protein's latent when fusing with canonical learnt features.
 
 
 def prepare_esmc_features(data_df, contigs, known_contigs, output_dir, threads,

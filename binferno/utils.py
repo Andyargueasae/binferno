@@ -163,6 +163,13 @@ def gen_seed(
     )
     marker_gene_faa = output_dir / (Path(contig_file).name + ".frag.faa")
 
+    train_name = "simclr" if Path(output_dir.parent / "simclr").exists() else "barlowtwins"
+    scg_faa = output_dir.parent / train_name / "training" / "scg" / f"{contig_file}.scg.faa"
+    if scg_faa.exists():
+        # copy the scg.faa to marker_gene_faa
+        import shutil
+        shutil.copyfile(scg_faa, marker_gene_faa)
+
     if not (os.path.exists(marker_gene_faa)):
         run_pyrodigal(
             contig_file=contig_file,
