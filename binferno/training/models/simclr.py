@@ -1,9 +1,11 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 import numpy as np
 from typing import Optional
 from .taxonomy_gate import bounded_taxonomy_residual
+from ..protein_batch import unpack_features
 
 
 # Shared COMEBin-style block builder (kept behavior-identical).
@@ -174,10 +176,9 @@ class SimCLRNet(nn.Module):
     ):
         return _bn_drop_lin(n_in=n_in, n_out=n_out, bn=bn, p=p, actn=actn)
 
-    def forward(self, x, x2=None, x3=None):
-        protein_ids = None
-        if self.protein_encoder is not None:
-            x, protein_ids = x[:, :-1], x[:, -1]
+    def forward(self, x, x2=None, x3=None, contig_ids=None, view_ids=None):
+        x, protein_ids, view_ids = unpack_features(x, contig_ids, view_ids)
+        x2, _, _ = unpack_features(x2)
         if self.pretrained_model is not None and self.cov_model is None:
             kmeremb = self.pretrained_model(x)
             x = torch.cat([F.normalize(self.pretrained_model(x)), x2], dim=-1)
@@ -219,7 +220,7 @@ class SimCLRNet(nn.Module):
             )
 
         if self.protein_encoder is not None:
-            output = self.protein_encoder.fuse(output, protein_ids)
+            output = self.protein_encoder.fuse(output, protein_ids, view_ids)
 
         if self.cov_model is not None:
             if self.pretrained_model is not None:

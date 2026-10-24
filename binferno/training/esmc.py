@@ -1,11 +1,13 @@
-"""Frozen ESM-C protein embeddings and trainable per-contig pooling.
+"""Frozen ESM-C protein embeddings and trainable coordinate-aware view pooling.
 
 Each protein is represented by the mean of its residue embeddings (excluding
-special tokens). Long proteins are chunked without discarding residues. A
-contig then uses either the mean of its proteins or learned query attention.
+special tokens). Long proteins are chunked without discarding residues. Each
+view pools its complete genomic ORFs using a mean or learned query attention.
 Only the pooling/projection is trained, using the trainer's existing objective.
 """
 
+from dataclasses import dataclass
+import re
 import hashlib
 import json
 from pathlib import Path
@@ -18,24 +20,47 @@ from pydantic import BaseModel, Field
 import torch
 from torch import nn
 import torch.nn.functional as F
-from torch.nn.utils.rnn import pad_sequence
 
 from ..clustering.marker_quality import resolve_orf_to_contig
 from .scg import prepare_gene_annotations
 
-# if you want to add annotations in addition to predictions:
-        # run_hmmsearch_pyhmmer(
-        #     hmm_path=marker_hmm,
-        #     faa_path=faa_path,
-        #     domtblout_path=hmmout_path,
-        #     threads=threads,
-        #     e_value=max_evalue,
-        # )
+
+@dataclass
+class ProteinLatentTable:
+    """Frozen protein rows with zero-based, half-open genomic coordinates.
+
+    Unknown coordinates use -1 and are allowed only in shared augmentation.
+    """
+    proteins: np.ndarray
+    offsets: np.ndarray
+    orf_starts: np.ndarray
+    orf_ends: np.ndarray
+    orf_strands: np.ndarray
+
+    def __iter__(self):
+        # Preserve unpacking for callers that only need the frozen table.
+        return iter((self.proteins, self.offsets))
+
+
+def _orf_coordinates(record):
+    # Pyrodigal write_translations retains Prodigal's coordinate-bearing header:
+    # >contig_1 # begin # end # strand # attributes (one-based inclusive).
+    match = re.search(r" # (\d+) # (\d+) # (-?1)(?: #|$)", record.description)
+    if match is None:
+        return -1, -1, 0
+    begin, end, strand = map(int, match.groups())
+    if begin < 1 or end < begin:
+        raise ValueError(f"Invalid ORF coordinates for {record.id!r}")
+    return begin - 1, end, strand
+
 
 class ESMCConfig(BaseModel):
     enabled: bool = Field(default=False, description="Include the ESM-C protein modality.")
     model: Literal["esmc_300m", "esmc_600m"] = "esmc_300m"
     pooling: Literal["mean", "attention"] = "mean"
+    augmentation: Literal["shared", "coordinate"] = Field(
+        default="coordinate", description="Pool complete ORFs in each fragment; shared is the baseline."
+    )
     num_heads: int = Field(default=4, ge=1)
     weight: float = Field(default=0.2, gt=0.0, description="Protein residual weight.")
     batch_size: int = Field(default=4, ge=1, description="Protein chunks per ESM-C batch.")
@@ -99,11 +124,13 @@ def build_protein_latents(contigs, known_contigs, output_dir, threads, config, l
     with faa_path.open("rb") as handle:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             fingerprint.update(block)
-    fingerprint.update(json.dumps([1, config.model, config.max_residues, names]).encode())
+    fingerprint.update(json.dumps([2, config.model, config.max_residues, names]).encode())
     cache_path = output_dir / f"esmc_{fingerprint.hexdigest()}.npz"
     if cache_path.exists():
         with np.load(cache_path, allow_pickle=False) as cache:
-            return cache["proteins"], cache["offsets"]
+            return ProteinLatentTable(*(cache[key] for key in (
+                "proteins", "offsets", "orf_starts", "orf_ends", "orf_strands"
+            )))
 
     records = list(SeqIO.parse(faa_path, "fasta"))
     groups = [[] for _ in names]
@@ -122,10 +149,12 @@ def build_protein_latents(contigs, known_contigs, output_dir, threads, config, l
             sequence = str(record.seq).upper().rstrip("*")
             sequence = "".join(aa if aa in "ACDEFGHIKLMNPQRSTVWYBXZUO" else "X" for aa in sequence)
             if sequence:
-                groups[contig_id].append(sequence)
+                groups[contig_id].append((sequence, _orf_coordinates(record)))
         if logger is not None:
             logger.info(f"ESM-C: ORF-to-contig join {report.rate:.1%}.")
-    sequences = [sequence for group in groups for sequence in group]
+    entries = [entry for group in groups for entry in group]
+    sequences = [entry[0] for entry in entries]
+    coordinates = np.asarray([entry[1] for entry in entries], dtype=np.int64).reshape(-1, 3)
     offsets = np.concatenate(([0], np.cumsum([len(group) for group in groups]))) # offsets are used to know where each contig's proteins start and end in the flattened sequences list
     if sequences:
         device = torch.device(
@@ -137,25 +166,28 @@ def build_protein_latents(contigs, known_contigs, output_dir, threads, config, l
         proteins = np.empty((0, dim), dtype=np.float32)
     # Atomic replacement prevents an interrupted extraction leaving a valid-looking cache.
     temporary = cache_path.with_suffix(".tmp.npz")
-    np.savez(temporary, proteins=proteins, offsets=offsets)
+    np.savez(temporary, proteins=proteins, offsets=offsets,
+             orf_starts=coordinates[:, 0], orf_ends=coordinates[:, 1],
+             orf_strands=coordinates[:, 2])
     temporary.replace(cache_path)
     if logger is not None:
         logger.info(
             f"ESM-C: {len(sequences)} proteins across {np.count_nonzero(np.diff(offsets))}"
             f"/{len(names)} contigs; frozen latents cached at {cache_path}."
         )
-    return proteins, offsets
+    return ProteinLatentTable(proteins, offsets, coordinates[:, 0],
+                              coordinates[:, 1], coordinates[:, 2])
 
 
 class ContigProteinEncoder(nn.Module):
     """Pool a CPU-backed ragged table, moving only batch proteins to the device.
 
     Frozen protein tables live in the extraction cache; model checkpoints contain
-    the trainable pooling and projection weights. IDs are carried in the final
-    feature column so all existing paired-view and SCG loaders preserve alignment.
+    the trainable pooling and projection weights. Integer contig/view lookup
+    metadata travels separately from canonical numerical features.
     """
 
-    def __init__(self, proteins, offsets, output_dim, config):
+    def __init__(self, proteins, offsets, output_dim, config, view_rows=None):
         super().__init__()
         self.proteins = torch.as_tensor(proteins, dtype=torch.float32, device="cpu")
         self.offsets = np.asarray(offsets, dtype=np.int64)
@@ -163,6 +195,8 @@ class ContigProteinEncoder(nn.Module):
             raise ValueError("Expected a protein matrix and contig offsets")
         if self.offsets[0] != 0 or self.offsets[-1] != len(self.proteins) or np.any(np.diff(self.offsets) < 0):
             raise ValueError("Invalid protein table offsets")
+        self.view_rows = view_rows
+        self.lengths = np.diff(self.offsets)
         self.pooling = config.pooling
         self.weight = config.weight
         self.projection = nn.Linear(self.proteins.shape[1], output_dim)
@@ -177,27 +211,61 @@ class ContigProteinEncoder(nn.Module):
                 if end > start:
                     self.means[index] = self.proteins[start:end].mean(0)
 
-    def forward(self, ids): # here lacks one potential change: what if the proteins across the views are lacking or subsampled?
+    def forward(self, ids, view_ids=None):
         device = self.projection.weight.device
-        # Pool each contig only once even when a batch contains multiple views.
-        unique, inverse = torch.unique(ids.detach().long().cpu(), return_inverse=True)
-        if torch.any(unique < 0) or torch.any(unique >= len(self.offsets) - 1):
+        if ids is None or ids.dtype != torch.long:
+            raise ValueError("ESM-C requires explicit torch.long contig IDs")
+        ids = ids.detach().cpu()
+        if view_ids is None:
+            view_ids = torch.zeros_like(ids)
+        if view_ids.dtype != torch.long or view_ids.shape != ids.shape:
+            raise ValueError("ESM-C view IDs must be torch.long and match contig IDs")
+        pairs = torch.stack((ids, view_ids.detach().cpu()), dim=-1)
+        unique, inverse = torch.unique(pairs, dim=0, return_inverse=True)
+        indices = unique[:, 0].numpy()
+        if np.any(indices < 0) or np.any(indices >= len(self.offsets) - 1):
             raise ValueError("ESM-C contig ID is outside the protein table")
-        lengths = self.offsets[unique.numpy() + 1] - self.offsets[unique.numpy()]
+        rows = []
+        for contig_id, view_id in unique.tolist():
+            if self.view_rows is None:
+                selected = np.arange(self.offsets[contig_id], self.offsets[contig_id + 1])
+            else:
+                try:
+                    selected = self.view_rows[(contig_id, view_id)]
+                except KeyError as exc:
+                    raise ValueError(f"Unknown ESM-C contig/view pair {(contig_id, view_id)}") from exc
+            rows.append(selected)
+        lengths = np.asarray([len(selected) for selected in rows], dtype=np.int64)
         valid = torch.as_tensor(lengths > 0, device=device)
         if self.pooling == "mean":
-            pooled = self.projection(self.means[unique].to(device))
+            if self.view_rows is None:
+                means = self.means[unique[:, 0]]
+            else:
+                means = torch.stack([
+                    self.proteins[selected].mean(0) if len(selected)
+                    else self.proteins.new_zeros(self.proteins.shape[1])
+                    for selected in rows
+                ])
+            pooled = self.projection(means.to(device))
         else:
-            # One masked dummy token makes empty contigs safe for attention;
-            # their contribution is explicitly zeroed below.
-            sequences = [
-                self.proteins[self.offsets[index] : self.offsets[index + 1]]
-                if length else self.proteins.new_zeros((1, self.proteins.shape[1]))
-                for index, length in zip(unique.tolist(), lengths)
-            ]
-            padded = pad_sequence(sequences, batch_first=True).to(device)
-            tokens = self.projection(padded)
-            mask = torch.arange(tokens.shape[1], device=device)[None, :] >= torch.as_tensor(
+            # Gather only real proteins on the CPU and project before padding.
+            # Padding the original 960/1152-wide latents wastes host-to-device
+            # bandwidth and projection work when contig lengths are uneven.
+            packed_starts = np.cumsum(lengths) - lengths
+            positions = np.arange(lengths.sum()) - np.repeat(packed_starts, lengths)
+            protein_rows = np.concatenate(rows)
+            packed = self.proteins.index_select(0, torch.from_numpy(protein_rows))
+            projected = self.projection(packed.to(device))
+
+            # Keep one unmasked dummy for empty contigs to avoid all-masked
+            # attention. Their residual (and gradients) is zeroed below.
+            width = max(int(lengths.max()), 1)
+            destinations = np.repeat(np.arange(len(unique)), lengths) * width + positions
+            tokens = projected.new_zeros((len(unique) * width, projected.shape[-1]))
+            tokens = tokens.index_copy(
+                0, torch.as_tensor(destinations, device=device), projected
+            ).view(len(unique), width, -1)
+            mask = torch.arange(width, device=device)[None, :] >= torch.as_tensor(
                 np.maximum(lengths, 1), device=device
             )[:, None]
             pooled, _ = self.attention(
@@ -208,8 +276,8 @@ class ContigProteinEncoder(nn.Module):
         pooled = pooled * valid[:, None] # zero out empty contigs so they do not contribute to the residual
         return pooled[inverse.to(device)]
 
-    def fuse(self, representation, ids):
-        protein = self(ids)
+    def fuse(self, representation, ids, view_ids=None):
+        protein = self(ids, view_ids)
         # Match representation scale so model-specific encoder norms do not
         # accidentally erase or amplify the protein residual.
         scale = representation.norm(dim=-1, keepdim=True).detach().clamp_min(1e-6)
@@ -218,29 +286,70 @@ class ContigProteinEncoder(nn.Module):
 
 def prepare_esmc_features(data_df, contigs, known_contigs, output_dir, threads,
                           config, output_dim, logger=None, fragment_dict=None):
-    """Append a contig lookup ID while preserving canonical feature ordering."""
+    """Attach exact-header integer lookup metadata without adding feature columns.
+
+    Coordinate mode requires interval metadata for sequence fragments. Feature-only
+    views must explicitly declare ``feature_only=True`` to retain all proteins.
+    View 0 always denotes the full contig, including Barlow's .original view.
+    """
     if not config.enabled:
         return data_df, None
     names = list(known_contigs)
-    # Existing datasets cast to float32; integral IDs remain exact up to 2**24.
-    if len(names) > 2**24:
-        raise ValueError("ESM-C feature IDs support at most 2**24 contigs")
     name_to_id = {name: index for index, name in enumerate(names)}
-    view_to_contig = {}
-    if fragment_dict is not None:
-        for name, info in fragment_dict.items():
-            view_to_contig[f"{name}.original"] = name
-            view_to_contig.update({header: name for header in info.get("fragment_info", {})})
-    ids = []
-    for header in data_df.index:
-        name = view_to_contig.get(header, header.rsplit(".", 1)[0])
+    table = build_protein_latents(contigs, names, output_dir, threads, config, logger)
+    proteins, offsets = table
+    if config.augmentation == "coordinate" and not isinstance(table, ProteinLatentTable):
+        raise ValueError("Coordinate augmentation requires ORF coordinate metadata")
+    if config.augmentation == "coordinate" and np.any(table.orf_starts < 0):
+        raise ValueError("Coordinate augmentation requires coordinate-bearing gene caller headers; "
+                         "regenerate the cached SCG .faa annotations")
+    lookup, view_rows = {}, {}
+    headers = {}
+    for name in names:
+        headers[f"{name}.original"] = (name, 0, None)
+        if f"{name}.original" not in data_df.index:
+            headers[f"{name}.0"] = (name, 0, None)
+    for name, info in (fragment_dict or {}).items():
         if name not in name_to_id:
-            raise ValueError(f"Cannot map ESM-C view {header!r} to a training contig")
-        ids.append(name_to_id[name])
-    proteins, offsets = build_protein_latents(
-        contigs, names, output_dir, threads, config, logger
-    )
-    encoder = ContigProteinEncoder(proteins, offsets, output_dim, config)
+            continue
+        for view_id, (header, interval) in enumerate(info.get("fragment_info", {}).items(), 1):
+            original = header == f"{name}.original" or (
+                header == f"{name}.0" and f"{name}.original" not in data_df.index
+            )
+            headers[header] = (name, 0 if original else view_id, interval)
+    for header in data_df.index:
+        if header not in headers:
+            name = header.rsplit(".", 1)[0]
+            if config.augmentation == "coordinate" or name not in name_to_id:
+                raise ValueError(f"Cannot map ESM-C view {header!r}; provide fragment metadata")
+            headers[header] = (name, len(headers) + 1, None)
+        name, view_id, interval = headers[header]
+        contig_id = name_to_id[name]
+        lookup[header] = (contig_id, view_id)
+        start, end = offsets[contig_id:contig_id + 2]
+        rows = np.arange(start, end, dtype=np.int64)
+        if config.augmentation == "coordinate" and view_id != 0:
+            if interval is None:
+                raise ValueError(f"Missing genomic interval for ESM-C view {header!r}")
+            if not interval.get("feature_only", False):
+                if "start_pos" not in interval or "length" not in interval:
+                    raise ValueError(f"Missing genomic interval for ESM-C view {header!r}")
+                a, length = interval["start_pos"], interval["length"]
+                if not isinstance(a, (int, np.integer)) or not isinstance(length, (int, np.integer)) or a < 0 or length <= 0:
+                    raise ValueError(f"Invalid genomic interval for ESM-C view {header!r}")
+                rows = rows[(table.orf_starts[rows] >= a) & (table.orf_ends[rows] <= a + length)]
+        view_rows[(contig_id, view_id)] = rows
+    # Inference uses view 0 even if a feature table contains only fragments.
+    for contig_id in range(len(names)):
+        view_rows[(contig_id, 0)] = np.arange(offsets[contig_id], offsets[contig_id + 1])
+    encoder = ContigProteinEncoder(proteins, offsets, output_dim, config,
+                                  view_rows if config.augmentation == "coordinate" else None)
+    if logger is not None:
+        subsets = [rows for (_, view), rows in view_rows.items() if view != 0]
+        logger.info(
+            f"ESM-C {config.augmentation}: {len(subsets)} fragment views; "
+            f"{sum(len(rows) == 0 for rows in subsets)} without eligible proteins."
+        )
     result = data_df.copy()
-    result["__esmc_contig_id"] = np.asarray(ids, dtype=np.float32)
+    result.attrs["esmc_lookup"] = lookup
     return result, encoder

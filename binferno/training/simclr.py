@@ -34,6 +34,7 @@ from .base import (
     PARENTAL_ARRAY,
 )
 from .esmc import prepare_esmc_features
+from .protein_batch import feature_tensor, cat_features, unpack_features
 from .scg import SCGMarginLoss, build_scg_groups, prepare_scg_loader
 
 KMER_DIM = 136
@@ -437,9 +438,9 @@ class SimCLRTrainer(BaseTrainer):
         ]  # strictly matching once and only the original view as view 0.
         namelist = [index.rsplit(".", 1)[0] for index in orig_df.index]
         # slice the data_df by the length of namelist, make sure to assert length for sliced data to be same.
-        dataset = list(
-            torch.split(torch.from_numpy(data_df.values).float(), len(namelist))
-        )
+        all_features = feature_tensor(data_df)
+        dataset = [all_features[i:i + len(namelist)]
+                   for i in range(0, len(data_df), len(namelist))]
 
         epochs = kwargs.get("epochs", self._common.epochs)
         assert (
@@ -609,7 +610,7 @@ class SimCLRTrainer(BaseTrainer):
         if len(batch) == 8:
             tax1, tax2 = batch[2:4]
         weights = batch[-1].to(device, non_blocking=True)
-        features = torch.cat([features1, features2], dim=0).to(
+        features = cat_features([features1, features2], dim=0).to(
             device, non_blocking=True
         )
         split = len(features1)
@@ -655,7 +656,7 @@ class SimCLRTrainer(BaseTrainer):
         # Create once so the index cache persists across all epochs
 
         epoch_iter = tqdm(range(epochs), desc="Training Epochs")
-        early_stopping = EarlyStoppingManagerSimCLR(patience=15)
+        early_stopping = EarlyStoppingManagerSimCLR(patience=5)
         for epoch in epoch_iter:
             avg_loss, stats = self.train_an_epoch(
                 model=model,
@@ -737,7 +738,7 @@ class SimCLRTrainer(BaseTrainer):
             raise ValueError("n_cov must be non-negative.")
 
         for i, features in enumerate(dataloader):
-            contig_features = torch.cat(features, dim=0).to(device, non_blocking=True)
+            contig_features = cat_features(features, dim=0).to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
             actual_batch_size = contig_features.shape[0] // self.view_num
             enc_feature, kmer_emb, cov_emb = model.forward_one(contig_features)
@@ -873,7 +874,7 @@ class SimCLRTrainer(BaseTrainer):
                     # first n_views are canonical features, the rest until the end are taxonomic features.
                     comp_cov = contig_features[:n_views]
                     tax_emb = contig_features[n_views:]
-                    contig_features = torch.cat(comp_cov, dim=0).to(
+                    contig_features = cat_features(comp_cov, dim=0).to(
                         device, non_blocking=True
                     )
                     tax_features = torch.cat(tax_emb, dim=0).to(
@@ -883,7 +884,7 @@ class SimCLRTrainer(BaseTrainer):
                     x_comp = contig_features[:, n_cov:]
 
                 else:
-                    contig_features = torch.cat(contig_features, dim=0).to(
+                    contig_features = cat_features(contig_features, dim=0).to(
                         device, non_blocking=True
                     )
                     x_cov = contig_features[:, :n_cov]  # coverage features
@@ -1323,7 +1324,7 @@ class SimCLRTrainer(BaseTrainer):
 def _first_nonfinite_report(model, x_comp, x_cov, tax_features, logger):
     """Report which model output first becomes non-finite."""
     with torch.no_grad():
-        stats = {"cov_model_out": model.cov_model(x_cov)}
+        stats = {"cov_model_out": model.cov_model(unpack_features(x_cov)[0])}
         if model.tax_model is not None and tax_features is not None:
             stats["tax_model_out"] = model.tax_model(tax_features)
         feats, cov_out = model(x_comp, x_cov, tax_features)

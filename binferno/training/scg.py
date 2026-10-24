@@ -14,6 +14,8 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
 from ..clustering.marker_quality import parse_hmmout, resolve_orf_to_contig
+from .protein_batch import feature_tensor, ProteinBatch
+
 from ..utils import run_hmmsearch_pyhmmer, run_pyrodigal
 
 
@@ -89,8 +91,11 @@ class SCGPairDataset(Dataset):
         contig_ids,
         weights,
         auxiliary_features=None,
+        protein_metadata=None,
     ):
         self.features = torch.from_numpy(features.astype(np.float32, copy=False))
+        if protein_metadata is not None:
+            self.features = ProteinBatch(self.features, *protein_metadata)
         self.pairs = torch.from_numpy(pairs.astype(np.int64, copy=False))
         self.marker_ids = torch.from_numpy(marker_ids.astype(np.int64, copy=False))
         self.contig_ids = torch.from_numpy(contig_ids.astype(np.int64, copy=False))
@@ -257,6 +262,8 @@ def prepare_scg_loader(
         contig_ids=np.asarray(contig_ids),
         weights=np.asarray(weights),
         auxiliary_features=auxiliary_features,
+        protein_metadata=(tuple(feature_tensor(data_df.iloc[original_rows]))[1:]
+                          if "esmc_lookup" in data_df.attrs else None),
     )
     if logger is not None:
         logger.info(
@@ -277,10 +284,12 @@ class SCGMarkerGroupDataset(Dataset):
     """Sample unique contigs within one marker group at each access."""
 
     def __init__(self, features, groups, memberships, max_contigs, seed,
-                 auxiliary_features=None):
+                 auxiliary_features=None, protein_metadata=None):
         self.features = torch.from_numpy(
             np.ascontiguousarray(features, dtype=np.float32)
         )
+        if protein_metadata is not None:
+            self.features = ProteinBatch(self.features, *protein_metadata)
         self.auxiliary_features = (
             None if auxiliary_features is None
             else torch.from_numpy(np.ascontiguousarray(auxiliary_features, dtype=np.float32))
@@ -360,6 +369,8 @@ def prepare_scg_group_loader(
         max_contigs=batch_size,
         seed=seed,
         auxiliary_features=auxiliary,
+        protein_metadata=(tuple(feature_tensor(data_df.iloc[original_rows]))[1:]
+                          if "esmc_lookup" in data_df.attrs else None),
     )
     if logger is not None:
         logger.info(
