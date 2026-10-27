@@ -251,7 +251,7 @@ def test_coordinate_views_full_orfs_boundaries_and_empty(monkeypatch, coordinate
     }}}
     result, encoder = esmc.prepare_esmc_features(
         df, None, ['a.dot', 'empty'], None, 1,
-        esmc.ESMCConfig(enabled=True, pooling=pooling, num_heads=2), 4,
+        esmc.ESMCConfig(enabled=True, pooling=pooling, num_heads=2, augmentation='coordinate'), 4,
         fragment_dict=fragments,
     )
     batch = feature_tensor(result)
@@ -290,7 +290,7 @@ def test_coordinate_cache_retains_prodigal_coordinates(tmp_path, monkeypatch):
 def test_coordinate_requires_known_intervals_and_coordinates(monkeypatch, coordinate_table):
     monkeypatch.setattr(esmc, 'build_protein_latents', lambda *args: coordinate_table)
     args = (pd.DataFrame([[0.]], index=['a.1']), None, ['a', 'empty'], None, 1,
-            esmc.ESMCConfig(enabled=True), 4)
+            esmc.ESMCConfig(enabled=True, augmentation='coordinate'), 4)
     with pytest.raises(ValueError, match='fragment metadata'):
         esmc.prepare_esmc_features(*args)
     coordinate_table.orf_starts[0] = -1
@@ -330,7 +330,7 @@ def test_simclr_coordinate_training_export_and_reload(tmp_path, monkeypatch, coo
         f'{name}.1': {'start_pos': 0, 'length': 9},
     }} for name in names}
     df, encoder = esmc.prepare_esmc_features(
-        df, None, names, None, 1, esmc.ESMCConfig(enabled=True), 4,
+        df, None, names, None, 1, esmc.ESMCConfig(enabled=True, augmentation='coordinate'), 4,
         fragment_dict=fragments,
     )
     fasta = tmp_path / 'contigs.fna'
@@ -379,7 +379,7 @@ def test_barlow_coordinate_loader_and_scg_metadata(tmp_path, monkeypatch, coordi
         f'{name}.0': {'start_pos': 0, 'length': 9},
     }} for name in ['a', 'empty']}
     df, encoder = esmc.prepare_esmc_features(
-        df, None, ['a', 'empty'], None, 1, esmc.ESMCConfig(enabled=True), 4,
+        df, None, ['a', 'empty'], None, 1, esmc.ESMCConfig(enabled=True, augmentation='coordinate'), 4,
         fragment_dict=fragments,
     )
     builder = BarlowTwinsTrainer.BuildDataset(data_df=df, max_positive_pairs=10)
@@ -420,7 +420,7 @@ def test_barlow_crop_zero_cannot_silently_use_original_proteins(monkeypatch, coo
     df = pd.DataFrame([[0.], [0.]], index=['a.original', 'a.0'])
     with pytest.raises(ValueError, match='fragment metadata'):
         esmc.prepare_esmc_features(df, None, ['a', 'empty'], None, 1,
-                                  esmc.ESMCConfig(enabled=True), 4)
+                                  esmc.ESMCConfig(enabled=True, augmentation='coordinate'), 4)
 
 
 def test_integer_metadata_survives_dataframe_reordering_and_batching():
@@ -431,3 +431,70 @@ def test_integer_metadata_survives_dataframe_reordering_and_batching():
     assert combined.contig_ids.tolist() == [2**40 + 1] * 2
     assert combined.view_ids.tolist() == [0, 3]
     torch.testing.assert_close(combined.features, torch.tensor([[3., 4.], [1., 2.]]))
+
+
+@pytest.mark.parametrize('device', ['cpu', pytest.param(
+    'cuda', marks=pytest.mark.skipif(not torch.cuda.is_available(), reason='needs CUDA')
+)])
+@pytest.mark.parametrize('dtype', [torch.float32, torch.bfloat16, torch.float16])
+def test_attention_pooling_uses_local_math_backend_under_amp(monkeypatch, device, dtype):
+    from copy import deepcopy
+
+    if device == 'cpu' and dtype == torch.float16:
+        pytest.skip('float16 regression targets CUDA')
+    if device == 'cuda' and dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
+        pytest.skip('needs CUDA bfloat16 support')
+    proteins = np.random.default_rng(12).normal(size=(65, 8)).astype(np.float32)
+    offsets = np.array([0, 64, 65, 65])
+    view_rows = {(0, 0): np.arange(64), (0, 1): np.arange(3),
+                 (1, 0): np.array([64]), (2, 0): np.array([], dtype=np.int64)}
+    encoder = esmc.ContigProteinEncoder(
+        proteins, offsets, 8, esmc.ESMCConfig(pooling='attention', num_heads=2),
+        view_rows=view_rows,
+    ).to(device)
+    reference = deepcopy(encoder)
+    ids = torch.tensor([0, 2, 0, 1, 0], device=device)
+    views = torch.tensor([1, 0, 0, 0, 1], device=device)
+    backend_state = lambda: (
+        torch.backends.cuda.math_sdp_enabled(),
+        torch.backends.cuda.flash_sdp_enabled(),
+        torch.backends.cuda.mem_efficient_sdp_enabled(),
+        torch.backends.cuda.cudnn_sdp_enabled(),
+    )
+    original_state = backend_state()
+    original_sdpa = torch.nn.functional.scaled_dot_product_attention
+    calls = []
+
+    def checked_sdpa(*args, **kwargs):
+        calls.append(backend_state())
+        assert backend_state() == (True, False, False, False)
+        return original_sdpa(*args, **kwargs)
+
+    monkeypatch.setattr(torch.nn.functional, 'scaled_dot_product_attention', checked_sdpa)
+    # The explicit attention implementation is independent of fused SDPA.
+    original_attention = reference.attention.forward
+
+    def explicit_attention(*args, **kwargs):
+        kwargs['need_weights'] = True
+        return original_attention(*args, **kwargs)
+
+    monkeypatch.setattr(reference.attention, 'forward', explicit_attention)
+    with torch.amp.autocast(device_type=device, dtype=dtype, enabled=dtype != torch.float32):
+        actual = encoder(ids, views)
+        expected = reference(ids, views)
+    assert calls
+    assert backend_state() == original_state
+    assert torch.isfinite(actual).all()
+    assert torch.equal(actual[1], torch.zeros_like(actual[1]))
+    tolerance = 2e-2 if dtype != torch.float32 else 1e-6
+    torch.testing.assert_close(actual, expected, atol=tolerance, rtol=tolerance)
+    weights = torch.randn_like(actual)
+    (actual * weights).sum().backward()
+    (expected * weights).sum().backward()
+    if device == 'cuda':
+        torch.cuda.synchronize()
+    for (name, parameter), (_, other) in zip(
+        encoder.named_parameters(), reference.named_parameters()
+    ):
+        assert torch.isfinite(parameter.grad).all(), name
+        torch.testing.assert_close(parameter.grad, other.grad, atol=tolerance, rtol=tolerance)

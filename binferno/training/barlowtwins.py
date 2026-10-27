@@ -316,6 +316,11 @@ class BarlowTwinsTrainer(BaseTrainer):
         output_aug_dir.mkdir(parents=True, exist_ok=True)
         output_train_dir = output_dir / "training"
         annotation_dir = output_train_dir / "scg"
+        if self._esmc.fusion == "concat":
+            raise ValueError(
+                "Protein concat fusion is currently supported only by SimCLRNet."
+            )
+            
         if self._esmc.enabled:
             # Keep existing checkpoints separate from models with a protein branch.
             import hashlib

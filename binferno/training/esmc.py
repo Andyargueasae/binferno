@@ -19,6 +19,7 @@ from Bio import SeqIO
 from pydantic import BaseModel, Field
 import torch
 from torch import nn
+from torch.nn.attention import SDPBackend, sdpa_kernel
 import torch.nn.functional as F
 
 from ..clustering.marker_quality import resolve_orf_to_contig
@@ -57,7 +58,11 @@ def _orf_coordinates(record):
 class ESMCConfig(BaseModel):
     enabled: bool = Field(default=False, description="Include the ESM-C protein modality.")
     model: Literal["esmc_300m", "esmc_600m"] = "esmc_300m"
-    pooling: Literal["mean", "attention"] = "mean"
+    pooling: Literal["mean", "attention"] = "attention"
+    fusion: Literal["residual", "concat"] = Field(
+        default="concat",
+        description="Late protein residual or concatenation before a joint MLP.",
+    )
     augmentation: Literal["shared", "coordinate"] = Field(
         default="coordinate", description="Pool complete ORFs in each fragment; shared is the baseline."
     )
@@ -189,7 +194,7 @@ class ContigProteinEncoder(nn.Module):
 
     def __init__(self, proteins, offsets, output_dim, config, view_rows=None):
         super().__init__()
-        self.proteins = torch.as_tensor(proteins, dtype=torch.float32, device="cpu")
+        self.proteins = torch.as_tensor(proteins, dtype=torch.float32, device="cpu") # CPU-backed table avoids GPU memory pressure and allows large batch sizes
         self.offsets = np.asarray(offsets, dtype=np.int64)
         if self.proteins.ndim != 2 or self.offsets.ndim != 1 or len(self.offsets) < 2:
             raise ValueError("Expected a protein matrix and contig offsets")
@@ -211,20 +216,25 @@ class ContigProteinEncoder(nn.Module):
                 if end > start:
                     self.means[index] = self.proteins[start:end].mean(0)
 
-    def forward(self, ids, view_ids=None):
+    def pool_with_presence(self, ids, view_ids=None):
         device = self.projection.weight.device
+
         if ids is None or ids.dtype != torch.long:
             raise ValueError("ESM-C requires explicit torch.long contig IDs")
         ids = ids.detach().cpu()
+        
         if view_ids is None:
             view_ids = torch.zeros_like(ids)
         if view_ids.dtype != torch.long or view_ids.shape != ids.shape:
             raise ValueError("ESM-C view IDs must be torch.long and match contig IDs")
+        
         pairs = torch.stack((ids, view_ids.detach().cpu()), dim=-1)
-        unique, inverse = torch.unique(pairs, dim=0, return_inverse=True)
+        unique, inverse = torch.unique(pairs, dim=0, return_inverse=True) # unique contains the unique contig/view pairs, and inverse maps each original pair to its index in unique
         indices = unique[:, 0].numpy()
         if np.any(indices < 0) or np.any(indices >= len(self.offsets) - 1):
             raise ValueError("ESM-C contig ID is outside the protein table")
+        
+        # deduplicate contig/view pairs.
         rows = []
         for contig_id, view_id in unique.tolist():
             if self.view_rows is None:
@@ -235,6 +245,7 @@ class ContigProteinEncoder(nn.Module):
                 except KeyError as exc:
                     raise ValueError(f"Unknown ESM-C contig/view pair {(contig_id, view_id)}") from exc
             rows.append(selected)
+
         lengths = np.asarray([len(selected) for selected in rows], dtype=np.int64)
         valid = torch.as_tensor(lengths > 0, device=device)
         if self.pooling == "mean":
@@ -268,13 +279,24 @@ class ContigProteinEncoder(nn.Module):
             mask = torch.arange(width, device=device)[None, :] >= torch.as_tensor(
                 np.maximum(lengths, 1), device=device
             )[:, None]
-            pooled, _ = self.attention(
-                self.query.expand(len(unique), -1, -1), tokens, tokens,
-                key_padding_mask=mask, need_weights=False,
-            )
+            # Masked, single-query pooling under AMP can hit fused CUDA
+            # attention kernel failures. Math SDPA is inexpensive for one query
+            # and keeps this workaround local to protein pooling (also backward).
+            with sdpa_kernel(SDPBackend.MATH):
+                pooled, _ = self.attention(
+                    self.query.expand(len(unique), -1, -1), tokens, tokens,
+                    key_padding_mask=mask, need_weights=False,
+                )
             pooled = pooled[:, 0]
         pooled = pooled * valid[:, None] # zero out empty contigs so they do not contribute to the residual
-        return pooled[inverse.to(device)]
+        
+        inverse = inverse.to(device)
+
+        return pooled[inverse], valid[inverse]
+    
+    def forward(self, ids, view_ids=None):
+        pooled, _ = self.pool_with_presence(ids, view_ids)
+        return pooled
 
     def fuse(self, representation, ids, view_ids=None):
         protein = self(ids, view_ids)

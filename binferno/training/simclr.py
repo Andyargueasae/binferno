@@ -95,6 +95,16 @@ class SimCLRTrainer(BaseTrainer):
         default=False,
         description="Decide whether to use taxonomy features only to get the resulting bins."
     )
+    hiddim: int = Field(
+        default=2048,
+        description="The dimension of the hidden layers in the SimCLRNet architecture. This is used to project the embeddings into a lower-dimensional space for contrastive learning."
+    )
+    dropout: float = Field(
+        default=0.2,
+        ge=0.0,
+        le=0.5,
+        description="Dropout rate for the neural network layers. This is used to prevent overfitting during training.",
+    )
     def __call__(
         self,
         contigs: Path,
@@ -114,6 +124,16 @@ class SimCLRTrainer(BaseTrainer):
         batch_size = self._common.batch_size
         output_dim = self._common.output_dim
         get_individual_embs = self._common.get_individual_embs
+
+        if self._esmc.fusion == "concat":
+            if not self._esmc.enabled:
+                raise ValueError(
+                    "Concat fusion requires training.esmc.enabled=True."
+                )
+            if not self.simclrnet:
+                raise ValueError(
+                    "Concat fusion currently requires SimCLRNet."
+                )
 
         # Set the temperature based on the N50 of the input contigs if not provided.
         if self.temperature:
@@ -216,8 +236,8 @@ class SimCLRTrainer(BaseTrainer):
             cov_model = EmbeddingNet(
                 in_sz=cov_dim,
                 out_sz=output_dim,  # 128
-                emb_szs=[2048] * 3,
-                ps=[0.2] * 2,
+                emb_szs=[self.hiddim] * 3,
+                ps=[self.dropout] * 2,
                 actn=nn.LeakyReLU(),
                 use_bn=True,
             ).to(device)
@@ -249,13 +269,14 @@ class SimCLRTrainer(BaseTrainer):
                 protein_encoder=protein_encoder,
                 in_sz=in_size,
                 out_sz=output_dim,
-                emb_szs=[2048] * 3,
+                emb_szs=[self.hiddim] * 3,
                 use_bn=True,
-                ps=[0.2] * 2,
+                ps=[self.dropout] * 2,
                 actn=nn.LeakyReLU(),
                 cov_model=cov_model,
                 tax_model=tax_model,
                 alpha_tax=self.alpha_tax,
+                fusion=self._esmc.fusion,
             ).to(device)
         else:
             model = NeuralNetwork(
@@ -950,7 +971,9 @@ class SimCLRTrainer(BaseTrainer):
                 total_acc1 += batch_acc
                 num_steps += 1
 
-            scheduler.step()
+            # Hold only the LR schedule; keep epoch metrics and checkpoint tracking active.
+            if epoch_counter >= self.max_lr_epochs:
+                scheduler.step()
 
             total_batches = num_steps + num_skipped
             skip_frac = num_skipped / max(total_batches, 1)
