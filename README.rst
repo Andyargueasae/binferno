@@ -42,7 +42,7 @@ Check the installation by running:
 
 .. code-block:: bash
 
-    Binferno --help
+    binferno --help
 
 Input features
 ================
