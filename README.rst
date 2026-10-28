@@ -15,7 +15,7 @@ Binferno: Contrastive Barlow-Twins metagenomic binning
     
 .. end-badges
 
-.. image:: docs/binferno-banner.jpg
+.. image:: docs/source/_static/images/binferno-banner.jpg
     :alt: Binferno logo
 
 
