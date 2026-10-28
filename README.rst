@@ -7,14 +7,16 @@ Binferno: Contrastive Barlow-Twins metagenomic binning
 
 |testing badge| |docs badge|
 
-.. |testing badge| image:: https://github.com/Andyargueasae/chloroscan/actions/workflows/testing.yml/badge.svg
-    :target: https://github.com/Andyargueasae/chloroscan/actions
+.. |testing badge| image:: https://github.com/Andyargueasae/binferno/actions/workflows/testing.yml/badge.svg
+    :target: https://github.com/Andyargueasae/binferno/actions
 
-.. |docs badge| image:: https://github.com/Andyargueasae/chloroscan/actions/workflows/docs.yml/badge.svg
-    :target: https://Andyargueasae.github.io/chloroscan
+.. |docs badge| image:: https://github.com/Andyargueasae/binferno/actions/workflows/docs.yml/badge.svg
+    :target: https://Andyargueasae.github.io/binferno
     
 .. end-badges
 
+.. image:: docs/binferno-banner.jpg
+    :alt: Binferno logo
 
 
 Binferno is a python-based metagenomic binner that handles metagenomic contigs for both prokaryotic genomes and eukaryotic plastid genomes. 
@@ -85,7 +87,11 @@ For more details, please refer to the documentation: https://andyargueasae.githu
 Credits
 =====
 
-Binferno is developed by Yuhao Tong and Robert Turnbull. 
+Binferno is developed by:
+ - `Yuhao Tong <https://www.linkedin.com/in/yuhao-tong-2a015825b/> `_ (University of Melbourne), 
+ - `Heroen Verbruggen <https://hverbruggen.codeberg.page> `_ (University of Melbourne, Spanish Institute of Oceanography),
+ - `Vanessa R. Marcelino <https://hologenomics.org/people.html> `_ (University of Melbourne, IATA-CSIC),
+ - `Dr Robert Turnbull <https://robturnbull.com>`_ (University of Melbourne)
 
 Current worklog:
 1. SimCLR rescue: rescue SimCLR branch by borrowing insights from other tools.
