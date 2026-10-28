@@ -1,7 +1,7 @@
 
-=====================================================
+======================================================
 Binferno: Contrastive Barlow-Twins metagenomic binning
-=====================================================
+======================================================
 
 .. start-badges
 
@@ -12,14 +12,14 @@ Binferno: Contrastive Barlow-Twins metagenomic binning
 
 .. |docs badge| image:: https://github.com/Andyargueasae/binferno/actions/workflows/docs.yml/badge.svg
     :target: https://Andyargueasae.github.io/binferno
-    
+
 .. end-badges
 
-.. image:: docs/source/_static/images/binferno-banner.jpg
+.. image:: https://raw.githubusercontent.com/Andyargueasae/binferno/main/docs/source/_static/images/binferno-banner.jpg
     :alt: Binferno logo
 
 
-Binferno is a python-based metagenomic binner that handles metagenomic contigs for both prokaryotic genomes and eukaryotic plastid genomes. 
+Binferno is a python-based metagenomic binner that handles metagenomic contigs for both prokaryotic genomes and eukaryotic plastid genomes.
 
 Installation
 ============
@@ -27,7 +27,7 @@ Installation
 Binferno is installable via pip. But before installing it, build the conda environment using the conda_env.yaml provided.
 
 .. code-block:: bash
-    
+
     mamba env create -n Binferno_env -c conda-forge -c bioconda -c defaults python=3.10
     # mamba env create -n Binferno_env -f conda_env.yaml
     conda activate Binferno_env
@@ -63,7 +63,7 @@ Usage
 A simple usage of Binferno is as follows:
 
 .. code-block:: bash
-    
+
     binferno --contig-file contigs.fasta --bam-dir path/to/bam/files \
         --output-dir path/to/output/dir --checkm-db path/to/checkm/db \
         --contig-length 1000
@@ -73,7 +73,7 @@ Such command will run Binferno with most default parameters: encode contigs by c
 For plastid binning, run with the flag ``--plastid``:
 
 .. code-block:: bash
-    
+
     binferno --contig-file contigs.fasta --bam-dir path/to/bam/files \
         --output-dir path/to/output/dir --checkm-db path/to/plastid/checkm/db \
         --contig-length 1000 --plastid
@@ -85,18 +85,19 @@ Besides, other steps, like augmentations, training, and clustering outputs will 
 For more details, please refer to the documentation: https://andyargueasae.github.io/binferno/Binferno.html.
 
 Credits
-=====
+========
 
 .. start-credits
 
 Binferno is developed by:
- - `PhD candidate Yuhao Tong <https://www.linkedin.com/in/yuhao-tong-2a015825b/>`_ 
- - `A/Prof Heroen Verbruggen <https://hverbruggen.codeberg.page>`_
- - `Dr Vanessa R. Marcelino <https://hologenomics.org/people.html>`_ 
- - `Dr Robert Turnbull <https://robturnbull.com>`_ 
+
+- `PhD candidate Yuhao Tong <https://www.linkedin.com/in/yuhao-tong-2a015825b/>`_
+- `A/Prof Heroen Verbruggen <https://hverbruggen.codeberg.page>`_
+- `Dr Vanessa R. Marcelino <https://hologenomics.org/people.html>`_
+- `Dr Robert Turnbull <https://robturnbull.com>`_
 
 .. end-credits
 
 Contact:
-    - Yuhao Tong: 
+    - Yuhao Tong:
         - Email: tyuhao037@gmail.com
