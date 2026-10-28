@@ -39,7 +39,7 @@ class LeidenClustering(BaseClustering):
     )
     CPM: bool = Field(
         False,
-        description="Whether to use CPM (Constant Potts Model) for Leiden clustering instead of RBER (Reichardt-Bornholdt).",
+        description="Whether to use CPM (Constant Potts Model) for Leiden clustering instead of RBER (Reichardt-Bornholdt) [DEPRECATED].",
     )
     taxonomy_edge_factor: float = Field(
         default=1.0,
