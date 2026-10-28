@@ -1,7 +1,6 @@
 from pathlib import Path
 
 import loguru
-import umap
 import pandas as pd
 from pydantic import Field
 
@@ -24,6 +23,16 @@ class UmapReducer(BaseReducer):
         data: pd.DataFrame,
         n_components: int = 15,
     ):
+        try:
+            import umap
+        except ModuleNotFoundError as exc:
+            if exc.name != "umap":
+                raise
+            raise ImportError(
+                "UMAP reduction requires umap-learn. Install umap-learn before "
+                "enabling use_umap or use_pipeline."
+            ) from exc
+
         reducer = umap.UMAP(
             n_components=n_components,
             n_neighbors=self.n_neighbors,
@@ -34,3 +43,4 @@ class UmapReducer(BaseReducer):
         )
         reduced_data = reducer.fit_transform(data)
         return reduced_data
+

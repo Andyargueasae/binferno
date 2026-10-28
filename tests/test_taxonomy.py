@@ -18,85 +18,38 @@ def _write_taxonomy_tsv(path: Path, rows: list):
 
 
 def test_taxonomy_builder_single_level(tmp_path):
-    """Basic integration: single-level taxonomy, verifies nodes and parental array."""
-    fasta = tmp_path / "contigs.fasta"
-    tsv = tmp_path / "tax.tsv"
-    _write_fasta(fasta, {"ctg1": "ATGCATGC", "ctg2": "TTTTGGGG"})
+    fasta, tsv = tmp_path / "contigs.fasta", tmp_path / "tax.tsv"
+    _write_fasta(fasta, {"ctg1": "ATGC", "ctg2": "TTTT"})
     _write_taxonomy_tsv(tsv, [("ctg1", "Bacteria"), ("ctg2", "Bacteria")])
-
-    builder = TaxonomyFeatureBuilder(taxonomy=tsv)
-    nodes, node_indices, parental_array, contig_df = builder(fasta, logger)
-
-    assert nodes[0] == "root"
-    assert "Bacteria" in node_indices
-    assert node_indices["root"] == 0
-    assert parental_array[0] == -1  # root has no parent
-    assert parental_array[node_indices["Bacteria"]] == 0  # Bacteria's parent is root
-    assert set(contig_df["contig_id"].tolist()) == {"ctg1", "ctg2"}
-    assert all(contig_df["tax_node_idx"] == node_indices["Bacteria"])
+    frame, vocab = TaxonomyFeatureBuilder(taxonomy=tsv)(fasta, logger)
+    assert frame.index.tolist() == ["ctg1", "ctg2"]
+    assert vocab["domain"] == {"<UNK>": 0, "Bacteria": 1}
+    assert (frame.tax_domain == 1).all()
+    assert (frame.mask_domain == 1.).all()
+    assert (frame.tax_phylum == 0).all()
+    assert (frame.mask_phylum == 0.).all()
 
 
 def test_taxonomy_builder_multi_level(tmp_path):
-    """Multi-level taxonomy: verifies deep graph structure and BFS ordering."""
-    fasta = tmp_path / "contigs.fasta"
-    tsv = tmp_path / "tax.tsv"
-    _write_fasta(fasta, {"ctg1": "ATGCATGC", "ctg2": "TTTTGGGG"})
-    _write_taxonomy_tsv(
-        tsv,
-        [
-            ("ctg1", "Bacteria;Proteobacteria;Gammaproteobacteria"),
-            ("ctg2", "Bacteria;Firmicutes"),
-        ],
-    )
-
-    builder = TaxonomyFeatureBuilder(taxonomy=tsv)
-    nodes, node_indices, parental_array, contig_df = builder(fasta, logger)
-
-    for name in (
-        "root",
-        "Bacteria",
-        "Proteobacteria",
-        "Gammaproteobacteria",
-        "Firmicutes",
-    ):
-        assert name in node_indices
-
-    # Parent of Proteobacteria must be Bacteria
-    assert parental_array[node_indices["Proteobacteria"]] == node_indices["Bacteria"]
-    # Parent of Gammaproteobacteria must be Proteobacteria
-    assert (
-        parental_array[node_indices["Gammaproteobacteria"]]
-        == node_indices["Proteobacteria"]
-    )
-
-    # BFS ordering invariant: every parent index precedes its child
-    assert all(p < i for i, p in enumerate(parental_array) if p != -1)
-
-    assert set(contig_df["contig_id"].tolist()) == {"ctg1", "ctg2"}
-    # ctg1 maps to finest taxon Gammaproteobacteria
-    assert (
-        contig_df.loc[contig_df["contig_id"] == "ctg1", "tax_node_idx"].values[0]
-        == node_indices["Gammaproteobacteria"]
-    )
+    fasta, tsv = tmp_path / "contigs.fasta", tmp_path / "tax.tsv"
+    _write_fasta(fasta, {"ctg1": "ATGC", "ctg2": "TTTT"})
+    _write_taxonomy_tsv(tsv, [
+        ("ctg1", "Bacteria;Proteobacteria;Gammaproteobacteria"),
+        ("ctg2", "Bacteria;Firmicutes"),
+    ])
+    frame, vocab = TaxonomyFeatureBuilder(taxonomy=tsv)(fasta, logger)
+    assert frame.loc["ctg1", "tax_phylum"] == vocab["phylum"]["Proteobacteria"]
+    assert frame.loc["ctg2", "tax_phylum"] == vocab["phylum"]["Firmicutes"]
+    assert frame.loc["ctg1", "tax_class"] == vocab["class"]["Gammaproteobacteria"]
+    assert frame.loc["ctg2", "mask_class"] == 0.
+    assert frame.shape == (2, 14)
 
 
 def test_taxonomy_builder_contig_filtering(tmp_path):
-    """Contigs in TSV absent from FASTA must be excluded; their taxa not added."""
-    fasta = tmp_path / "contigs.fasta"
-    tsv = tmp_path / "tax.tsv"
-    _write_fasta(fasta, {"ctg1": "ATGCATGC"})  # only ctg1
-    _write_taxonomy_tsv(
-        tsv,
-        [
-            ("ctg1", "Bacteria"),
-            ("ctg2", "Archaea"),  # ctg2 not in FASTA
-        ],
-    )
-
-    builder = TaxonomyFeatureBuilder(taxonomy=tsv)
-    nodes, node_indices, parental_array, contig_df = builder(fasta, logger)
-
-    assert "ctg2" not in contig_df["contig_id"].tolist()
-    assert "ctg1" in contig_df["contig_id"].tolist()
-    assert "Archaea" not in node_indices  # filtered-out taxon absent from graph
-    assert "Bacteria" in node_indices
+    fasta, tsv = tmp_path / "contigs.fasta", tmp_path / "tax.tsv"
+    _write_fasta(fasta, {"ctg1": "ATGC"})
+    _write_taxonomy_tsv(tsv, [("ctg1", "Bacteria"), ("ctg2", "Archaea")])
+    frame, vocab = TaxonomyFeatureBuilder(taxonomy=tsv)(fasta, logger)
+    assert frame.index.tolist() == ["ctg1"]
+    assert "Archaea" not in vocab["domain"]
+    assert "Bacteria" in vocab["domain"]

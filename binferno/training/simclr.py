@@ -125,11 +125,7 @@ class SimCLRTrainer(BaseTrainer):
         output_dim = self._common.output_dim
         get_individual_embs = self._common.get_individual_embs
 
-        if self._esmc.fusion == "concat":
-            if not self._esmc.enabled:
-                raise ValueError(
-                    "Concat fusion requires training.esmc.enabled=True."
-                )
+        if self._esmc.enabled and self._esmc.fusion == "concat":
             if not self.simclrnet:
                 raise ValueError(
                     "Concat fusion currently requires SimCLRNet."
@@ -276,7 +272,7 @@ class SimCLRTrainer(BaseTrainer):
                 cov_model=cov_model,
                 tax_model=tax_model,
                 alpha_tax=self.alpha_tax,
-                fusion=self._esmc.fusion,
+                fusion=self._esmc.fusion if self._esmc.enabled else "residual",
             ).to(device)
         else:
             model = NeuralNetwork(
@@ -1398,3 +1394,4 @@ class EarlyStoppingManagerSimCLR:
     def get_best_state(self):
         """Return the best checkpoint state and its associated loss and top accuracy."""
         return self._saved_state, self._lowest_loss, self._top_acc
+

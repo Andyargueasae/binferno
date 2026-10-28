@@ -10,7 +10,7 @@ import pytest
 
 from binferno.training.simclr import SimCLRTrainer
 from binferno.training.barlowtwins import BarlowTwinsTrainer
-from binferno.training.models.simclr import NeuralNetwork as SimCLRModel
+from binferno.training.models.old_simclr import NeuralNetwork as SimCLRModel
 from binferno.training.models.barlow_twins import NeuralNetwork as BarlowTwinsModel
 from .conftest import dummy_train_simclr, dummy_train_barlowtwins_args, toy_features
 from binferno.training.simclr import EarlyStoppingManagerSimCLR
@@ -31,7 +31,6 @@ def prep_model_simclr():
     model = SimCLRModel(
         tnf_dim=args.get("tnf_dim", 136),
         coverage_dim=N_COV * 2,
-        tax_emb_dim=0,
     ).to(DEVICE)
     return model
 
@@ -474,3 +473,4 @@ def test_prepare_trainer_reduces_batch_size_for_small_dataset():
     assert len(dataloader) > 0
     assert optimizer is not None
     assert scheduler is not None
+

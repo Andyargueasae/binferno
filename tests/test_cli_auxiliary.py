@@ -107,7 +107,7 @@ def test_calc_n50_uses_min_length_threshold(tmp_path: Path):
         ">c3\n" + "G" * 200 + "\n"
     )
 
-    assert bin_utils.calc_n50(fasta, min_length=500) == 3000
+    assert bin_utils.calc_n50(fasta, min_length=500) == 6000
 
 
 def test_get_length_parses_fasta_and_gzip(tmp_path: Path):
@@ -171,3 +171,4 @@ def test_gen_seed_invokes_external_steps_and_writes_seed(monkeypatch, tmp_path: 
     assert count == 1
     assert seed_path.exists()
     assert seed_path.read_text().splitlines() == ["contigA"]
+

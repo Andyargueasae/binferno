@@ -316,7 +316,7 @@ class BarlowTwinsTrainer(BaseTrainer):
         output_aug_dir.mkdir(parents=True, exist_ok=True)
         output_train_dir = output_dir / "training"
         annotation_dir = output_train_dir / "scg"
-        if self._esmc.fusion == "concat":
+        if self._esmc.enabled and self._esmc.fusion == "concat":
             raise ValueError(
                 "Protein concat fusion is currently supported only by SimCLRNet."
             )
@@ -1674,3 +1674,4 @@ class BarlowTwinsTrainer(BaseTrainer):
                     f.write(f"{fragment_seq}\n")
 
         return FragMent_Dict, All_Fragments, namelist
+

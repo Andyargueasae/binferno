@@ -34,6 +34,7 @@ class BinfernoReducer(BaseReducer):
         self, data: pd.DataFrame, logger: loguru._logger.Logger = None, threads: int = 1
     ):
         x_ind = data.index
+        x_columns = data.columns
         data = self.l2_normalize(data).astype(
             np.float32, copy=False
         )  # normalize the data before dimension reduction. Now it is already a numpy.ndarray.
@@ -73,8 +74,9 @@ class BinfernoReducer(BaseReducer):
             logger.info(
                 "No dimension reduction method selected. Returning original data."
             )
-            df = data.copy()
+            df = pd.DataFrame(data, index=x_ind, columns=x_columns)
 
         logger.info(f"Dimension reduction completed. Final dimension: {data.shape[1]}")
 
         return df
+
