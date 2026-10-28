@@ -5,6 +5,9 @@ on: [push]
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      # Keep the environment separate from the disposable wheel cache.
+      POETRY_VIRTUALENVS_IN_PROJECT: "true"
     strategy:
       fail-fast: false
       matrix:
@@ -13,6 +16,13 @@ jobs:
     # The steps start by installing poetry and mamba.
     steps:
     - uses: actions/checkout@v4
+
+    # PyTorch's locked Linux wheels include CUDA libraries. Leave room for
+    # both the installed environment and wheels unpacked during installation.
+    - name: Free runner disk space
+      run: |
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+        df -h
 
     - name: Install poetry
       run: pipx install poetry
@@ -40,27 +50,33 @@ jobs:
       uses: actions/setup-python@v5
       with:
         python-version: ${{ matrix.python-version }}
-        cache: 'poetry'
 
     - name: Installation
       run: |
         poetry env use "${{ matrix.python-version }}"
-        poetry install
+        poetry check --lock
+        poetry install --no-interaction --no-ansi
+      env:
+        # Keep wheel downloads in a disposable runner directory.
+        POETRY_CACHE_DIR: ${{ runner.temp }}/poetry-cache
+
+    - name: Report installation disk usage
+      if: always()
+      run: |
+        df -h
+        du -sh "${{ runner.temp }}/poetry-cache" .venv 2>/dev/null || true
+        rm -rf "${{ runner.temp }}/poetry-cache"
 
     - name: Install FragGeneScan via conda
       run: |
         source "/home/runner/mamba-cache/mamba/etc/profile.d/conda.sh"
-        mamba install -y -c bioconda fraggenescan=1.32
+        mamba install -y --override-channels -c conda-forge -c bioconda fraggenescan=1.32
 
     - name: Testing binferno
       run: |
         export CHLOROSCAN_CONDA_PREFIX=/home/runner/mamba-cache/chloroscan
-        export PATH=/home/runner/mamba-cache/mamba/condabin:$PATH
-
-        conda config --add channels conda-forge
-        conda config --add channels bioconda
-        conda config --add channels defaults
-        conda config --set channel_priority strict
+        export PATH=/home/runner/mamba-cache/mamba/bin:$PATH
 
         df -H
-        coverage run -m pytest tests/*
+        poetry run coverage run -m pytest tests/
+

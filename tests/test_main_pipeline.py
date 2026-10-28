@@ -108,6 +108,8 @@ def test_trainer_concat_false_normalizes(tmp_path, monkeypatch):
 
 
 class DummyTraining:
+    use_barlowtwins = False
+
     def __init__(self):
         self.called = 0
 
@@ -121,11 +123,14 @@ class DummyTraining:
 
 
 class DummyClustering:
+    from types import SimpleNamespace
+    cluster_method = SimpleNamespace(value="kmeans")
+
     def __init__(self):
         self.called = 0
         self.plastid = False
 
-    def __call__(self, contigs, embeddings, output_path, threads, logger):
+    def __call__(self, contigs, embeddings, taxonomy, output_path, threads, logger):
         self.called += 1
         df = pd.DataFrame(
             {"contig_id": ["contig_1", "contig_2"], "cluster_id": ["group0", "group1"]}
@@ -144,7 +149,12 @@ class DummyPostprocessor:
 
 
 class DummyFeatures:
-    pass
+    use_taxonomy = False
+
+
+class DummyReducer:
+    def __call__(self, data, logger, threads):
+        return data
 
 
 def _write_contigs(path: Path):
@@ -169,6 +179,7 @@ def test_binferno_train_only_skips_cluster_and_postprocess(tmp_path):
         bam_dir=bam_dir,
         output_dir=out_dir,
         features=DummyFeatures(),
+        reducer=DummyReducer(),
         training=trainer,
         clustering=clustering,
         postprocessor=postprocessor,
@@ -197,6 +208,7 @@ def test_binferno_full_pipeline_runs_all_stages(tmp_path):
         bam_dir=bam_dir,
         output_dir=out_dir,
         features=DummyFeatures(),
+        reducer=DummyReducer(),
         training=trainer,
         clustering=clustering,
         postprocessor=postprocessor,
@@ -208,3 +220,4 @@ def test_binferno_full_pipeline_runs_all_stages(tmp_path):
     assert clustering.called == 1
     assert postprocessor.called == 1
     assert (out_dir / "cluster_res" / "cluster_results.pkl").exists()
+

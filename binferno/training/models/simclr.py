@@ -202,6 +202,7 @@ class SimCLRNet(nn.Module):
             actn=actn,
         )
 
+        self.fc = stack
         if self.fusion == "concat":
             self.fc = stack[:-1] # Exclude the final output layer; handled by ProteinConcatFusion
             self.prot_concat_fusion = ProteinConcatFusion(
@@ -292,3 +293,4 @@ class SimCLRNet(nn.Module):
             return output, self.cov_model(x2)
         else:
             return output  # F.normalize(output) #output #/ torch.linalg.vector_norm(output, dim=-1, keepdim=True)
+

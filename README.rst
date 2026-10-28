@@ -42,7 +42,7 @@ Check the installation by running:
 
 .. code-block:: bash
 
-    Binferno --help
+    binferno --help
 
 Input features
 ================
@@ -82,7 +82,7 @@ The output bins will be stored in the output directory specified by ``--output-d
 
 Besides, other steps, like augmentations, training, and clustering outputs will also be stored as intermediate results in the output directory as ``augmentations``, ``training`` and ``cluster_res`` subdirectories, respectively.
 
-For more details, please refer to the documentation: https://andyargueasae.github.io/chloroscan/Binferno.html.
+For more details, please refer to the documentation: https://andyargueasae.github.io/binferno/Binferno.html.
 
 Credits
 =====
@@ -100,9 +100,3 @@ Binferno is developed by:
 Contact:
     - Yuhao Tong: 
         - Email: tyuhao037@gmail.com
-
-
-Current worklog:
-1. SimCLR rescue: rescue SimCLR branch by borrowing insights from other tools.
-2. Pytesting: Make unitary and reproducible tests for the codebase, boost coverage of codes.
-3. Insights into applying UMAP of the embeddings before clustering.

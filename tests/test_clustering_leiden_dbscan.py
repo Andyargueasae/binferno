@@ -113,7 +113,7 @@ def test_trainer_concat_false_normalizes(tmp_path, monkeypatch):
 
 def test_marker_table_resolves_fraggenescan_ids(tmp_path):
     hmm = tmp_path / "marker.hmm"
-    hmm.write_text("NAME HMM1\nNAME HMM2\n//\n")
+    hmm.write_text("NAME HMM1\n//\nNAME HMM2\n//\n")
 
     hmmout = tmp_path / "marker.hmmout"
     hmmout.write_text(
@@ -141,10 +141,10 @@ def test_score_bins_rewards_only_good_bins():
     counts = csr_matrix(
         np.array(
             [
-                [1, 1, 1],
-                [1, 1, 1],
+                [1, 1, 0],
+                [0, 0, 1],
                 [1, 0, 0],
-                [1, 0, 0],
+                [0, 1, 0],
             ],
             dtype=np.int32,
         )
@@ -163,11 +163,12 @@ def test_score_bins_rewards_only_good_bins():
         mq_contamination=0.10,
     )
 
-    score, quals = score_bins([[0, 1], [2, 3]], table, cfg)
+    score, quals = score_bins([[0, 1], [2, 3], [0, 1, 2, 3]], table, cfg)
 
     assert score[0] == 1.0
     assert score[1] == 2.0
-    assert len(quals) == 2
+    assert len(quals) == 3
+    assert quals[2].contamination > cfg.mq_contamination
 
 
 def test_derive_eps_grid_returns_sorted_positive_values():
@@ -232,3 +233,4 @@ def test_density_sweep_rescue_path_runs_with_noise():
     assert len(result.audit) > 0
     assert result.score is not None
     assert len(result.bins) >= 1
+
