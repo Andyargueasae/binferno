@@ -123,7 +123,7 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
                 "match the current augmented fragments."
             )
 
-        canonical_features = pd.DataFrame()
+        canonical_features = pd.DataFrame(index=pd.Index(fragment_ids))
 
         # STEP 1: Load COVERAGE features FIRST
         coverage_df = None
@@ -331,3 +331,4 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
         pca = PCA(n_components=n_components)
         reduced_embeddings = pca.fit_transform(embeddings)
         return reduced_embeddings
+
