@@ -230,3 +230,7 @@ dist
 prodigal_markers
 ./__pycache__/*
 note.txt
+*.sh
+*.yaml
+binferno/cluster_res_only.py
+fixes_to_simclr_collapse_plus_diagnostic/

@@ -1,0 +1,163 @@
+from pathlib import Path
+
+import tyro
+from loguru import logger
+from typing_extensions import Annotated
+
+from binferno.training import BinfernoTrainer
+from binferno.clustering import BinfernoClustering
+from binferno.postprocessing import BinfernoPostprocessor
+from binferno.features import BinfernoFeatureBuilder
+from binferno.reducer import BinfernoReducer
+
+
+def binferno(
+    contigs: Annotated[
+        Path,
+        tyro.conf.arg(
+            name="contigs",
+            metavar="CONTIGS",
+            help="Path to the input contigs in fasta format.",
+        ),
+    ],
+    bam_dir: Annotated[
+        Path,
+        tyro.conf.arg(
+            name="bam_dir",
+            metavar="BAM_DIR",
+            help="Path to the input directory of BAM files, must be paired with contigs. Used for calculating coverage mean and std.",
+        ),
+    ],
+    output_dir: Annotated[
+        Path,
+        tyro.conf.arg(
+            name="output_dir",
+            metavar="OUTPUT_DIR",
+            help="Path to the output directory to store all results, including intermediate results and final bins.",
+        ),
+    ],
+    features: BinfernoFeatureBuilder,
+    training: BinfernoTrainer,
+    clustering: BinfernoClustering,
+    postprocessor: BinfernoPostprocessor,
+    reducer: BinfernoReducer,
+    threads: Annotated[
+        int,
+        tyro.conf.arg(
+            name="threads",
+            metavar="THREADS",
+            help="Number of threads to use for parallel processing.",
+        ),
+    ] = 4,
+    train_only: Annotated[
+        bool,
+        tyro.conf.arg(
+            name="train_only",
+            metavar="TRAIN_ONLY",
+            help="True: only run training, False: full process.",
+        ),
+    ] = False,
+) -> None:
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    logger.add(f"{output_dir}/binferno.log", rotation="1 MB", retention="10 days")
+
+    taxonomy_in_barlow = (
+        features.use_taxonomy
+        and training.use_barlowtwins
+        and (
+            training.barlowtwins.alpha_tax > 0.0
+            or training.barlowtwins.lambda_taxonomy > 0.0
+        )
+    )
+    taxonomy_in_clustering = (
+        not train_only
+        and clustering.cluster_method.value == "leiden"
+        and features.use_taxonomy
+        and clustering.leiden.taxonomy_edge_factor < 1.0
+    )
+    if taxonomy_in_barlow and taxonomy_in_clustering:
+        raise ValueError(
+            "Taxonomy can be used in either Barlow Twins training or Leiden "
+            "clustering, not both. For training-only taxonomy, set "
+            "--clustering.leiden.taxonomy-edge-factor 1.0. For clustering-only "
+            "taxonomy, set --training.barlowtwins.alpha-tax 0 and "
+            "--training.barlowtwins.lambda-taxonomy 0."
+        )
+
+    embeddings = training(
+        contigs=contigs,
+        bam=bam_dir,
+        output_dir=output_dir,
+        features=features,
+        threads=threads,
+        logger=logger,
+    )
+
+    logger.info("Starting dimension reduction before clustering.")
+    embeddings = reducer(
+        data=embeddings,
+        logger=logger,
+        threads=threads,
+    )
+
+    if train_only:
+        logger.info(
+            "Only training stage is set, temperarily skipping clustering and results generations."
+        )
+        return
+
+    taxonomy = None
+    if (
+        clustering.cluster_method.value == "leiden"
+        and features.use_taxonomy
+        and clustering.leiden.taxonomy_edge_factor < 1.0
+        and training.use_barlowtwins # currently, we only apply taxonomy to barlow twins branch.
+    ):
+        taxonomy, _ = features.taxonomy(contigs=contigs, logger=logger)
+
+    logger.info("Starting clustering and writing MAGs.")
+    cluster_output_dir = output_dir / "cluster_res"
+    if cluster_output_dir.exists():
+        logger.warning(f"Cluster output directory {cluster_output_dir} already exists.")
+
+    cluster_output_dir.mkdir(parents=True, exist_ok=True)
+
+    cluster_result = clustering(
+        contigs=contigs,
+        embeddings=embeddings,
+        taxonomy=taxonomy,
+        output_path=cluster_output_dir,
+        threads=threads,
+        logger=logger,
+    )
+
+    with open(cluster_output_dir / "cluster_results.pkl", "wb") as f:
+        import pickle
+
+        pickle.dump(cluster_result, f)
+
+    # Run Output results generation
+    logger.info("Start writing results.")
+    results_output_dir = output_dir / "res_bins"
+    results_output_dir.mkdir(parents=True, exist_ok=True)
+
+    postprocessor(
+        contigs=contigs,
+        cluster_result=cluster_result,
+        num_threads=threads,
+        output_path=output_dir,
+        plastid=clustering.plastid,
+        logger=logger,
+    )
+
+    logger.info("Binferno pipeline completed successfully.")
+    return
+
+
+def main():
+    tyro.cli(binferno)
+
+
+if __name__ == "__main__":
+    main()
