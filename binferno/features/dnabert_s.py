@@ -1,7 +1,6 @@
 import torch
 import numpy as np
 import pandas as pd
-from transformers import AutoTokenizer, AutoModel, AutoConfig
 import time
 from pydantic import Field
 import loguru
@@ -25,6 +24,16 @@ class DnaBertSFeatureBuilder(BaseFeatureBuilder):
         logger: loguru._logger.Logger,
         fragments: list = [],
     ) -> pd.DataFrame:
+        try:
+            from transformers import AutoTokenizer, AutoModel, AutoConfig
+        except ModuleNotFoundError as exc:
+            if exc.name != "transformers":
+                raise
+            raise ImportError(
+                "DNABERT-S requires transformers. Install transformers before "
+                "enabling use_dnabert_s."
+            ) from exc
+
         start_time = time.time()
         model_path = "zhihan1996/DNABERT-S"
         max_len = self.max_len  # < 1000 bp recommended.
