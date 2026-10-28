@@ -87,11 +87,20 @@ For more details, please refer to the documentation: https://andyargueasae.githu
 Credits
 =====
 
+.. start-credits
+
 Binferno is developed by:
- - `Yuhao Tong (University of Melbourne) <https://www.linkedin.com/in/yuhao-tong-2a015825b/> `_ 
- - `Heroen Verbruggen (University of Melbourne, Spanish Institute of Oceanography) <https://hverbruggen.codeberg.page> `_
- - `Vanessa R. Marcelino (University of Melbourne, IATA-CSIC) <https://hologenomics.org/people.html> `_ 
- - `Dr Robert Turnbull (University of Melbourne) <https://robturnbull.com>`_ 
+ - `PhD candidate Yuhao Tong <https://www.linkedin.com/in/yuhao-tong-2a015825b/>`_ 
+ - `A/Prof Heroen Verbruggen <https://hverbruggen.codeberg.page>`_
+ - `Dr Vanessa R. Marcelino <https://hologenomics.org/people.html>`_ 
+ - `Dr Robert Turnbull <https://robturnbull.com>`_ 
+
+.. end-credits
+
+Contact:
+    - Yuhao Tong: 
+        - Email: tyuhao037@gmail.com
+
 
 Current worklog:
 1. SimCLR rescue: rescue SimCLR branch by borrowing insights from other tools.
