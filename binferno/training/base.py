@@ -13,6 +13,7 @@ from typing import List, Dict, Tuple
 
 from ..features import BinfernoFeatureBuilder
 from .config import CommonTrainingConfig, SCGConfig
+from .protein_batch import feature_tensor
 
 TAX_NODES = "tax_node"
 TAX_NODE_INDICES = "tax_node_index"
@@ -173,9 +174,7 @@ class BaseTrainer(BaseModel):
         with torch.no_grad():
             for i in range(0, len(orig_contigs), batch_size):
                 batch_encode = orig_contigs.iloc[i : i + batch_size]
-                batch_features = torch.tensor(
-                    batch_encode.values, dtype=torch.float32
-                ).to(device)
+                batch_features = feature_tensor(batch_encode).to(device)
 
                 batch_embeddings = model.get_embedding(batch_features)
                 batch_embeddings = F.normalize(batch_embeddings, p=2, dim=-1)

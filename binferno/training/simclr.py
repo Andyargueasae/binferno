@@ -34,6 +34,7 @@ from .base import (
     PARENTAL_ARRAY,
 )
 from .esmc import prepare_esmc_features
+from .protein_batch import feature_tensor, cat_features, unpack_features
 from .scg import SCGMarginLoss, build_scg_groups, prepare_scg_loader
 
 KMER_DIM = 136
@@ -94,6 +95,16 @@ class SimCLRTrainer(BaseTrainer):
         default=False,
         description="Decide whether to use taxonomy features only to get the resulting bins."
     )
+    hiddim: int = Field(
+        default=2048,
+        description="The dimension of the hidden layers in the SimCLRNet architecture. This is used to project the embeddings into a lower-dimensional space for contrastive learning."
+    )
+    dropout: float = Field(
+        default=0.2,
+        ge=0.0,
+        le=0.5,
+        description="Dropout rate for the neural network layers. This is used to prevent overfitting during training.",
+    )
     def __call__(
         self,
         contigs: Path,
@@ -113,6 +124,16 @@ class SimCLRTrainer(BaseTrainer):
         batch_size = self._common.batch_size
         output_dim = self._common.output_dim
         get_individual_embs = self._common.get_individual_embs
+
+        if self._esmc.fusion == "concat":
+            if not self._esmc.enabled:
+                raise ValueError(
+                    "Concat fusion requires training.esmc.enabled=True."
+                )
+            if not self.simclrnet:
+                raise ValueError(
+                    "Concat fusion currently requires SimCLRNet."
+                )
 
         # Set the temperature based on the N50 of the input contigs if not provided.
         if self.temperature:
@@ -215,8 +236,8 @@ class SimCLRTrainer(BaseTrainer):
             cov_model = EmbeddingNet(
                 in_sz=cov_dim,
                 out_sz=output_dim,  # 128
-                emb_szs=[2048] * 3,
-                ps=[0.2] * 2,
+                emb_szs=[self.hiddim] * 3,
+                ps=[self.dropout] * 2,
                 actn=nn.LeakyReLU(),
                 use_bn=True,
             ).to(device)
@@ -248,13 +269,14 @@ class SimCLRTrainer(BaseTrainer):
                 protein_encoder=protein_encoder,
                 in_sz=in_size,
                 out_sz=output_dim,
-                emb_szs=[2048] * 3,
+                emb_szs=[self.hiddim] * 3,
                 use_bn=True,
-                ps=[0.2] * 2,
+                ps=[self.dropout] * 2,
                 actn=nn.LeakyReLU(),
                 cov_model=cov_model,
                 tax_model=tax_model,
                 alpha_tax=self.alpha_tax,
+                fusion=self._esmc.fusion,
             ).to(device)
         else:
             model = NeuralNetwork(
@@ -437,9 +459,9 @@ class SimCLRTrainer(BaseTrainer):
         ]  # strictly matching once and only the original view as view 0.
         namelist = [index.rsplit(".", 1)[0] for index in orig_df.index]
         # slice the data_df by the length of namelist, make sure to assert length for sliced data to be same.
-        dataset = list(
-            torch.split(torch.from_numpy(data_df.values).float(), len(namelist))
-        )
+        all_features = feature_tensor(data_df)
+        dataset = [all_features[i:i + len(namelist)]
+                   for i in range(0, len(data_df), len(namelist))]
 
         epochs = kwargs.get("epochs", self._common.epochs)
         assert (
@@ -609,7 +631,7 @@ class SimCLRTrainer(BaseTrainer):
         if len(batch) == 8:
             tax1, tax2 = batch[2:4]
         weights = batch[-1].to(device, non_blocking=True)
-        features = torch.cat([features1, features2], dim=0).to(
+        features = cat_features([features1, features2], dim=0).to(
             device, non_blocking=True
         )
         split = len(features1)
@@ -655,7 +677,7 @@ class SimCLRTrainer(BaseTrainer):
         # Create once so the index cache persists across all epochs
 
         epoch_iter = tqdm(range(epochs), desc="Training Epochs")
-        early_stopping = EarlyStoppingManagerSimCLR(patience=15)
+        early_stopping = EarlyStoppingManagerSimCLR(patience=5)
         for epoch in epoch_iter:
             avg_loss, stats = self.train_an_epoch(
                 model=model,
@@ -737,7 +759,7 @@ class SimCLRTrainer(BaseTrainer):
             raise ValueError("n_cov must be non-negative.")
 
         for i, features in enumerate(dataloader):
-            contig_features = torch.cat(features, dim=0).to(device, non_blocking=True)
+            contig_features = cat_features(features, dim=0).to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
             actual_batch_size = contig_features.shape[0] // self.view_num
             enc_feature, kmer_emb, cov_emb = model.forward_one(contig_features)
@@ -873,7 +895,7 @@ class SimCLRTrainer(BaseTrainer):
                     # first n_views are canonical features, the rest until the end are taxonomic features.
                     comp_cov = contig_features[:n_views]
                     tax_emb = contig_features[n_views:]
-                    contig_features = torch.cat(comp_cov, dim=0).to(
+                    contig_features = cat_features(comp_cov, dim=0).to(
                         device, non_blocking=True
                     )
                     tax_features = torch.cat(tax_emb, dim=0).to(
@@ -883,7 +905,7 @@ class SimCLRTrainer(BaseTrainer):
                     x_comp = contig_features[:, n_cov:]
 
                 else:
-                    contig_features = torch.cat(contig_features, dim=0).to(
+                    contig_features = cat_features(contig_features, dim=0).to(
                         device, non_blocking=True
                     )
                     x_cov = contig_features[:, :n_cov]  # coverage features
@@ -949,7 +971,9 @@ class SimCLRTrainer(BaseTrainer):
                 total_acc1 += batch_acc
                 num_steps += 1
 
-            scheduler.step()
+            # Hold only the LR schedule; keep epoch metrics and checkpoint tracking active.
+            if epoch_counter >= self.max_lr_epochs:
+                scheduler.step()
 
             total_batches = num_steps + num_skipped
             skip_frac = num_skipped / max(total_batches, 1)
@@ -1323,7 +1347,7 @@ class SimCLRTrainer(BaseTrainer):
 def _first_nonfinite_report(model, x_comp, x_cov, tax_features, logger):
     """Report which model output first becomes non-finite."""
     with torch.no_grad():
-        stats = {"cov_model_out": model.cov_model(x_cov)}
+        stats = {"cov_model_out": model.cov_model(unpack_features(x_cov)[0])}
         if model.tax_model is not None and tax_features is not None:
             stats["tax_model_out"] = model.tax_model(tax_features)
         feats, cov_out = model(x_comp, x_cov, tax_features)

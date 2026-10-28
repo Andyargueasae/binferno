@@ -34,6 +34,7 @@ from .base import (
 )
 from .WeightedBTLoss import WeightedBTLoss
 from .esmc import prepare_esmc_features
+from .protein_batch import feature_tensor, ProteinBatch
 from .scg import (
     SCGMarginLoss,
     build_scg_groups as build_shared_scg_groups,
@@ -44,8 +45,10 @@ class PositivePairDataset(Dataset):
     """Gather paired views from one canonical feature matrix."""
 
     def __init__(self, features, pair_indices, base_ids, weights,
-                 taxonomy=None, taxonomy_mask=None):
+                 taxonomy=None, taxonomy_mask=None, protein_metadata=None):
         self.features = torch.from_numpy(np.ascontiguousarray(features, dtype=np.float32))
+        if protein_metadata is not None:
+            self.features = ProteinBatch(self.features, *protein_metadata)
         index_dtype = np.int32 if len(features) < 2**31 else np.int64
         self.pair_indices = torch.from_numpy(
             np.ascontiguousarray(pair_indices, dtype=index_dtype)
@@ -313,6 +316,11 @@ class BarlowTwinsTrainer(BaseTrainer):
         output_aug_dir.mkdir(parents=True, exist_ok=True)
         output_train_dir = output_dir / "training"
         annotation_dir = output_train_dir / "scg"
+        if self._esmc.fusion == "concat":
+            raise ValueError(
+                "Protein concat fusion is currently supported only by SimCLRNet."
+            )
+            
         if self._esmc.enabled:
             # Keep existing checkpoints separate from models with a protein branch.
             import hashlib
@@ -553,11 +561,9 @@ class BarlowTwinsTrainer(BaseTrainer):
         cov_embs = {}
         with torch.no_grad():
             for start in range(0, len(original_features), batch_size):
-                feature_batch = torch.as_tensor(
-                    original_features.iloc[start : start + batch_size].values,
-                    dtype=torch.float32,
-                    device=device,
-                )
+                feature_batch = feature_tensor(
+                    original_features.iloc[start : start + batch_size]
+                ).to(device)
                 taxonomy_batch = torch.as_tensor(
                     original_taxonomy.iloc[start : start + batch_size].values,
                     dtype=torch.float32,
@@ -875,6 +881,8 @@ class BarlowTwinsTrainer(BaseTrainer):
                 weights=w,
                 taxonomy=tax_X,
                 taxonomy_mask=mask,
+                protein_metadata=(tuple(feature_tensor(self.data_df))[1:]
+                                  if "esmc_lookup" in self.data_df.attrs else None),
             )
 
     def build_scg_groups(

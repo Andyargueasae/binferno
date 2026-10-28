@@ -39,7 +39,7 @@ class LeidenClustering(BaseClustering):
     )
     CPM: bool = Field(
         False,
-        description="Whether to use CPM (Constant Potts Model) for Leiden clustering instead of RBER (Reichardt-Bornholdt).",
+        description="Whether to use CPM (Constant Potts Model) for Leiden clustering instead of RBER (Reichardt-Bornholdt) [DEPRECATED].",
     )
     taxonomy_edge_factor: float = Field(
         default=1.0,
@@ -160,9 +160,9 @@ class LeidenClustering(BaseClustering):
         num_workers = max(1, int(threads or 1))
 
         if not self.CPM:
-            parameter_list = [0.5, 1, 5, 10, 30, 50, 70, 90, 100]
+            parameter_list = [0.5, 1, 5, 10, 30]
         else:
-            parameter_list = [0.001, 0.005, 0.01, 0.05, 0.1, 0.2]
+            parameter_list = [0.001, 0.005, 0.01, 0.05, 0.1]
         bandwidth_list = [
             0.05,
             0.1,

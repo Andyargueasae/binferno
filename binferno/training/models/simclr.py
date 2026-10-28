@@ -1,10 +1,42 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 import numpy as np
 from typing import Optional
 from .taxonomy_gate import bounded_taxonomy_residual
+from ..protein_batch import unpack_features
 
+class ProteinConcatFusion(nn.Module):
+    def __init__(
+        self,
+        canonical_dim,
+        protein_dim,
+        output_dim,
+        hidden_dim,
+    ):
+        super().__init__()
+        self.canonical_norm = nn.LayerNorm(canonical_dim)
+        self.protein_norm = nn.LayerNorm(protein_dim)
+
+        self.joint_mlp = nn.Sequential(
+            nn.Linear(canonical_dim + protein_dim, hidden_dim),
+            nn.LeakyReLU(),
+            nn.Linear(hidden_dim, output_dim),
+        )
+
+    def forward(self, canonical, protein, has_proteins):
+        canonical = self.canonical_norm(canonical)
+        protein = self.protein_norm(protein)
+
+        # Mask after normalization: LayerNorm has trainable bias.
+        protein = protein.masked_fill(
+            ~has_proteins[:, None], 0.0
+        )
+
+        return self.joint_mlp(
+            torch.cat([canonical, protein], dim=-1)
+        )
 
 # Shared COMEBin-style block builder (kept behavior-identical).
 def _bn_drop_lin(
@@ -14,7 +46,6 @@ def _bn_drop_lin(
     p: float = 0.0,
     actn: Optional[nn.Module] = None,
 ):
-    # https://github.com/fastai/fastai/blob/3b7c453cfa3845c6ffc496dd4043c07f3919270e/fastai/layers.py#L44
     "Sequence of batchnorm (if `bn`), dropout (with `p`) and linear (`n_in`,`n_out`) layers followed by `actn`."
     layers = [nn.BatchNorm1d(n_in)] if bn else []
     if p != 0:
@@ -24,7 +55,6 @@ def _bn_drop_lin(
         layers.append(actn)
     return layers
 
-# Shared COMEBin MLP stack builder for EmbeddingNet/SimCLRNet.
 def _build_embedding_stack(
     in_sz,
     out_sz,
@@ -54,10 +84,7 @@ def _build_embedding_stack(
     layers.append(nn.Linear(emb_szs[-1], out_sz))
     return nn.Sequential(*layers)
 
-# The raw COMEBin's embedding network is a simple MLP with batch normalization and dropout. We can use it as a baseline model for our experiments. We can also implement a more complex fusion network later to see if we can improve the performance.
 class EmbeddingNet(nn.Module):
-    # Useful code from fast.ai tabular model
-    # https://github.com/fastai/fastai/blob/3b7c453cfa3845c6ffc496dd4043c07f3919270e/fastai/tabular/models.py#L6
     def __init__(self, in_sz, out_sz, emb_szs, ps, use_bn=True, actn=nn.ReLU()):
         super(EmbeddingNet, self).__init__()
         self.in_sz = in_sz
@@ -84,7 +111,7 @@ class EmbeddingNet(nn.Module):
 
     def forward(self, x):
         output = self.fc(x)
-        return output  # F.normalize(output) #output #/ torch.linalg.vector_norm(output, dim=-1, keepdim=True)
+        return output
 
 
 class RankTaxonomyEncoder(nn.Module):
@@ -121,8 +148,6 @@ class RankTaxonomyEncoder(nn.Module):
 
 
 class SimCLRNet(nn.Module):
-    # Useful code from fast.ai tabular model
-    # https://github.com/fastai/fastai/blob/3b7c453cfa3845c6ffc496dd4043c07f3919270e/fastai/tabular/models.py#L6
     def __init__(
         self,
         in_sz,
@@ -135,11 +160,10 @@ class SimCLRNet(nn.Module):
         cov_model=None,
         tax_model=None,
         covmodel_notl2normalize=False,
-        cnn=False,
-        lstm=False,
         get_taxout=False,
         alpha_tax: float = 0.05,
         protein_encoder=None,
+        fusion: Optional[str] = "residual",
     ):
         super(SimCLRNet, self).__init__()
         self.protein_encoder = protein_encoder
@@ -150,11 +174,26 @@ class SimCLRNet(nn.Module):
         self.out_sz = out_sz
         self.n_embs = len(emb_szs) - 1
         self.covmodel_notl2normalize = covmodel_notl2normalize
+
+
         if not 0.0 <= alpha_tax <= 0.2:
             raise ValueError("alpha_tax must be between 0 and 0.2.")
         self.alpha_tax = alpha_tax
- 
-        self.fc = _build_embedding_stack(
+        
+        if fusion not in {"residual", "concat"}:
+            raise ValueError(
+                f"Unsupported protein fusion mode: {fusion!r}"
+            )
+
+        if fusion == "concat" and protein_encoder is None:
+            raise ValueError(
+                "Protein concat fusion requires an enabled protein encoder."
+            )
+        
+        self.fusion = fusion
+        self.prot_concat_fusion = None
+        
+        stack = _build_embedding_stack(
             in_sz=self.in_sz,
             out_sz=self.out_sz,
             emb_szs=emb_szs,
@@ -162,6 +201,15 @@ class SimCLRNet(nn.Module):
             use_bn=use_bn,
             actn=actn,
         )
+
+        if self.fusion == "concat":
+            self.fc = stack[:-1] # Exclude the final output layer; handled by ProteinConcatFusion
+            self.prot_concat_fusion = ProteinConcatFusion(
+                canonical_dim=emb_szs[-1],  # Last hidden layer size
+                protein_dim=protein_encoder.projection.out_features,
+                output_dim=self.out_sz,
+                hidden_dim=emb_szs[-1]
+            )
         
 
     def bn_drop_lin(
@@ -174,10 +222,9 @@ class SimCLRNet(nn.Module):
     ):
         return _bn_drop_lin(n_in=n_in, n_out=n_out, bn=bn, p=p, actn=actn)
 
-    def forward(self, x, x2=None, x3=None):
-        protein_ids = None
-        if self.protein_encoder is not None:
-            x, protein_ids = x[:, :-1], x[:, -1]
+    def forward(self, x, x2=None, x3=None, contig_ids=None, view_ids=None):
+        x, protein_ids, view_ids = unpack_features(x, contig_ids, view_ids)
+        x2, _, _ = unpack_features(x2)
         if self.pretrained_model is not None and self.cov_model is None:
             kmeremb = self.pretrained_model(x)
             x = torch.cat([F.normalize(self.pretrained_model(x)), x2], dim=-1)
@@ -197,7 +244,7 @@ class SimCLRNet(nn.Module):
                     dim=-1,
                 )
 
-        # this is the case.
+        
         if self.pretrained_model is None and self.cov_model is not None:
             if self.covmodel_notl2normalize:
                 x = torch.cat([x, self.cov_model(x2)], dim=-1)
@@ -210,16 +257,32 @@ class SimCLRNet(nn.Module):
                 raise ValueError(
                     "Taxonomic features are required when SimCLRNet has a tax_model."
                 )
+
         output = self.fc(x)
+
+        if self.fusion == "concat":
+            protein_emb, has_proteins = (
+                self.protein_encoder.pool_with_presence(protein_ids, view_ids)
+            )
+
+            output = self.prot_concat_fusion(
+                canonical = output, 
+                protein = protein_emb,
+                has_proteins=has_proteins
+            )
 
         if self.tax_model is not None:
             tax_output = self.tax_model(x3)
             output = bounded_taxonomy_residual(
                 output, tax_output, x3, self.alpha_tax
             )
-
-        if self.protein_encoder is not None:
-            output = self.protein_encoder.fuse(output, protein_ids)
+        
+        if self.protein_encoder is not None and self.fusion == "residual":
+            output = self.protein_encoder.fuse(
+                output,
+                protein_ids,
+                view_ids,
+            )
 
         if self.cov_model is not None:
             if self.pretrained_model is not None:

@@ -21,10 +21,6 @@ class ClusterMethod(Enum):
 
 
 class BaseClustering(BaseModel):
-    cluster_method: ClusterMethod = Field(
-        default=ClusterMethod.leiden,
-        description="The clustering method to use.",
-    )
 
     plastid: bool = Field(
         default=False,

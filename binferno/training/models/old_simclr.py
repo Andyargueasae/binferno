@@ -1,7 +1,9 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 import numpy as np
+from ..protein_batch import unpack_features
 
 # engineering ideas: Kmer set to 4 first. (index represent priority)
 # 1. auxiliary losses on separate modality encoders.
@@ -86,10 +88,8 @@ class NeuralNetwork(nn.Module):
             nn.BatchNorm1d(2048),
         )
 
-    def _encode(self, x):
-        protein_ids = None
-        if self.protein_encoder is not None:
-            x, protein_ids = x[:, :-1], x[:, -1]
+    def _encode(self, x, contig_ids=None, view_ids=None):
+        x, protein_ids, view_ids = unpack_features(x, contig_ids, view_ids)
         # encode tnf and coverage features separately, then fuse them together.
         tnf_features = x[:, : self.tnf_enc_dim]
         tnf_encode = self.tnf_encoder(tnf_features)  # not normalized anymore.
@@ -97,15 +97,14 @@ class NeuralNetwork(nn.Module):
         cov_encode = self.coverage_encoder(cov_features)  # not normalized anymore.
         fused_encode = self.fusion_network(tnf_encode, cov_encode)
         if self.protein_encoder is not None:
-            fused_encode = self.protein_encoder.fuse(fused_encode, protein_ids)
+            fused_encode = self.protein_encoder.fuse(fused_encode, protein_ids, view_ids)
         return fused_encode, tnf_encode, cov_encode
 
     def get_embedding(self, x):
         return self._encode(x)[0]
 
     def get_separate_modality_embs(self, x):
-        if self.protein_encoder is not None:
-            x = x[:, :-1]
+        x, _, _ = unpack_features(x)
         kmer_features = x[:, : self.tnf_enc_dim]
         kmer_encoded = F.normalize(self.tnf_encoder(kmer_features), dim=-1)
         coverage_features = x[:, self.tnf_enc_dim :]

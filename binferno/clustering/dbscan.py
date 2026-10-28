@@ -42,11 +42,11 @@ from .dbscan_sweep import (
 
 class DbscanClustering(BaseClustering):
     """Sweep DBSCAN (or HDBSCAN) parameters, scoring each clustering by the
-    number of near-complete, low-contamination bins it produces."""
+    number of near-complete, low-contamination bins it produces. DEPRECATED: use Leiden clustering instead."""
 
     hdbscan: bool = Field(
         default=False,
-        description="Use HDBSCAN instead of DBSCAN.",
+        description="Use HDBSCAN instead of DBSCAN. [DEPRECATED: HDBSCAN is not recommended for binning]",
     )
     core_bp: Optional[int] = Field(
         default=100_000,

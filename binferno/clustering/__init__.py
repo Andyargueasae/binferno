@@ -11,7 +11,7 @@ import loguru
 class BinfernoClustering(BaseClustering):
     cluster_method: ClusterMethod = Field(
         default=ClusterMethod.leiden,
-        description="The clustering method to use. DBSCAN is deprecated and will be removed in future versions. Use Leiden instead.",
+        description="The clustering method to use. DBSCAN is DEPRECATED and will be removed in future versions. Use Leiden instead.",
     )
     leiden: LeidenClustering
     dbscan: DbscanClustering

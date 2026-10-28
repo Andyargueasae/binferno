@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from .taxonomy_gate import bounded_taxonomy_residual
+from ..protein_batch import unpack_features
 
 class NeuralNetwork(nn.Module):
     def __init__(
@@ -88,18 +89,16 @@ class NeuralNetwork(nn.Module):
             dropout=0.0,
         )
 
-    def encode_canonical(self, x: torch.Tensor) -> torch.Tensor:
+    def encode_canonical(self, x: torch.Tensor, contig_ids=None, view_ids=None) -> torch.Tensor:
         """Encode composition and coverage without exposing taxonomy labels."""
-        protein_ids = None
-        if self.protein_encoder is not None:
-            x, protein_ids = x[:, :-1], x[:, -1]
+        x, protein_ids, view_ids = unpack_features(x, contig_ids, view_ids)
         tnf_features = x[:, : self.tnf_enc_dim]
         cov_features = x[:, self.tnf_enc_dim :]
         tnf_encode = self.tnf_encoder(tnf_features)
         cov_encode = self.coverage_encoder(cov_features)
         fused = self.fusion_network(tnf_encode, cov_encode)
         if self.protein_encoder is not None:
-            fused = self.protein_encoder.fuse(fused, protein_ids)
+            fused = self.protein_encoder.fuse(fused, protein_ids, view_ids)
         return fused
 
     def _add_taxonomy(
@@ -131,8 +130,7 @@ class NeuralNetwork(nn.Module):
         return self.encode(x, tax_emb)
 
     def get_separate_modality_embs(self, x):
-        if self.protein_encoder is not None:
-            x = x[:, :-1]
+        x, _, _ = unpack_features(x)
         kmer_features = x[:, : self.tnf_enc_dim]
         kmer_encoded = self.tnf_encoder(kmer_features)
         coverage_features = x[:, self.tnf_enc_dim :]
