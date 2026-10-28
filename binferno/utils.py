@@ -1,44 +1,66 @@
 import gzip
-from Bio import SeqIO
+from pathlib import Path
+import sys
 import mimetypes
 import os
-import shutil
-import pandas as pd
-import numpy as np
+import subprocess
 
-import torch
-import yaml
-import sys
-
-
-def save_checkpoint(state, is_best, filename="checkpoint.pth.tar"):
-    torch.save(state, filename)
-    if is_best:
-        shutil.copyfile(filename, "model_best.pth.tar")
+from Bio import SeqIO
+import pyfastx
+import pyhmmer
+import pyrodigal
 
 
-def save_config_file(model_checkpoints_folder, args):
-    if not os.path.exists(model_checkpoints_folder):
-        os.makedirs(model_checkpoints_folder)
-    with open(os.path.join(model_checkpoints_folder, "config.yml"), "w") as outfile:
-        yaml.dump(args, outfile, default_flow_style=False)
+def run_hmmsearch_pyhmmer(
+    hmm_path: Path,
+    faa_path: Path,
+    domtblout_path: Path,
+    threads: int,
+    e_value: float = 1e-10,
+):
+    # Load sequences and digitize against the HMM alphabet
+    with pyhmmer.easel.SequenceFile(str(faa_path), digital=True) as seq_file:
+        sequences = seq_file.read_block()
+
+    with pyhmmer.plan7.HMMFile(str(hmm_path)) as hmm_file:
+        hmms = list(hmm_file)
+
+    # E=1e-10 corresponds to the full-sequence reporting threshold
+    all_hits = list(pyhmmer.hmmsearch(hmms, sequences, cpus=threads, E=e_value))
+
+    # Write domain table in the same format hmmsearch --domtblout produces
+    with open(domtblout_path, "wb") as f:
+        for hits in all_hits:
+            hits.write(f, format="domains", header=True)
 
 
-def accuracy(output, target, topk=(1,)):
-    """Computes the accuracy over the k top predictions for the specified values of k"""
-    with torch.no_grad():
-        maxk = max(topk)
-        batch_size = target.size(0)
+def run_pyrodigal(
+    contig_file: Path,
+    faa_path: Path,
+    threads: int,
+):
+    # meta=True is the equivalent of FragGeneScan's metagenome mode:
+    # no per-sample training, uses prebuilt metagenomic models.
+    orf_finder = pyrodigal.GeneFinder(meta=True)
 
-        _, pred = output.topk(maxk, 1, True, True)
-        pred = pred.t()
-        correct = pred.eq(target.view(1, -1).expand_as(pred))
+    records = list(SeqIO.parse(str(contig_file), "fasta"))
 
-        res = []
-        for k in topk:
-            correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
-            res.append(correct_k.mul_(100.0 / batch_size))
-        return res
+    def process(record):
+        genes = orf_finder.find_genes(bytes(record.seq))
+        return record.id, genes
+
+    results = []
+    if threads > 1:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=threads) as pool:
+            results = list(pool.map(process, records))
+    else:
+        results = [process(r) for r in records]
+
+    with open(faa_path, "w") as f:
+        for contig_id, genes in results:
+            genes.write_translations(f, sequence_id=contig_id)
 
 
 def get_length(fastx_file):
@@ -80,125 +102,20 @@ def save_result(result, filepath, namelist):
     f.close()
 
 
-def calculateN50(seqLens):
-    thresholdN50 = sum(seqLens) / 2.0
-
-    seqLens.sort(reverse=True)
-
-    testSum = 0
-    N50 = 0
-    for seqLen in seqLens:
-        testSum += seqLen
-        if testSum >= thresholdN50:
-            N50 = seqLen
-            break
-    return N50
-
-
-def get_kmer_coverage_aug0(data_path):
-    namelist = pd.read_csv(
-        data_path + "aug0_datacoverage_mean.tsv", sep="\t", usecols=range(1)
-    ).values[:, 0]
-    mapObj = dict(zip(namelist, range(len(namelist))))
-
-    cov_file = data_path + "aug0_datacoverage_mean.tsv"
-    com_file = data_path + "aug0/kmer_4_f0.csv"
-
-    covHeader = pd.read_csv(cov_file, sep="\t", nrows=1)
-    shuffled_covMat = pd.read_csv(
-        cov_file, sep="\t", usecols=range(1, covHeader.shape[1])
-    ).values
-    shuffled_namelist = pd.read_csv(cov_file, sep="\t", usecols=range(1)).values[:, 0]
-
-    covIdxArr = np.empty(len(mapObj), dtype=np.int)
-    for contigIdx in range(len(shuffled_namelist)):
-        if shuffled_namelist[contigIdx].split("_aug")[0] in mapObj:
-            covIdxArr[mapObj[shuffled_namelist[contigIdx].split("_aug")[0]]] = contigIdx
-    covMat = shuffled_covMat[covIdxArr]
-
-    compositHeader = pd.read_csv(com_file, sep=",", nrows=1)
-    shuffled_compositMat = pd.read_csv(
-        com_file, sep=",", usecols=range(1, compositHeader.shape[1])
-    ).values
-    shuffled_namelist = pd.read_csv(com_file, sep=",", usecols=range(1)).values[:, 0]
-
-    covIdxArr = np.empty(len(mapObj), dtype=np.int)
-    for contigIdx in range(len(shuffled_namelist)):
-        if shuffled_namelist[contigIdx].split("_aug")[0] in mapObj:
-            covIdxArr[mapObj[shuffled_namelist[contigIdx].split("_aug")[0]]] = contigIdx
-    compositMat = shuffled_compositMat[covIdxArr]
-
-    # use cov_maxnormalize
-    covMat = covMat + 1e-5
-    covMat = covMat / covMat.max(axis=0)[None, :]
-
-    compositMat = compositMat + 1
-    compositMat = compositMat / compositMat.sum(axis=1)[:, None]
-
-    X_t = np.hstack((covMat, compositMat))
-
-    return X_t, covMat, compositMat, namelist
-
-
-@torch.no_grad()
-def get_embeddings(model, test_dl, embedding_dim, device):
-    model.eval()
-    embs = np.zeros(shape=(0, embedding_dim))
-    for x in test_dl:
-        emb = model(x.to(device)).to("cpu")
-        embs = np.vstack((embs, emb))
-
-    return embs
-
-
-def get_kmerMetric_emb(
-    kmer_model_path,
-    compositMats,
-    device=torch.device("cpu"),
-    kmerMetric_notl2normalize=False,
-):
-    #####
-    # load kmer_metric
-    config_file = os.path.dirname(kmer_model_path) + "/kmerMetric_config.yaml"
-
-    from ruamel.yaml import YAML
-    from pathlib import Path
-    import torch.nn as nn
-    from models.mlp import EmbeddingNet
-    from sklearn.preprocessing import normalize
-
-    yaml = YAML(typ="safe")
-
-    cnf = yaml.load(Path(config_file))
-
-    ps = [cnf["dropout_value"]] * (len(cnf["emb_szs"]) - 1)
-    actn = nn.LeakyReLU()
-
-    kmerMetric_model = EmbeddingNet(
-        in_sz=len(compositMats[0]),
-        out_sz=cnf["embedding_dim"],
-        emb_szs=cnf["emb_szs"],
-        ps=ps,
-        use_bn=True,
-        actn=actn,
+def calc_n50(contigs: Path, min_length: int = 1000) -> int:
+    seq_record = pyfastx.Fastx(contigs)
+    lengths = sorted(
+        [len(record) for _, record in seq_record if len(record) >= min_length],
+        reverse=True,
     )
-
-    kmerMetric_model = kmerMetric_model.to(device)
-
-    kmerMetric_model.load_state_dict(torch.load(kmer_model_path, map_location=device))
-
-    compositMats = torch.from_numpy(compositMats).float()
-
-    test_dataloader = torch.utils.data.DataLoader(
-        compositMats, batch_size=2048, shuffle=False
-    )
-
-    compositMats = get_embeddings(
-        kmerMetric_model, test_dataloader, cnf["embedding_dim"], device
-    )
-    if not kmerMetric_notl2normalize:
-        compositMats = normalize(compositMats)
-    return compositMats
+    # only care about the lengths over 1000bp.
+    total_length = sum(lengths)
+    cumulative_length = 0
+    for length in lengths:
+        cumulative_length += length
+        if cumulative_length >= total_length / 2:
+            return length
+    return 0
 
 
 def file_len(fname):
@@ -210,7 +127,8 @@ def file_len(fname):
 
 def gen_seed(
     logger,
-    contig_file: str,
+    contig_file: Path,
+    output_dir: Path,
     threads: int,
     contig_length_threshold: int,
     marker_name: str = "marker",
@@ -227,14 +145,14 @@ def gen_seed(
     :return: The number of candidate seeds generated.
     """
     fragScanURL = "run_FragGeneScan.pl"
-
+    fragResult_prefix = output_dir / (Path(contig_file).name + ".frag")
+    # hmmer: try rewriting this cmd-based run to pyhmmer api.
     hmmExeURL = "hmmsearch"
-    markerExeURL = os.path.join(
-        os.getcwd(), "auxiliary", "test_getmarker_" + quarter + ".pl"
-    )
-    markerURL = os.path.join(os.getcwd(), "auxiliary", marker_name + ".hmm")
-    seedURL = (
-        contig_file
+    markerExeURL = Path(__file__).parent / "auxiliary" / f"getmarker_{quarter}.py"
+    markerURL = Path(__file__).parent / "auxiliary" / f"{marker_name}.hmm"
+    hmmResultURL = output_dir / (Path(contig_file).name + "." + marker_name + ".hmmout")
+    seedURL = output_dir / (
+        Path(contig_file).name
         + "."
         + marker_name
         + "."
@@ -243,90 +161,66 @@ def gen_seed(
         + str(contig_length_threshold)
         + ".seed"
     )
-    fragResultURL = contig_file + ".frag.faa"
-    hmmResultURL = contig_file + "." + marker_name + ".hmmout"
+    marker_gene_faa = output_dir / (Path(contig_file).name + ".frag.faa")
 
-    if not (os.path.exists(fragResultURL)):
-        fragCmd = (
-            fragScanURL
-            + " -genome="
-            + contig_file
-            + " -out="
-            + contig_file
-            + ".frag -complete=0 -train=complete -thread="
-            + str(threads)
-            + " 1>"
-            + contig_file
-            + ".frag.out 2>"
-            + contig_file
-            + ".frag.err"
+    train_name = "simclr" if Path(output_dir.parent / "simclr").exists() else "barlowtwins"
+    scg_faa = output_dir.parent / train_name / "training" / "scg" / f"{contig_file}.scg.faa"
+    if scg_faa.exists():
+        # copy the scg.faa to marker_gene_faa
+        import shutil
+        shutil.copyfile(scg_faa, marker_gene_faa)
+
+    if not (os.path.exists(marker_gene_faa)):
+        run_pyrodigal(
+            contig_file=contig_file,
+            faa_path=marker_gene_faa,
+            threads=threads,
         )
-        logger.info("exec cmd: " + fragCmd)
-        os.system(fragCmd)
 
-    if os.path.exists(fragResultURL):
+        logger.info("FragGeneScan/Pyrodigal Finished. Output: " + str(marker_gene_faa))
+
+    if os.path.exists(marker_gene_faa):
         if not (os.path.exists(hmmResultURL)):
-            hmmCmd = (
-                hmmExeURL
-                + " --domtblout "
-                + hmmResultURL
-                + " --cut_tc --cpu "
-                + str(threads)
-                + " "
-                + markerURL
-                + " "
-                + fragResultURL
-                + " 1>"
-                + hmmResultURL
-                + ".out 2>"
-                + hmmResultURL
-                + ".err"
+            run_hmmsearch_pyhmmer(
+                hmm_path=markerURL,
+                faa_path=marker_gene_faa,
+                domtblout_path=hmmResultURL,
+                threads=threads,
+                e_value=1e-10,
             )
-            if marker_name == "pltd_marker":
-                hmmCmd = (
-                    hmmExeURL
-                    + " --domtblout "
-                    + hmmResultURL
-                    + " -E 1e-10 --cpu "
-                    + str(threads)
-                    + " "
-                    + markerURL
-                    + " "
-                    + fragResultURL
-                    + " 1>"
-                    + hmmResultURL
-                    + ".out 2>"
-                    + hmmResultURL
-                    + ".err"
-                )
-            logger.info("exec cmd: " + hmmCmd)
-            os.system(hmmCmd)
+
+            logger.info("Hmmer/Pyhmmer search finished. Output: " + str(hmmResultURL))
 
         if os.path.exists(hmmResultURL):
             if not (os.path.exists(seedURL)):
                 markerCmd = (
-                    markerExeURL
+                    "python "
+                    + str(markerExeURL)
                     + " "
-                    + hmmResultURL
+                    + str(hmmResultURL)
                     + " "
-                    + contig_file
+                    + str(contig_file)
                     + " "
                     + str(contig_length_threshold)
                     + " "
-                    + seedURL
+                    + str(seedURL)
                 )
                 logger.info("exec cmd: " + markerCmd)
-                os.system(markerCmd)
+                subprocess.run(markerCmd, shell=True, check=True)
+
+                logger.info("gethmmmarker finished. Output: " + str(seedURL))
 
             if os.path.exists(seedURL):
                 candK = file_len(seedURL)
             else:
-                logger.info("markerCmd failed! Not exist: " + markerCmd)
+                logger.info("gethmmmarker failed! Not exist: " + str(seedURL))
                 candK = 0
         else:
-            logger.info("Hmmsearch failed! Not exist: " + hmmResultURL)
+            logger.info("Hmmsearch failed! Not exist: " + str(hmmResultURL))
+            os.remove(hmmResultURL)
             sys.exit()
     else:
-        logger.info("FragGeneScan failed! Not exist: " + fragResultURL)
+        logger.info("FragGeneScan failed! Not exist: " + str(marker_gene_faa))
+        os.remove(marker_gene_faa)
         sys.exit()
     return candK

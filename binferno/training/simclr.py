@@ -1,0 +1,1376 @@
+from pathlib import Path
+import random
+from collections import OrderedDict
+import os
+
+import torch
+from torch import nn
+import torch.nn.functional as F
+import numpy as np
+from tqdm import tqdm
+from torch.backends import cudnn
+from pydantic import Field
+import pyfastx
+from torch.amp import GradScaler
+import loguru
+import pandas as pd
+from typing import Dict, List, Tuple, Optional
+
+
+from ..utils import calc_n50
+from .base import BaseTrainer
+from ..features import BinfernoFeatureBuilder
+from .models.simclr import SimCLRNet, EmbeddingNet, RankTaxonomyEncoder
+from .models.taxonomy_gate import validate_rank_taxonomy_table
+from .models.old_simclr import NeuralNetwork
+from .InfoNCEloss import info_nce_loss, InfoNCEHardNegative
+from .base import (
+    BaseTrainer,
+    label_augmented_views,
+    build_mask,
+    TAXONOMY_DF,
+    TAX_NODES,
+    TAX_NODE_INDICES,
+    PARENTAL_ARRAY,
+)
+from .esmc import prepare_esmc_features
+from .scg import SCGMarginLoss, build_scg_groups, prepare_scg_loader
+
+KMER_DIM = 136
+
+
+class SimCLRTrainer(BaseTrainer):
+    simclrnet: bool = Field(
+        default=True,
+        description="Whether to use SimCLRNet architecture for training. If False, use a simpler MLP architecture.",
+    )
+    proj: bool = Field(
+        default=False,
+        description="Whether to use a projection head in the NeuralNetwork architecture.",
+    )
+    learning_rate: float = Field(
+        default=1e-3, description="Learning rate for training."
+    )
+    view_num: int = Field(
+        default=6, description="Number of augmented views to generate for each contig."
+    )
+    attention: bool = Field(
+        default=False,
+        description="Whether to use attention fusion in the Fusion module instead of gated fusion.",
+    )
+    temperature: float | None = Field(
+        default=None,
+        description="Temperature parameter for the InfoNCE loss. "
+        "By default, it is set based on the N50 of the input contigs. "
+        "If the N50 is greater than 10,000, the temperature is set to 0.07; otherwise, it is set to 0.15.",
+    )
+    max_lr_epochs: int = Field(
+        default=10,
+        description="Number of epochs to wait before resuming learning rate scheduling after reaching the maximum learning rate.",
+    )
+    hard_weighted_nce: bool = Field(
+        default=False,
+        description="Whether to use the hard weighted InfoNCE loss instead of the standard InfoNCE loss. This loss gives more weight to hard negative samples during training.",
+    )
+    get_covout: bool = Field(
+        default=False,
+        description="Whether to save coverage embeddings separately.",
+    )
+    auxiliary_loss: bool = Field(
+        default=False,
+        description="Whether to include an auxiliary loss on the individual view embeddings in addition to the main InfoNCE loss on the fused embeddings. This can help encourage the model to learn useful representations in each view before fusion.",
+    )
+    alpha_tax: float = Field(
+        default=0.10,
+        ge=0.0,
+        le=0.20,
+        description="The weight applied to taxonomic embeddings within the neural network."
+    )
+    get_taxout: bool = Field(
+        default=False,
+        description="The switch for getting taxonomy embeddings."
+    )
+    bin_tax_emb: bool = Field(
+        default=False,
+        description="Decide whether to use taxonomy features only to get the resulting bins."
+    )
+    def __call__(
+        self,
+        contigs: Path,
+        bam: Path,
+        output_dir: Path,
+        features: BinfernoFeatureBuilder = None,
+        threads: int = 4,
+        logger: loguru._logger.Logger = None,
+    ) -> pd.DataFrame:
+        """
+        Args:
+         - contigs: path to the contigs fasta file.
+         - bam: path to the bam file for coverage information.
+        """
+        seed = self._common.seed
+        contig_length = self._common.contig_length
+        batch_size = self._common.batch_size
+        output_dim = self._common.output_dim
+        get_individual_embs = self._common.get_individual_embs
+
+        # Set the temperature based on the N50 of the input contigs if not provided.
+        if self.temperature:
+            temperature = self.temperature
+        else:
+            N_50 = calc_n50(contigs)
+            logger.info(f"N50 of the input contigs: {N_50}")
+            temperature = 0.12  # 0.15
+            if N_50 > 10000:
+                temperature = 0.10  # 0.07
+
+        # the first step is to generate the augmented views and then turn views into vectors.
+        output_aug_dir = output_dir / "augmentation"
+        output_aug_dir.mkdir(parents=True, exist_ok=True)
+        output_train_dir = output_dir / "training"
+        annotation_dir = output_train_dir / "scg"
+        if self._esmc.enabled:
+            # Keep existing checkpoints separate from models with a protein branch.
+            import hashlib
+            key = hashlib.sha256(self._esmc.model_dump_json().encode()).hexdigest()[:12]
+            output_train_dir = output_train_dir / f"esmc-{key}"
+        output_train_dir.mkdir(parents=True, exist_ok=True)
+        embedding_path = output_train_dir / "embeddings.tsv"
+
+        if embedding_path.exists():
+            logger.info(
+                f"Embeddings already exist at {embedding_path}. Loading embeddings from file."
+            )
+            embeddings = pd.read_csv(embedding_path, sep="\t", header=0, index_col=0)
+            return embeddings
+
+        self.unify_seeds(
+            seed
+        )  # ensure reproducibility by unifying seeds across random, numpy, and torch.
+        fragment_dict, all_fragments, namelist = self.gen_views(
+            contigs=contigs,
+            output_dir=output_aug_dir,
+            view_num=self.view_num,
+            contig_length=contig_length,
+        )
+
+        # after getting the augmented views, pass to binfernofeatures to get the features pooled.
+        feature_result = features(
+            FragMent_Dict=fragment_dict,
+            All_Fragments=all_fragments,
+            contigs=contigs,
+            bam_path=bam,
+            threads=threads,
+            logger=logger,
+            output_dir=output_aug_dir,
+        )
+
+        feature_data, kmer_dim = feature_result
+        feature_df, tax_df = feature_data
+
+        # after getting the features, sort the features by method to ensure integrity before training.
+        feature_df = self.sort_features_by_method(
+            feature_df,
+            contig_ids=namelist,
+            simclr=True,
+        )
+
+        if tax_df is not None and not tax_df.empty:
+            tax_df = self.sort_features_by_method(
+                tax_df,
+                contig_ids=namelist,
+                simclr=True,
+            )
+        else:
+            tax_df = None
+
+        # self.unify_seeds(
+        #     seed
+        # )  # ensure reproducibility by unifying seeds across random, numpy, and torch.
+
+        if torch.cuda.is_available():
+            device = torch.device("cuda")
+            cudnn.deterministic = True
+            cudnn.benchmark = False
+        else:
+            device = torch.device("cpu")
+            torch.set_num_threads(threads)
+        logger.info(f"Using device: {device}")
+
+        cov_dim = sum([1 for col in feature_df.columns if "cov" in col])
+
+        composition_dim = feature_df.shape[1] - cov_dim
+        kmer_dim = kmer_dim if kmer_dim != KMER_DIM else KMER_DIM
+        tax_emb_dim = tax_df.shape[1] if tax_df is not None else 0
+
+        feature_df, protein_encoder = prepare_esmc_features(
+            feature_df, contigs, namelist, annotation_dir, threads, self._esmc,
+            output_dim if self.simclrnet else 256, logger, fragment_dict=fragment_dict,
+        )
+
+        corgi_dim = composition_dim - kmer_dim
+
+        # prepare model.
+        if self.simclrnet:
+            cov_model = EmbeddingNet(
+                in_sz=cov_dim,
+                out_sz=output_dim,  # 128
+                emb_szs=[2048] * 3,
+                ps=[0.2] * 2,
+                actn=nn.LeakyReLU(),
+                use_bn=True,
+            ).to(device)
+
+            tax_model = None
+            in_size = composition_dim + output_dim
+            
+            if tax_emb_dim > 0:
+                taxonomy_ranks = features.taxonomy.ranks()
+                tax_columns = [f"tax_{rank}" for rank in taxonomy_ranks]
+                mask_columns = [f"mask_{rank}" for rank in taxonomy_ranks]
+                expected_columns = tax_columns + mask_columns
+                if set(tax_df.columns) != set(expected_columns):
+                    raise ValueError(
+                        "Taxonomy columns must contain rank IDs and rank masks; "
+                        f"expected {expected_columns}, got {tax_df.columns.tolist()}."
+                    )
+                # Older caches interleaved each ID with its mask. Canonicalize
+                # the layout before constructing datasets and inference tensors.
+                tax_df = tax_df[expected_columns]
+                vocab_sizes = validate_rank_taxonomy_table(
+                    tax_df, tax_columns, mask_columns
+                )
+                tax_model = RankTaxonomyEncoder(
+                    vocab_sizes=vocab_sizes, out_sz=output_dim
+                ).to(device)
+
+            model = SimCLRNet(
+                protein_encoder=protein_encoder,
+                in_sz=in_size,
+                out_sz=output_dim,
+                emb_szs=[2048] * 3,
+                use_bn=True,
+                ps=[0.2] * 2,
+                actn=nn.LeakyReLU(),
+                cov_model=cov_model,
+                tax_model=tax_model,
+                alpha_tax=self.alpha_tax,
+            ).to(device)
+        else:
+            model = NeuralNetwork(
+                protein_encoder=protein_encoder,
+                tnf_dim=composition_dim,
+                coverage_dim=cov_dim,
+                output_dim=output_dim,
+                kmer_dim=kmer_dim,
+                attention=self.attention,
+                corgi_dim=corgi_dim,
+                proj=self.proj,
+            ).to(device)
+
+        logger.info(f"Model architecture:\n{model}")
+        # prepare training.
+        train_loader, optimizer, scheduler, dataset = self.prepare_trainer(
+            data_df=feature_df,
+            tax_df=tax_df,
+            batch_size=batch_size,
+            contig_length=contig_length,
+            model=model,
+            n_views=self.view_num,
+            simclrnet=self.simclrnet,
+            contigs=contigs,
+            num_workers=threads,
+            epochs=self._common.epochs,
+        )
+
+        scg_dataloader = None
+        if self._scg.lambda_scg > 0.0:
+            logger.info("Adding SCG cannot-link loss to SimCLR training.")
+            scg_groups = build_scg_groups(
+                contigs=contigs,
+                known_contigs=namelist,
+                output_dir=annotation_dir,
+                threads=threads,
+                marker_hmm=self._scg.scg_marker_hmm,
+                max_evalue=self._scg.scg_max_evalue,
+                min_hmm_coverage=self._scg.scg_min_hmm_coverage,
+                logger=logger,
+            )
+            scg_dataloader = prepare_scg_loader(
+                data_df=feature_df,
+                auxiliary_df=tax_df,
+                marker_groups=scg_groups,
+                original_suffix=".0",
+                batch_size=self._scg.scg_batch_size,
+                seed=seed,
+                num_workers=threads,
+                logger=logger,
+                worker_init_fn=self.seed_worker,
+            )
+
+        model_path = output_train_dir / "best_model.pt"
+        if model_path.exists():
+            logger.info(
+                f"Model already exists at {model_path}. Loading the model and skipping training."
+            )
+            map_location = torch.device("cpu") if not torch.cuda.is_available() else torch.device("cuda")
+            model.load_state_dict(torch.load(model_path, map_location=map_location))
+        elif self.simclrnet:
+            model = self.simclrnet_train(
+                dataloader=train_loader,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                device=device,
+                epochs=self._common.epochs,
+                seed=seed,
+                model=model,
+                kmer_dim=kmer_dim,
+                n_cov=cov_dim,
+                n_views=self.view_num,
+                temperature=temperature,
+                output_dir=output_train_dir,
+                logger=logger,
+                scg_dataloader=scg_dataloader,
+            )
+        else:
+            model = self.train(
+                dataloader=train_loader,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                device=device,
+                method="simclr",
+                epochs=self._common.epochs,
+                model=model,
+                logger=logger,
+                n_cov=cov_dim,
+                output_dir=output_train_dir,
+                auxiliary_loss=self.auxiliary_loss,
+                temperature=temperature,
+                scg_dataloader=scg_dataloader,
+            )
+
+        # in case embeddings isn't exist, get embeddings from the trained model and save to file.
+        if self.simclrnet:
+            embeddings = self.simclr_get_embs(
+                model=model,
+                data=dataset,
+                namelist=namelist,
+                output_path=embedding_path,
+                device=device,
+                kmer_len=kmer_dim,
+                n_cov=cov_dim,
+                tax_emb_dim=tax_emb_dim,
+                batch_size=batch_size,
+                save_individual_embs=get_individual_embs,
+            )
+        else:
+            embeddings = self.get_embeddings(
+                model=model,
+                data_df=feature_df,
+                output_path=embedding_path,
+                batch_size=batch_size,
+                save_individual_embs=get_individual_embs,
+            )
+
+        return embeddings
+
+    def sort_features_by_method(
+        self,
+        features_df: pd.DataFrame,
+        simclr: bool = False,
+        contig_ids: list = None,
+    ) -> pd.DataFrame:
+        if not contig_ids:
+            raise ValueError(
+                "contig_ids is required for sorting features. Please provide the list of contig names in the "
+                "order they were processed during augmentation."
+            )
+        if not simclr:
+            # sort the features_df by index.
+            features_df = features_df.sort_index()
+            return features_df
+        else:
+            # for simclr, group by view, stack the features of same view together, then concatenate the features.
+            index_ = features_df.index.tolist()
+            features_df["view"] = [ind.rsplit(".", 1)[-1] for ind in index_]
+            # replace "original" as "0".
+            # features_df["view"] = features_df["view"].replace("original", "0")
+            features_df["view"] = features_df["view"].astype(int)
+
+            features_df = features_df.sort_values(by=["view"], ascending=True)
+            for i, view in enumerate(features_df["view"].unique()):
+                view_df = features_df[features_df["view"] == view]
+                # reindex view_df to make sure the order of features is the same across views.
+                view_df.index = [ind.rsplit(".", 1)[0] for ind in view_df.index]
+                view_df = view_df.reindex(
+                    contig_ids
+                )  # reindexing to ensure the same order of contigs across views
+                view_df.index = [
+                    f"{idx}.{view}" for idx in view_df.index
+                ]  # restore the original index format after reindexing
+                if i == 0:
+                    sorted_features_df = view_df
+                else:
+                    sorted_features_df = pd.concat(
+                        [sorted_features_df, view_df], axis=0
+                    )
+            # for each view, make sure to sort the features by index.
+            features_df = sorted_features_df.drop(columns=["view"])
+            return features_df
+
+    def prepare_trainer(
+        self,
+        data_df: pd.DataFrame,
+        tax_df: pd.DataFrame = None,
+        batch_size: int = 1024,
+        contig_length: int = 1000,
+        model=None,
+        n_views=6,
+        simclrnet=False,
+        contigs=None,
+        num_workers=4,
+        **kwargs,
+    ):
+        # determine the namelist for the dataset.
+        orig_df = data_df[
+            data_df.index.str.rsplit(".", n=1).str[-1] == "0"
+        ]  # strictly matching once and only the original view as view 0.
+        namelist = [index.rsplit(".", 1)[0] for index in orig_df.index]
+        # slice the data_df by the length of namelist, make sure to assert length for sliced data to be same.
+        dataset = list(
+            torch.split(torch.from_numpy(data_df.values).float(), len(namelist))
+        )
+
+        epochs = kwargs.get("epochs", self._common.epochs)
+        assert (
+            len(dataset) == n_views
+        ), f"Number of views in the dataset ({len(dataset)}) does not match the expected number of views ({n_views}). \
+            Please check the data_df and the n_views parameter."
+
+        length_weight = self.length_weight(contig=contigs)
+        if not length_weight:
+            raise ValueError(
+                "Length weight is empty. Please check the contigs input and the length_weight function."
+            )
+
+        length_mask = (
+            np.array([length_weight[name] for name in namelist]) >= contig_length
+        )
+        retained_contigs = int(length_mask.sum())
+        if retained_contigs < 2:
+            raise ValueError(
+                "SimCLR requires at least two contigs after length filtering; "
+                f"found {retained_contigs}."
+            )
+        train_dataset = torch.utils.data.TensorDataset(
+            *[dataset[i][length_mask] for i in range(n_views)]
+        )
+
+        tax_dataset = None
+        if tax_df is not None and not tax_df.empty:
+            if not tax_df.index.equals(data_df.index):
+                raise ValueError(
+                    "Taxonomic features must have the same ordered indices as canonical features."
+                )
+            tax_dataset = list(
+                torch.split(torch.from_numpy(tax_df.values).float(), len(namelist))
+            )
+            if len(tax_dataset) != n_views:
+                raise ValueError(
+                    f"Number of taxonomy views ({len(tax_dataset)}) does not match "
+                    f"the expected number of views ({n_views})."
+                )
+            train_dataset = torch.utils.data.TensorDataset(
+                *[dataset[i][length_mask] for i in range(n_views)],
+                *[tax_dataset[i][length_mask] for i in range(n_views)],
+            )
+
+        # Keep multiprocessing options conservative to avoid native worker crashes
+        # on some PyTorch/HPC stacks (fork + pinned memory + persistent workers).
+        requested_workers = num_workers
+        if requested_workers < 0:
+            requested_workers = 0
+
+        dataloader_kwargs = {
+            "dataset": train_dataset,
+            "batch_size": min(batch_size, retained_contigs),
+            "shuffle": True,
+            "num_workers": requested_workers,
+            "pin_memory": torch.cuda.is_available(),
+            "drop_last": True,
+        }
+
+        if requested_workers > 0:
+            dataloader_kwargs.update(
+                {
+                    "persistent_workers": True,
+                    "prefetch_factor": 2,
+                    "multiprocessing_context": "spawn",
+                }
+            )
+
+        train_loader = torch.utils.data.DataLoader(**dataloader_kwargs)
+        if len(train_loader) == 0:
+            raise RuntimeError(
+                "SimCLR produced no training batches. Check batch size and "
+                "contig filtering."
+            )
+
+        if simclrnet:
+            optimizer = torch.optim.AdamW(
+                model.parameters(), lr=self.learning_rate, weight_decay=1e-4
+            )
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=epochs, eta_min=0, last_epoch=-1
+            )
+        else:
+            optimizer = torch.optim.AdamW(
+                model.parameters(), lr=1e-4, weight_decay=0.05, betas=(0.9, 0.95)
+            )
+            scheduler = self.warmup_cosine_scheduler(
+                optimizer,
+                learning_rate=self.learning_rate,
+                min_learning_rate=1e-4,
+                epochs=epochs,
+                warmup=False,
+                max_lr_hold_epochs=self.max_lr_epochs,
+            )
+        inference_dataset = (
+            (dataset, tax_dataset) if tax_dataset is not None else dataset
+        )
+        return train_loader, optimizer, scheduler, inference_dataset
+
+    def accuracy(self, output, target, topk=(1,)):
+        """Computes the accuracy over the k top predictions for the specified values of k"""
+        with torch.no_grad():
+            maxk = max(topk)
+            batch_size = target.size(0)
+
+            _, pred = output.topk(maxk, 1, True, True)
+            pred = pred.t()
+            correct = pred.eq(target.view(1, -1).expand_as(pred))
+
+            res = []
+            for k in topk:
+                correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
+                res.append(correct_k.mul_(100.0 / batch_size))
+            return res
+
+    def length_weight(self, contig: str):
+        if contig is None:
+            raise ValueError(
+                "Length weight is empty. Please check the contigs input and the length_weight function."
+            )
+
+        contig_path = Path(contig)
+        if not contig_path.exists():
+            raise ValueError(
+                "Length weight is empty. Please check the contigs input and the length_weight function."
+            )
+
+        try:
+            seq_obj = pyfastx.Fastx(str(contig_path))
+        except (
+            Exception
+        ) as exc:  # pragma: no cover - defensive guard for invalid FASTA paths
+            raise ValueError(
+                "Length weight is empty. Please check the contigs input and the length_weight function."
+            ) from exc
+
+        contig_length = dict()
+        for name, seq in seq_obj:
+            contig_length[name] = len(seq)
+        if not contig_length:
+            raise ValueError(
+                "Length weight is empty. Please check the contigs input and the length_weight function."
+            )
+        return contig_length
+
+    def _scg_weight_scale(self, epoch: int) -> float:
+        if self._scg.scg_loss_warmup == 0:
+            return 1.0
+        return min(1.0, float(epoch + 1) / self._scg.scg_loss_warmup)
+
+    @staticmethod
+    def _next_scg_batch(iterator, dataloader):
+        try:
+            return next(iterator), iterator
+        except StopIteration:
+            iterator = iter(dataloader)
+            return next(iterator), iterator
+
+    @staticmethod
+    def _scg_pair_loss(
+        model, batch, criterion, device, n_cov: int, simclrnet: bool
+    ):
+        """Encode an SCG pair in the same representation used for clustering."""
+        features1, features2 = batch[:2]
+        tax1 = tax2 = None
+        if len(batch) == 8:
+            tax1, tax2 = batch[2:4]
+        weights = batch[-1].to(device, non_blocking=True)
+        features = torch.cat([features1, features2], dim=0).to(
+            device, non_blocking=True
+        )
+        split = len(features1)
+        if simclrnet:
+            tax_features = None
+            if tax1 is not None:
+                tax_features = torch.cat([tax1, tax2], dim=0).to(
+                    device, non_blocking=True
+                )
+            encoded = model(
+                features[:, n_cov:], features[:, :n_cov], tax_features
+            )
+            embeddings = encoded[0] if isinstance(encoded, tuple) else encoded
+        else:
+            embeddings = model.get_embedding(features)
+        return criterion.forward_pairs(
+            embeddings[:split], embeddings[split:], weights
+        )
+
+    def train(
+        self,
+        dataloader: torch.utils.data.DataLoader,
+        optimizer: torch.optim.Optimizer,
+        scheduler: torch.optim.lr_scheduler._LRScheduler,
+        device: torch.device,
+        logger: loguru._logger.Logger,
+        method: str = "simclr",
+        epochs: int = 300,
+        model=None,
+        n_cov: int = 0,
+        output_dir: Path = None,
+        auxiliary_loss: bool = False,
+        temperature: float = 0.15,
+        scg_dataloader=None,
+    ):
+
+        MODEL_PATH = output_dir / "best_model.pt"
+        if logger is None:
+            raise ValueError(
+                "Logger is not provided for training. Please provide a logger in the kwargs with key 'logger'."
+            )
+
+        # Create once so the index cache persists across all epochs
+
+        epoch_iter = tqdm(range(epochs), desc="Training Epochs")
+        early_stopping = EarlyStoppingManagerSimCLR(patience=15)
+        for epoch in epoch_iter:
+            avg_loss, stats = self.train_an_epoch(
+                model=model,
+                dataloader=dataloader,
+                optimizer=optimizer,
+                device=device,
+                temperature=temperature,
+                n_cov=n_cov,
+                auxiliary_loss=auxiliary_loss,
+                scg_dataloader=scg_dataloader,
+                epoch=epoch,
+            )
+
+            scheduler.step()
+
+            current_lr = optimizer.param_groups[0]["lr"]
+            logger.info("Current learning rate: {:.2e}".format(current_lr))
+
+            if (epoch + 1) % 20 == 0 or epoch == epochs - 1:
+                logger.info(
+                    f"Epoch {epoch+1}/{epochs} - Avg Loss: {avg_loss:.4f}, LR: {current_lr:.2e}"
+                )
+
+            if stats is not None:
+                self.print_stats(stats, epoch, method=method, logger=logger)
+
+            early_stopping.check_improvement(
+                avg_loss, stats["top1_acc"], model.state_dict()
+            )
+            if early_stopping.should_stop():
+                logger.info(
+                    f"Early stopping after {epoch+1} epochs (patience: {early_stopping.patience})"
+                )
+                break
+
+            best_state, best_loss, best_acc = early_stopping.get_best_state()
+
+        if best_state is not None:
+            model.load_state_dict(best_state)
+            logger.info(
+                f"Loaded best model with loss: {best_loss:.4f} and accuracy: {best_acc:.4f}"
+            )
+
+            torch.save(model.state_dict(), MODEL_PATH)
+            logger.info(f"Model saved to {MODEL_PATH}")
+
+        return model
+
+    def train_an_epoch(
+        self,
+        model,
+        dataloader,
+        optimizer,
+        device,
+        temperature=0.15,
+        n_cov=0,
+        auxiliary_loss=False,
+        scg_dataloader=None,
+        epoch=0,
+    ):
+        # get the info nce loss, and see if auxiliary loss is needed.
+        if not self.hard_weighted_nce:
+            info_nceloss_fn = info_nce_loss(temperature=temperature).to(device)
+        else:
+            info_nceloss_fn = InfoNCEHardNegative(temperature=temperature).to(
+                device
+            )
+
+        model.train()
+        stats = None
+        total_loss = 0.0
+        total_acc = 0.0
+        scg_criterion = SCGMarginLoss(self._scg.cosine_margin).to(device)
+        scg_iterator = iter(scg_dataloader) if scg_dataloader is not None else None
+        scg_loss_sum = 0.0
+        scg_updates = 0
+        scg_scale = self._scg_weight_scale(epoch)
+        if n_cov < 0 or n_cov == 0:
+            raise ValueError("n_cov must be non-negative.")
+
+        for i, features in enumerate(dataloader):
+            contig_features = torch.cat(features, dim=0).to(device, non_blocking=True)
+            optimizer.zero_grad(set_to_none=True)
+            actual_batch_size = contig_features.shape[0] // self.view_num
+            enc_feature, kmer_emb, cov_emb = model.forward_one(contig_features)
+            loss, batch_acc = info_nceloss_fn(
+                enc_feature,
+                batch_size=actual_batch_size,
+                device=device,
+                n_views=self.view_num,
+            )
+
+            if auxiliary_loss:
+                L_kmer = 1.0
+                L_cov = 1.0
+                kmer_loss, _ = info_nceloss_fn(
+                    kmer_emb,
+                    batch_size=actual_batch_size,
+                    device=device,
+                    n_views=self.view_num,
+                )
+                cov_loss, _ = info_nceloss_fn(
+                    cov_emb,
+                    batch_size=actual_batch_size,
+                    device=device,
+                    n_views=self.view_num,
+                )
+                loss = loss + L_kmer * kmer_loss + L_cov * cov_loss
+
+            if scg_iterator is not None and i % self._scg.scg_update_freq == 0:
+                scg_batch, scg_iterator = self._next_scg_batch(
+                    scg_iterator, scg_dataloader
+                )
+                scg_loss = self._scg_pair_loss(
+                    model=model,
+                    batch=scg_batch,
+                    criterion=scg_criterion,
+                    device=device,
+                    n_cov=n_cov,
+                    simclrnet=False,
+                )
+                loss = loss + self._scg.lambda_scg * scg_scale * scg_loss
+                scg_loss_sum += scg_loss.detach().item()
+                scg_updates += 1
+
+            loss.backward()
+            optimizer.step()
+
+            total_loss += loss.item()
+            total_acc += batch_acc
+            last_batch = i == len(dataloader) - 1
+
+            if last_batch:
+                stats = {
+                    "loss": total_loss / len(dataloader),
+                    "top1_acc": total_acc / len(dataloader),
+                }
+                if scg_updates:
+                    stats.update(
+                        scg_loss=scg_loss_sum / scg_updates,
+                        scg_weight_scale=self._scg.lambda_scg * scg_scale,
+                        scg_updates=scg_updates,
+                    )
+
+        return total_loss / len(dataloader), stats
+
+    def simclrnet_train(
+        self,
+        dataloader,
+        optimizer,
+        scheduler,
+        device,
+        epochs: int = 300,
+        model=None,
+        kmer_dim: int = 136,
+        n_cov: int = 2,  # by default is a single-sample coverage.
+        n_views: int = 6,
+        temperature: float = 0.15,
+        output_dir: str = None,
+        amp_dtype: torch.dtype = torch.bfloat16,
+        max_skip_fraction: float = 0.02,
+        **kwargs,
+    ):
+        self.unify_seeds(kwargs.get("seed", self._common.seed))
+        logger = kwargs.get("logger", None)
+        if logger is None:
+            raise ValueError("Logger is not provided for training.")
+        # if n_cov <= 0:
+        #     raise ValueError("n_cov must be a positive integer.")
+
+        output_dir = Path(output_dir)
+        model_path = output_dir / "best_model.pt"
+
+        info_nceloss_fn = info_nce_loss(temperature=temperature).to(device)
+        scg_dataloader = kwargs.get("scg_dataloader")
+        scg_criterion = SCGMarginLoss(self._scg.cosine_margin).to(device)
+
+        use_cuda = device.type == "cuda"
+        use_fp16 = use_cuda and amp_dtype == torch.float16
+        scaler = GradScaler(enabled=use_fp16)
+
+        logger.info(
+            f"Starting SimCLR training: {epochs} epochs, T={temperature}, "
+            f"amp={'off' if not use_cuda else str(amp_dtype)},"
+            f"SCG loss lambda={self._scg.lambda_scg}"
+        )
+
+        # ---- state that must survive across epochs -------------------------
+        best_loss = float("inf")
+        best_acc = 0.0
+        best_state = None
+        best_epoch = -1
+        bad_epochs = 0
+        earlystop_epoch = 0
+        probed = False
+        # --------------------------------------------------------------------
+
+        for epoch_counter in tqdm(range(epochs), desc="SimCLR Training Epochs"):
+            model.train()
+            total_loss = 0.0
+            total_acc1 = 0.0
+            num_steps = 0
+            num_skipped = 0
+            scg_iterator = (
+                iter(scg_dataloader) if scg_dataloader is not None else None
+            )
+            scg_loss_sum = 0.0
+            scg_updates = 0
+            scg_scale = self._scg_weight_scale(epoch_counter)
+
+            for batch_i, contig_features in enumerate(dataloader):
+                tax_features = None
+                # identify whether contig_features is a list of tensors.
+                if len(contig_features) > n_views:
+                    # first n_views are canonical features, the rest until the end are taxonomic features.
+                    comp_cov = contig_features[:n_views]
+                    tax_emb = contig_features[n_views:]
+                    contig_features = torch.cat(comp_cov, dim=0).to(
+                        device, non_blocking=True
+                    )
+                    tax_features = torch.cat(tax_emb, dim=0).to(
+                        device, non_blocking=True
+                    )
+                    x_cov = contig_features[:, :n_cov]
+                    x_comp = contig_features[:, n_cov:]
+
+                else:
+                    contig_features = torch.cat(contig_features, dim=0).to(
+                        device, non_blocking=True
+                    )
+                    x_cov = contig_features[:, :n_cov]  # coverage features
+                    x_comp = contig_features[:, n_cov:]  # composition features
+
+                optimizer.zero_grad(set_to_none=True)
+
+                with torch.amp.autocast(
+                    enabled=use_cuda, device_type=device.type, dtype=amp_dtype
+                ):
+                    encoded = model(x_comp, x_cov, tax_features)
+                    features = encoded[0] if isinstance(encoded, tuple) else encoded
+
+                actual_batch_size = contig_features.shape[0] // n_views
+                loss, batch_acc = info_nceloss_fn(
+                    features.float(),
+                    batch_size=actual_batch_size,
+                    device=device,
+                    n_views=n_views,
+                )
+
+                if scg_iterator is not None and batch_i % self._scg.scg_update_freq == 0:
+                    scg_batch, scg_iterator = self._next_scg_batch(
+                        scg_iterator, scg_dataloader
+                    )
+                    scg_loss = self._scg_pair_loss(
+                        model=model,
+                        batch=scg_batch,
+                        criterion=scg_criterion,
+                        device=device,
+                        n_cov=n_cov,
+                        simclrnet=True,
+                    )
+                    loss = loss + self._scg.lambda_scg * scg_scale * scg_loss
+                    scg_loss_sum += scg_loss.detach().item()
+                    scg_updates += 1
+
+                if not torch.isfinite(loss):
+                    num_skipped += 1
+                    if not probed:
+                        probed = True
+                        logger.warning(
+                            f"First non-finite InfoNCE loss at epoch {epoch_counter + 1}; probing:"
+                        )
+                        _first_nonfinite_report(
+                            model, x_comp, x_cov, tax_features, logger
+                        )
+                    optimizer.zero_grad(set_to_none=True)
+                    continue
+
+                if use_fp16:
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                    optimizer.step()
+
+                total_loss += loss.item()
+                total_acc1 += batch_acc
+                num_steps += 1
+
+            scheduler.step()
+
+            total_batches = num_steps + num_skipped
+            skip_frac = num_skipped / max(total_batches, 1)
+
+            if num_steps == 0:
+                raise RuntimeError(
+                    f"Epoch {epoch_counter + 1}: every observed batch was "
+                    "non-finite; no model checkpoint was written."
+                )
+
+            avg_loss = total_loss / num_steps
+            avg_acc1 = total_acc1 / num_steps
+
+            logger.info(
+                f"Epoch {epoch_counter + 1}/{epochs} - SimCLR Loss: {avg_loss:.4f}, "
+                f"Top-1: {avg_acc1:.2f}%, LR: {optimizer.param_groups[0]['lr']:.2e}, "
+                f"skipped {num_skipped}/{total_batches} ({skip_frac:.1%})"
+                + (
+                    f", SCG: {scg_loss_sum / scg_updates:.4f} "
+                    f"(weight {self._scg.lambda_scg * scg_scale:.4g})"
+                    if scg_updates
+                    else ""
+                )
+            )
+
+            # Reported loss/acc are averages over surviving batches only. Once a
+            # non-trivial fraction is dropped, the curve is a survivorship
+            # artifact and must not be read as healthy training.
+            if skip_frac > max_skip_fraction:
+                logger.error(
+                    f"Epoch {epoch_counter + 1}: {skip_frac:.1%} of batches non-finite "
+                    f"(> {max_skip_fraction:.1%}). The reported loss is computed only over "
+                    f"surviving batches and is not trustworthy. Stopping."
+                )
+                break
+
+            improved = avg_loss < best_loss - 1e-4 or avg_acc1 > best_acc + 0.05
+            if improved:
+                best_loss = min(best_loss, avg_loss)
+                best_acc = max(best_acc, avg_acc1)
+                best_state = {
+                    k: v.detach().cpu().clone() for k, v in model.state_dict().items()
+                }
+                best_epoch = epoch_counter + 1
+                bad_epochs = 0
+            else:
+                bad_epochs += 1
+
+            if avg_loss > best_loss * 1.4 and avg_acc1 < best_acc - 8.0:
+                logger.warning(
+                    f"Collapse detected at epoch {epoch_counter + 1}: "
+                    f"loss {avg_loss:.4f} vs best {best_loss:.4f}, "
+                    f"acc {avg_acc1:.2f} vs best {best_acc:.2f}. Rewinding + halving LR."
+                )
+                if best_state is not None:
+                    model.load_state_dict(
+                        {k: v.to(device) for k, v in best_state.items()}
+                    )
+                    for g in optimizer.param_groups:
+                        g["lr"] = max(g["lr"] * 0.5, 1e-5)
+                bad_epochs = 0
+
+            if epoch_counter >= 10 and avg_acc1 >= 99.0:
+                earlystop_epoch += 1
+            else:
+                earlystop_epoch = 0
+            if earlystop_epoch >= 5:
+                logger.info(
+                    f"Early stopping at epoch {epoch_counter + 1} (acc {avg_acc1:.2f}%)."
+                )
+                break
+
+        if best_state is not None:
+            model.load_state_dict({k: v.to(device) for k, v in best_state.items()})
+            logger.info(
+                f"Restored best checkpoint from epoch {best_epoch} "
+                f"(loss {best_loss:.4f}, top-1 {best_acc:.2f}%)."
+            )
+
+        # BN running stats are updated on every forward, including the ones whose
+        # loss was discarded. If any of them overflowed, eval-mode embeddings are
+        # silently NaN.
+        bad_bn = [
+            name
+            for name, buf in model.named_buffers()
+            if buf.dtype.is_floating_point and not torch.isfinite(buf).all()
+        ]
+        if bad_bn:
+            raise RuntimeError(
+                f"Non-finite BatchNorm buffers after training: {bad_bn[:5]}"
+                f"{' ...' if len(bad_bn) > 5 else ''}. Refusing to save "
+                "an invalid model."
+            )
+
+        torch.save(model.state_dict(), model_path)
+        logger.info(f"Model saved to {model_path}")
+        return model
+
+    def simclr_get_embs(
+        self,
+        model: nn.Module,
+        data: Optional[
+            List[torch.Tensor] | Tuple[List[torch.Tensor], List[torch.Tensor]]
+        ],
+        namelist: List[str],
+        output_path: str,
+        device: torch.device,
+        kmer_len: int,
+        n_cov: int,
+        tax_emb_dim: int,
+        batch_size: int | None = None,
+        save_individual_embs: bool | None = None,
+    ) -> pd.DataFrame:
+
+        with torch.no_grad():
+            model.eval()
+            bs_ = self._common.batch_size if batch_size is None else batch_size
+            save_individual_embs = (
+                self._common.get_individual_embs
+                if save_individual_embs is None else save_individual_embs
+            )
+
+            print(f"length of original dataset: {len(data)}")
+
+            if not isinstance(data, tuple):  # Only canonical tnf and coverage features.
+                out = np.concatenate(
+                    [
+                        model(
+                            data[0][i : i + bs_, n_cov:].to(device),
+                            data[0][i : i + bs_, :n_cov].to(device),
+                        )[0]
+                        .to("cpu")
+                        .numpy()
+                        for i in range(0, len(data[0]), bs_)
+                    ],
+                    axis=0,
+                )
+                embeddings_df = pd.DataFrame(out, index=namelist)
+
+                embeddings_df.to_csv(
+                    str(output_path), sep="\t", header=True, index=True
+                )
+                if self.get_covout or save_individual_embs:
+                    covout = np.concatenate(
+                        [
+                            model(
+                                data[0][i : i + bs_, n_cov:].to(
+                                    device
+                                ),  # kmer features
+                                data[0][i : i + bs_, :n_cov].to(
+                                    device
+                                ),  # coverage features
+                            )[1]
+                            .to("cpu")
+                            .numpy()
+                            for i in range(0, len(data[0]), bs_)
+                        ],
+                        axis=0,
+                    )
+                    cov_embeddings_df = pd.DataFrame(covout, index=namelist)
+                    outfile = output_path.parent / "cov_embeddings.tsv"
+                    cov_embeddings_df.to_csv(
+                        str(outfile), sep="\t", header=True, index=True
+                    )
+            else:  # Both canonical and taxonomic features are present.
+                data, tax_data = data
+                out = np.concatenate(
+                    [
+                        model(
+                            data[0][i : i + bs_, n_cov:].to(device),
+                            data[0][i : i + bs_, :n_cov].to(device),
+                            tax_data[0][i : i + bs_].to(device),
+                        )[0]
+                        .to("cpu")
+                        .numpy()
+                        for i in range(0, len(data[0]), bs_)
+                    ],
+                    axis=0,
+                )
+                embeddings_df = pd.DataFrame(out, index=namelist)
+
+                embeddings_df.to_csv(
+                    str(output_path), sep="\t", header=True, index=True
+                )
+                if self.get_covout or save_individual_embs:
+                    covout = np.concatenate(
+                        [
+                            model(
+                                data[0][i : i + bs_, n_cov:].to(device),
+                                data[0][i : i + bs_, :n_cov].to(device),
+                                tax_data[0][i : i + bs_].to(device),
+                            )[1]
+                            .to("cpu")
+                            .numpy()
+                            for i in range(0, len(data[0]), bs_)
+                        ],
+                        axis=0,
+                    )
+                    cov_embeddings_df = pd.DataFrame(covout, index=namelist)
+                    outfile = output_path.parent / "cov_embeddings.tsv"
+                    cov_embeddings_df.to_csv(
+                        str(outfile), sep="\t", header=True, index=True
+                    )
+                if self.get_taxout or save_individual_embs:
+                    taxout = np.concatenate(
+                        [
+                            model(
+                                data[0][i : i + bs_, n_cov:].to(device),
+                                data[0][i : i + bs_, :n_cov].to(device),
+                                tax_data[0][i : i + bs_].to(device),
+                            )[2]
+                            .to("cpu")
+                            .numpy()
+                            for i in range(0, len(data[0]), bs_)
+                        ],
+                        axis=0,
+                    )
+                    tax_embeddings_df = pd.DataFrame(taxout, index=namelist)
+                    outfile = output_path.parent / "tax_embeddings.tsv"
+                    tax_embeddings_df.to_csv(
+                        str(outfile), sep="\t", header=True, index=True
+                    )
+                    if self.bin_tax_emb is True:
+                        embeddings_df = tax_embeddings_df
+                
+        return embeddings_df
+
+    def gen_views(
+        self,
+        contigs=None,
+        output_dir=None,
+        view_num=6,
+        contig_length=1000,
+    ) -> Tuple[Dict[str, pd.DataFrame], List, List]:
+        # process input contigs into augmented fragments.
+        FragMent_Dict, All_Fragments = self.augment_views(
+            contigs=contigs,
+            view_num=view_num,
+            contig_length=contig_length,
+            output_dir=output_dir,
+        )
+
+        namelist = list(
+            FragMent_Dict.keys()
+        )  # the ordered contig names which will be used for indexing the features.
+
+        return FragMent_Dict, All_Fragments, namelist
+
+    def augmentation(self, fasta_file=None, num_views=6, length_threshold=1000):
+        # initialize the augmentation.
+        seqs = pyfastx.Fastx(fasta_file)
+        all_fragments = []
+        fragment_to_contig = {}
+        short_fragment_count = 0
+        sequence_count = 0
+        # apply augmentation.
+        fragments_dict = OrderedDict()
+        fragment_count = 0
+
+        # the loop over sequences to generate augmentations.
+        for header, seq in seqs:
+            if len(seq) < length_threshold:
+                continue
+            clean_header = str(header.split()[0])
+            fragments_dict[clean_header] = {
+                "sequence": seq,
+                "fragments": [],
+                "fragment_info": {},
+            }
+
+            augmented_fragments = self.simclr_augmentation(
+                seqs=seq,
+                clean_header=clean_header,
+                length_threshold=length_threshold,
+                num_views=num_views,
+            )
+
+            for (
+                fragment_header,
+                fragment_seq,
+                start_pos,
+                frag_len,
+            ) in augmented_fragments:
+                fragments_dict[clean_header]["fragments"].append(fragment_header)
+                fragments_dict[clean_header]["fragment_info"][fragment_header] = {
+                    "start_pos": start_pos,
+                    "length": frag_len,
+                }
+
+                if len(fragment_seq) < length_threshold:
+                    short_fragment_count += 1
+                    continue
+
+                all_fragments.append((fragment_header, fragment_seq))
+                fragment_to_contig[fragment_header] = clean_header
+                fragment_count += 1
+
+            sequence_count += 1
+
+        print(f"Total sequences processed: {sequence_count}")
+        print(f"Total fragments generated: {len(all_fragments)}")
+        return fragments_dict, all_fragments
+
+    def simclr_augmentation(
+        self,
+        seqs: str,
+        clean_header: str,
+        length_threshold: int,
+        num_views: int,
+    ) -> List:
+        seq_len = len(seqs)
+        fragments = []
+        fragments.append((f"{clean_header}.0", seqs, 0, seq_len))
+        for i in range(1, num_views):
+            try:
+                start = random.randint(0, seq_len - (length_threshold + 1))
+            except ValueError:
+                start = 0
+            sim_len = random.randint(length_threshold, seq_len - start)
+            end = start + sim_len - 1
+            sequence = str(seqs[start : end + 1])
+            seq_id = f"{clean_header}.{i}"
+            fragments.append((seq_id, sequence, start, sim_len))
+        return fragments
+
+    def augment_views(
+        self,
+        contigs: Path,
+        view_num: int,
+        contig_length: int,
+        output_dir: Path,
+    ) -> Dict[str, Dict]:
+        """
+        Augmentation of contigs only. The returned data is a dictionary storing: raw contig -> ( seq, header, (start, end) )
+        """
+        # three things used across the stage:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        FragMent_Dict: OrderedDict = OrderedDict()
+        All_Fragments: list = []
+
+        FragMent_Dict, All_Fragments = self.augmentation(
+            fasta_file=str(contigs),
+            num_views=view_num,
+            length_threshold=contig_length,
+        )
+
+        # save the fragments to file for potential reuse in the future stages, to save time for augmentation in the future.
+
+        for view in range(view_num):
+            output_fasta = os.path.join(
+                output_dir, f"augmented_fragments_view{view}.fasta"
+            )
+            view_fragments = [
+                (header, seq)
+                for header, seq in All_Fragments
+                if header.endswith(f".{view}")
+            ]
+            with open(output_fasta, "w") as f:
+                for fragment_header, fragment_seq in view_fragments:
+                    f.write(f">{fragment_header}\n")
+                    f.write(f"{fragment_seq}\n")
+
+        # copy raw fasta file to augmented_fragments_view0.fasta.
+        # raw_fasta = os.path.join(output_dir, f"augmented_fragments_view0.fasta")
+        # if not os.path.exists(raw_fasta):
+        #     os.symlink(os.path.abspath(contigs), raw_fasta) # create a symbolic link to the original contigs fasta file for view 0, which is the unaugmented view.
+
+        return FragMent_Dict, All_Fragments
+
+
+def _first_nonfinite_report(model, x_comp, x_cov, tax_features, logger):
+    """Report which model output first becomes non-finite."""
+    with torch.no_grad():
+        stats = {"cov_model_out": model.cov_model(x_cov)}
+        if model.tax_model is not None and tax_features is not None:
+            stats["tax_model_out"] = model.tax_model(tax_features)
+        feats, cov_out = model(x_comp, x_cov, tax_features)
+        stats["backbone_out"] = feats
+        stats["cov_out"] = cov_out
+        for name, tensor in stats.items():
+            finite_values = tensor[torch.isfinite(tensor)]
+            maximum = (
+                finite_values.abs().max().item()
+                if finite_values.numel()
+                else float("nan")
+            )
+            logger.warning(
+                f"  [nan-probe] {name}: "
+                f"all_finite={torch.isfinite(tensor).all().item()}, "
+                f"finite_abs_max={maximum:.4e}, dtype={tensor.dtype}"
+            )
+
+
+class EarlyStoppingManagerSimCLR:
+    def __init__(self, patience=10):
+        self.patience = patience
+        self._lowest_loss = float("inf")
+        self._top_acc = 0.0
+        self._saved_state = None
+        self._stagnant_epochs = 0
+
+    def check_improvement(self, loss, top_acc, model_state):
+        loss_improved = loss < self._lowest_loss - 1e-4
+        acc_improved = top_acc > self._top_acc + 0.05  # at least 0.05% gain
+        improved = loss_improved or acc_improved
+        # improved = loss < self._lowest_loss or top_acc > self._top_acc
+
+        if improved:
+            if loss < self._lowest_loss:
+                self._lowest_loss = loss
+            if top_acc > self._top_acc:
+                self._top_acc = top_acc
+            self._saved_state = model_state
+            self._stagnant_epochs = 0
+            return
+
+        self._stagnant_epochs += 1
+
+    def should_stop(self):
+        return self._stagnant_epochs >= self.patience
+
+    def get_best_state(self):
+        """Return the best checkpoint state and its associated loss and top accuracy."""
+        return self._saved_state, self._lowest_loss, self._top_acc

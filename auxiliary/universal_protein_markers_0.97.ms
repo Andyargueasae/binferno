@@ -1,2 +1,0 @@
-# [Taxon Marker File]
-algae	1	0	1	861	[set(['rpl14', 'rpl16']),set(['rps19', 'rpl2']),set(['psbF']),set(['atpB']),set(['psbB']),set(['rpl20']),set(['rps2']),set(['psbE']),set(['psbJ']),set(['petB']),set(['rpoC1']),set(['atpA']),set(['rps8']),set(['rpoC2']),set(['rps18']),set(['rps12']),set(['rps11']),set(['rps3']),set(['psbH']),set(['rps4']),set(['atpI']),set(['rps7']),set(['atpF']),set(['psbK']),set(['psbC'])]
