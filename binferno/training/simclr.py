@@ -873,6 +873,9 @@ class SimCLRTrainer(BaseTrainer):
 
         for epoch_counter in tqdm(range(epochs), desc="SimCLR Training Epochs"):
             model.train()
+            if use_cuda:
+                torch.cuda.synchronize(device)
+                torch.cuda.reset_peak_memory_stats(device)
             total_loss = 0.0
             total_acc1 = 0.0
             num_steps = 0
@@ -967,6 +970,19 @@ class SimCLRTrainer(BaseTrainer):
                 total_acc1 += batch_acc
                 num_steps += 1
 
+            if use_cuda:
+                torch.cuda.synchronize(device)
+                gib = 1024 ** 3
+
+                logger.info(
+                    f"Epoch {epoch_counter + 1} GPU memory: "
+                    f"peak allocated="
+                    f"{torch.cuda.max_memory_allocated(device) / gib:.2f} GiB, "
+                    f"peak reserved="
+                    f"{torch.cuda.max_memory_reserved(device) / gib:.2f} GiB, "
+                    f"current allocated="
+                    f"{torch.cuda.memory_allocated(device) / gib:.2f} GiB"
+                )
             # Hold only the LR schedule; keep epoch metrics and checkpoint tracking active.
             if epoch_counter >= self.max_lr_epochs:
                 scheduler.step()

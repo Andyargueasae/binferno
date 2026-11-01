@@ -58,9 +58,9 @@ def _orf_coordinates(record):
 class ESMCConfig(BaseModel):
     enabled: bool = Field(default=False, description="Include the ESM-C protein modality.")
     model: Literal["esmc_300m", "esmc_600m"] = "esmc_300m"
-    pooling: Literal["mean", "attention"] = "attention"
+    pooling: Literal["mean", "attention"] = "mean"
     fusion: Literal["residual", "concat"] = Field(
-        default="concat",
+        default="residual",
         description="Late protein residual or concatenation before a joint MLP.",
     )
     augmentation: Literal["shared", "coordinate"] = Field(
@@ -71,6 +71,9 @@ class ESMCConfig(BaseModel):
     batch_size: int = Field(default=4, ge=1, description="Protein chunks per ESM-C batch.")
     max_residues: int = Field(default=1022, ge=1, le=2046)
     device: str = Field(default="auto", description="ESM-C inference device; auto, cpu or cuda.")
+    pool_max_padded_tokens: int = Field(default=65536, ge=1, description="Max padded tokens for attention pooling; larger values use more GPU memory.")
+    pool_max_proteins: int = Field(default=8192, ge=1, description="Max proteins per attention pooling batch; larger values use more GPU memory.")
+    pool_max_views: int = Field(default=512, ge=1, description="Max contig/view pairs per attention pooling batch; larger values use more GPU memory.")
 
 
 def _load_model(config, device):
@@ -205,6 +208,9 @@ class ContigProteinEncoder(nn.Module):
         self.pooling = config.pooling
         self.weight = config.weight
         self.projection = nn.Linear(self.proteins.shape[1], output_dim)
+        self.pool_max_padded_tokens = config.pool_max_padded_tokens
+        self.pool_max_proteins = config.pool_max_proteins
+        self.pool_max_views = config.pool_max_views
         if self.pooling == "attention":
             if output_dim % config.num_heads:
                 raise ValueError("ESM-C attention heads must divide the representation dimension")
@@ -215,6 +221,50 @@ class ContigProteinEncoder(nn.Module):
             for index, (start, end) in enumerate(zip(self.offsets[:-1], self.offsets[1:])):
                 if end > start:
                     self.means[index] = self.proteins[start:end].mean(0)
+
+    def _pool_groups(self, lengths):
+        nonempty = np.flatnonzero(lengths > 0)
+        ordered = nonempty[
+            np.argsort(lengths[nonempty], kind="stable")
+        ]
+
+        group = []
+        protein_count = 0
+        bucket = None
+
+        for index in ordered.tolist():
+            length = int(lengths[index])
+            next_bucket = (length - 1).bit_length()
+
+            if (
+                length > self.pool_max_padded_tokens
+                or length > self.pool_max_proteins
+            ):
+                raise ValueError(
+                    f"Protein view {index} has {length} proteins; "
+                    "increase pooling budgets to fit this single view."
+                )
+
+            exceeds_budget = (
+                (len(group) + 1) * length
+                > self.pool_max_padded_tokens
+                or protein_count + length > self.pool_max_proteins
+                or len(group) + 1 > self.pool_max_views
+            )
+
+            if group and (
+                next_bucket != bucket or exceeds_budget
+            ):
+                yield group
+                group = []
+                protein_count = 0
+
+            group.append(index)
+            protein_count += length
+            bucket = next_bucket
+
+        if group:
+            yield group
 
     def pool_with_presence(self, ids, view_ids=None):
         device = self.projection.weight.device
@@ -259,41 +309,75 @@ class ContigProteinEncoder(nn.Module):
                 ])
             pooled = self.projection(means.to(device))
         else:
-            # Gather only real proteins on the CPU and project before padding.
-            # Padding the original 960/1152-wide latents wastes host-to-device
-            # bandwidth and projection work when contig lengths are uneven.
-            packed_starts = np.cumsum(lengths) - lengths
-            positions = np.arange(lengths.sum()) - np.repeat(packed_starts, lengths)
-            protein_rows = np.concatenate(rows)
-            packed = self.proteins.index_select(0, torch.from_numpy(protein_rows))
-            projected = self.projection(packed.to(device))
-
-            # Keep one unmasked dummy for empty contigs to avoid all-masked
-            # attention. Their residual (and gradients) is zeroed below.
-            width = max(int(lengths.max()), 1)
-            destinations = np.repeat(np.arange(len(unique)), lengths) * width + positions
-            tokens = projected.new_zeros((len(unique) * width, projected.shape[-1]))
-            tokens = tokens.index_copy(
-                0, torch.as_tensor(destinations, device=device), projected
-            ).view(len(unique), width, -1)
-            mask = torch.arange(width, device=device)[None, :] >= torch.as_tensor(
-                np.maximum(lengths, 1), device=device
-            )[:, None]
-            # Masked, single-query pooling under AMP can hit fused CUDA
-            # attention kernel failures. Math SDPA is inexpensive for one query
-            # and keeps this workaround local to protein pooling (also backward).
-            with sdpa_kernel(SDPBackend.MATH):
-                pooled, _ = self.attention(
-                    self.query.expand(len(unique), -1, -1), tokens, tokens,
-                    key_padding_mask=mask, need_weights=False,
+            # Group selected view lengths before gathering, projection or padding.
+            outputs = []
+            processed_indices = []
+            for group in self._pool_groups(lengths):
+                outputs.append(
+                    self._pool_attention_group(
+                        [rows[index] for index in group], lengths[group]
+                    )
                 )
-            pooled = pooled[:, 0]
+                processed_indices.extend(group)
+
+            empty_indices = np.flatnonzero(lengths == 0).tolist()
+
+            if empty_indices:
+                # No protein projection or attention is needed for empty views.
+                # Keep zero gradients connected even for an all-empty batch.
+                zero = sum(parameter.sum() * 0.0 for parameter in self.parameters())
+                template = outputs[0] if outputs else self.projection.weight
+                empty_outputs = template.new_zeros(
+                    (len(empty_indices), self.projection.out_features)
+                ) + zero.to(dtype=template.dtype)
+                outputs.append(empty_outputs)
+                processed_indices.extend(empty_indices)
+
+            if outputs:
+                combined = torch.cat(outputs, dim=0)
+                restore_order = torch.as_tensor(
+                    np.argsort(processed_indices), dtype=torch.long, device=device
+                )
+                pooled = combined[restore_order]
+            else:
+                pooled = self.projection.weight.new_empty(
+                    (0, self.projection.out_features)
+                )
         pooled = pooled * valid[:, None] # zero out empty contigs so they do not contribute to the residual
         
         inverse = inverse.to(device)
 
         return pooled[inverse], valid[inverse]
     
+    def _pool_attention_group(self, rows, lengths):
+        """Pool one nonempty group, allocating only group-local tensors."""
+        device = self.projection.weight.device
+        group_size = len(rows)
+        packed_starts = np.cumsum(lengths) - lengths
+        positions = np.arange(lengths.sum()) - np.repeat(packed_starts, lengths)
+        protein_rows = np.concatenate(rows)
+        packed = self.proteins.index_select(0, torch.from_numpy(protein_rows))
+        projected = self.projection(packed.to(device))
+
+        width = int(lengths.max())
+        destinations = np.repeat(np.arange(group_size), lengths) * width + positions
+        tokens = projected.new_zeros((group_size * width, projected.shape[-1]))
+        tokens = tokens.index_copy(
+            0, torch.as_tensor(destinations, device=device), projected
+        ).view(group_size, width, -1)
+        mask = torch.arange(width, device=device)[None, :] >= torch.as_tensor(
+            lengths, device=device
+        )[:, None]
+        # Masked, single-query pooling under AMP can hit fused CUDA
+        # attention kernel failures. Keep the math workaround local; grouping
+        # bounds its padded allocations without changing the attention operation.
+        with sdpa_kernel(SDPBackend.MATH):
+            pooled, _ = self.attention(
+                self.query.expand(group_size, -1, -1), tokens, tokens,
+                key_padding_mask=mask, need_weights=False,
+            )
+        return pooled[:, 0]
+
     def forward(self, ids, view_ids=None):
         pooled, _ = self.pool_with_presence(ids, view_ids)
         return pooled

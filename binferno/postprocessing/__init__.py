@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-import shutil
 
 import loguru
 from pydantic import Field
@@ -19,6 +18,14 @@ from .writer_utils import (
 
 class BinfernoPostprocessor(BasePostprocessor):
     checkm_database: Path = Field(default="", description="Path to CheckM database")
+    reuse_checkm_profile: bool = Field(
+        default=True,
+        description="Reuse matching, successfully completed CheckM profiling steps.",
+    )
+    write_checkm_quality_reports: bool = Field(
+        default=True,
+        description="Write CheckM QA summary reports; disable to run only marker QA needed for selection.",
+    )
     minbin_size: int = Field(
         default=200_000,
         description="Minimum bin size for filtering contigs before clustering.",
@@ -48,9 +55,6 @@ class BinfernoPostprocessor(BasePostprocessor):
         cluster_res_dir = output_path / "cluster_res"
         unitem_profile_dir = cluster_res_dir / "unitem_profile"
 
-        if unitem_profile_dir.exists():
-            shutil.rmtree(unitem_profile_dir)
-
         n_genome = cluster_result.n_genome
 
         logger.info(f"Seed_num:\t{n_genome}")
@@ -63,17 +67,24 @@ class BinfernoPostprocessor(BasePostprocessor):
             res_name: (str(cluster_res_dir / f"{res_name}_bins"), "fa")
         }
 
-        assert not unitem_profile_dir.exists()
-        unitem_profile_dir.mkdir(parents=True, exist_ok=False)
+        unitem_profile_dir.mkdir(parents=True, exist_ok=True)
 
         profile = GenomeProfiler(cpus=num_threads, logger=logger)
         profile.profile_setup(checkm_database)
 
         if plastid:
-            profile.run_pltd(bin_dirs, str(unitem_profile_dir))
+            profile.run_pltd(
+                bin_dirs,
+                str(unitem_profile_dir),
+                skip_existing=self.reuse_checkm_profile,
+                quality_reports=self.write_checkm_quality_reports,
+            )
         else:
             profile.run(
-                bin_dirs, str(unitem_profile_dir)
+                bin_dirs,
+                str(unitem_profile_dir),
+                skip_existing=self.reuse_checkm_profile,
+                quality_reports=self.write_checkm_quality_reports,
             )  # make sure that kmeans bins should be there.
 
         bac_mg_table = (
