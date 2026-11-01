@@ -60,9 +60,9 @@ python scripts/check_conda_packaging.py dist/*.whl
 With conda-build installed:
 
 ```bash
-conda render recipe --no-finalize
+python -c "from conda_build import api; print(api.output_yaml(api.render('recipe', finalize=False)[0][0]))"
 # Once all runtime dependencies are available in these channels:
-conda build recipe --override-channels -c conda-forge -c bioconda
+python -c "from conda_build import api; api.build('recipe', channel_urls=['conda-forge', 'bioconda'], override_channels=True)"
 ```
 
 The Conda packaging workflow builds the sdist/wheel, checks recipe dependency and

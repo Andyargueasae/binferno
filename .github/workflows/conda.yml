@@ -47,14 +47,16 @@ jobs:
           channel-priority: strict
       - name: Install conda build tools
         shell: bash -el {0}
-        run: conda install -y --override-channels -c conda-forge conda-build
+        run: conda install -y -n conda-build-tools --override-channels -c conda-forge conda-build
       - name: Render recipe without solving unavailable dependencies
         shell: bash -el {0}
-        run: conda render recipe --no-finalize
+        run: |
+          conda run -n conda-build-tools python -c "from conda_build import api; metadata = api.render('recipe', finalize=False); assert metadata; print(api.output_yaml(metadata[0][0]))"
       - name: Full conda build and installed package smoke tests
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.full_build }}
         shell: bash -el {0}
-        run: conda build recipe --override-channels -c conda-forge -c bioconda
+        run: |
+          conda run -n conda-build-tools python -c "from conda_build import api; api.build('recipe', channel_urls=['conda-forge', 'bioconda'], override_channels=True)"
       - uses: actions/upload-artifact@v4
         with:
           name: binferno-python-distributions
