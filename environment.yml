@@ -1,0 +1,14 @@
+# Interim installation: conda supplies external executables; pip supplies Binferno.
+# This is NOT a published conda package. Tested target for packaging: Linux x86_64.
+name: binferno
+channels:
+  - conda-forge
+  - bioconda
+  - nodefaults
+dependencies:
+  - python=3.11
+  - pip
+  - fraggenescan=1.32
+  - hmmer>=3.4,<4
+  - pip:
+      - .

@@ -24,25 +24,31 @@ Binferno is a python-based metagenomic binner that handles metagenomic contigs f
 Installation
 ============
 
-Binferno is installable via pip. But before installing it, build the conda environment using the conda_env.yaml provided.
+Binferno can be installed from a checkout using conda for the external tools
+and pip for the Python package:
 
 .. code-block:: bash
 
-    mamba env create -n Binferno_env -c conda-forge -c bioconda -c defaults python=3.10
-    # mamba env create -n Binferno_env -f conda_env.yaml
-    conda activate Binferno_env
-
-Then, install Binferno via pip:
-
-.. code-block:: bash
-
-    pip install binferno
-
-Check the installation by running:
-
-.. code-block:: bash
-
+    git clone https://github.com/Andyargueasae/binferno.git
+    cd binferno
+    conda env create -f environment.yml
+    conda activate binferno
+    python -m pip check
     binferno --help
+
+Conda packaging
+---------------
+
+A publication recipe is provided in ``recipe/meta.yaml``, with an immutable
+source archive and SHA256. It includes Binferno's Python dependencies,
+FragGeneScan and HMMER; CORGI is no longer required by the current pipeline.
+The Conda packaging workflow builds and tests the installed package and provides
+a downloadable conda artifact. See ``recipe/README.md`` for build commands and
+Bioconda or personal-channel publication instructions.
+
+Binferno is not yet advertised as available from Bioconda. The environment above
+is a mixed conda/pip installation from a checkout. Reference databases and
+optional ESM-C model weights are configured separately.
 
 Input features
 ================
