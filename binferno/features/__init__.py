@@ -305,15 +305,13 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
 
         kmer_dim = self._get_kmer_dim()
         coverage_dim = coverage_df.shape[1] if coverage_df is not None else 0
-        # corgi_dim = corgi_df.shape[1] if corgi_df is not None else 0
-        # dnabert_s_dim = dnabert_s_df.shape[1] if dnabert_s_df is not None else 0
         taxonomy_dim = (
             contig_taxonomy_df.shape[1] if contig_taxonomy_df is not None else 0
         )
 
         logger.info(
             f"Generated unified features with dimensions - \
-            Coverage: {coverage_dim}, Corgi: {corgi_dim}, DNABERT-S: {dnabert_s_dim}, \
+            Coverage: {coverage_dim}, \
             Taxonomy (separate): {taxonomy_dim}, Kmer: {kmer_dim}. \
             Canonical dimensions: {canonical_features.shape[1]}"
         )
