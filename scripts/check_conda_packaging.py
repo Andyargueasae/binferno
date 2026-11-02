@@ -26,6 +26,8 @@ assert recipe['build']['entry_points'] == ['binferno = binferno.main:main']
 
 # Conda uses different names for these PyPI distributions.
 mapping = {'torch': 'pytorch', 'igraph': 'python-igraph', 'matplotlib': 'matplotlib-base'}
+# The recipe narrows upstream's broad range to the supported private sklearn API.
+conda_constraints = {'scikit-learn': '>=1.7.2,<1.8'}
 run = {}
 for spec in recipe['requirements']['run']:
     name, _, constraint = spec.partition(' ')
@@ -35,7 +37,8 @@ for dependency in project['dependencies']:
     name = mapping.get(req.name, req.name)
     assert canonicalize_name(name) in run, f'Missing runtime dependency: {name}'
     # Compare individual specifiers: their order is not significant.
-    assert set(run[canonicalize_name(name)].split(',')) == set(str(req.specifier).split(',')), dependency
+    expected = conda_constraints.get(req.name, str(req.specifier))
+    assert set(run[canonicalize_name(name)].split(',')) == set(expected.split(',')), dependency
 assert run['python'] == project['requires-python']
 for name in ('fraggenescan', 'hmmer', 'rich', 'tqdm', 'typing-extensions'):
     assert name in run, f'Missing executable/direct import: {name}'

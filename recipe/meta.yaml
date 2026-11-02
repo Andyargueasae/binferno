@@ -43,7 +43,8 @@ requirements:
     - networkx ==3.4.0
     - numba >=0.62.1,<0.63.0
     - pandas >=2.3.3,<3.0.0
-    - scikit-learn >=1.7.2,<2.0.0
+    # cluster_utils uses private sklearn helpers validated with the 1.7 series.
+    - scikit-learn >=1.7.2,<1.8
     - seaborn >=0.13.2,<0.14.0
     - pytorch >=2.5.1,<=2.6.0
     - tyro >=1.0.13,<2.0.0

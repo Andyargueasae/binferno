@@ -11,6 +11,9 @@ All runtime dependencies are declared as conda dependencies. `bio-corgi` is no
 longer required by current main. PyPI names are mapped to conda names:
 `torch` -> `pytorch`, `igraph` -> `python-igraph`, and
 `matplotlib` -> `matplotlib-base`. FragGeneScan and HMMER are installed too.
+The recipe restricts scikit-learn to `>=1.7.2,<1.8`: the source currently imports
+private sklearn helpers which no longer exist in newer releases. This intentionally
+narrows the broader upstream metadata rather than allowing a broken installation.
 ESM-C's SDK/weights and user-selected reference databases remain optional,
 separate downloads. The initial validation platform is Linux x86_64.
 `noarch: python` describes Binferno's package, not every dependency's availability.

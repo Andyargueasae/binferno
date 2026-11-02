@@ -17,6 +17,10 @@ on:
       - '.github/workflows/conda.yml'
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -52,11 +56,11 @@ jobs:
       - name: Render publication recipe
         shell: bash -el {0}
         run: |
-          conda run -n conda-build-tools python -c "from conda_build import api; metadata = api.render('recipe', finalize=False); assert metadata; print(api.output_yaml(metadata[0][0]))"
+          conda run --no-capture-output -n conda-build-tools python -c "from conda_build import api; metadata = api.render('recipe', finalize=False); assert metadata; print(api.output_yaml(metadata[0][0]))"
       - name: Full conda build and installed package smoke tests
         shell: bash -el {0}
         run: |
-          conda run -n conda-build-tools python -c "from conda_build import api; api.build('recipe', anaconda_upload=False, channel_urls=['conda-forge', 'bioconda'], override_channels=True)"
+          conda run --no-capture-output -n conda-build-tools python -c "from conda_build import api; api.build('recipe', anaconda_upload=False, channel_urls=['conda-forge', 'bioconda'], override_channels=True)"
       - uses: actions/upload-artifact@v4
         with:
           name: binferno-python-distributions
