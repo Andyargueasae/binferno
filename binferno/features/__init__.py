@@ -10,20 +10,13 @@ import loguru
 from sklearn.preprocessing import normalize
 
 from .base import BaseFeatureBuilder
-from .corgi import CorgiFeatureBuilder
 from .coverage import CoverageFeatureBuilder
 from .kmer import KmerFeatureBuilder, generate_feature_mapping
-from .dnabert_s import DnaBertSFeatureBuilder
 from .taxonomy import TaxonomyFeatureBuilder
-
+# from .corgi import CorgiFeatureBuilder
+# from .dnabert_s import DnaBertSFeatureBuilder
 
 class BinfernoFeatureBuilder(BaseFeatureBuilder):
-
-    use_corgi: bool = Field(
-        default=False,
-        description="Whether to use Corgi to generate features for training.",
-    )
-    corgi: CorgiFeatureBuilder
     use_kmer: bool = Field(
         default=True, description="Whether to use k-mer features for training."
     )
@@ -32,26 +25,31 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
         default=True, description="Whether to use coverage features for training."
     )
     coverage: CoverageFeatureBuilder
-    use_dnabert_s: bool = Field(
-        default=False, description="Whether to use DNABERT-S features for training."
-    )
-    dnabert_s: DnaBertSFeatureBuilder
     use_taxonomy: bool = Field(
         default=False, description="Whether to use taxonomy features for training."
     )
     taxonomy: TaxonomyFeatureBuilder  # Placeholder for future taxonomy feature builder
-    corgi_l2_normalize: bool = Field(
-        default=True,
-        description="Whether to L2 normalize Corgi features before concatenation.",
-    )
-    corgi_reduction: bool = Field(
-        default=False,
-        description="Whether to apply dimensionality reduction to Corgi features before concatenation, mutually exclusive with corgi_l2_normalize.",
-    )
     save_features: bool = Field(
         default=True,
         description="Whether to save the generated features as tsv files in the output directory.",
     )
+    # use_corgi: bool = Field(
+    #     default=False,
+    #     description="Whether to use Corgi to generate features for training.",
+    # )
+    # corgi: CorgiFeatureBuilder
+    # use_dnabert_s: bool = Field(
+    #     default=False, description="Whether to use DNABERT-S features for training."
+    # )
+    # dnabert_s: DnaBertSFeatureBuilder
+    # corgi_l2_normalize: bool = Field(
+    #     default=True,
+    #     description="Whether to L2 normalize Corgi features before concatenation.",
+    # )
+    # corgi_reduction: bool = Field(
+    #     default=False,
+    #     description="Whether to apply dimensionality reduction to Corgi features before concatenation, mutually exclusive with corgi_l2_normalize.",
+    # )
 
     def _get_kmer_dim(self) -> int:
         if not self.use_kmer:
@@ -73,15 +71,13 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
 
         if (
             (not self.use_kmer)
-            and (not self.use_corgi)
             and (not self.use_coverage)
-            and (not self.use_dnabert_s)
             and (not self.use_taxonomy)
         ):
             raise ValueError(
-                "At least one feature type must be selected for training. \
-                Please set at least one of use_kmer, use_corgi, use_coverage, \
-                use_dnabert_s, or use_taxonomy to True."
+                "At least one feature type must be selected for training. "
+                "Please set at least one of use_kmer, use_coverage, "
+                "or use_taxonomy to True."
             )
         feature_path = output_dir / "features.tsv"
         taxonomy_path = output_dir / "taxonomy_features.tsv"
@@ -151,9 +147,9 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
                 [canonical_features, coverage_df], axis=1
             )  # Start with: [coverage]
 
-        # STEP 2: Load CORGI/TAXONOMY features and INTEGRATE into main matrix
-        corgi_df = None
-        dnabert_s_df = None
+        # STEP 2: Load taxonomy separately from the continuous feature matrix
+        # corgi_df = None
+        # dnabert_s_df = None
         contig_taxonomy_df = None
 
         if self.use_taxonomy:
@@ -197,66 +193,66 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
             logger.info(
                 f"Taxonomy of the data contains {unique_taxa} rank-specific taxa."
             )
-        elif self.use_corgi:
-            logger.info("Generating Corgi features...")
-            corgi_data = output_dir / "corgi_features.tsv"
-            if corgi_data.exists():
-                logger.info("Loading existing Corgi features...")
-                corgi_df = pd.read_csv(corgi_data, sep="\t", index_col=0, header=0)
-            else:
-                corgi_df = self.corgi(
-                    output_dir, contigs=contigs, min_length=contig_length
-                )
-                (
-                    corgi_df.to_csv(corgi_data, sep="\t", index=True, header=True)
-                    if self.save_features
-                    else None
-                )
+        # elif self.use_corgi:
+        #     logger.info("Generating Corgi features...")
+        #     corgi_data = output_dir / "corgi_features.tsv"
+        #     if corgi_data.exists():
+        #         logger.info("Loading existing Corgi features...")
+        #         corgi_df = pd.read_csv(corgi_data, sep="\t", index_col=0, header=0)
+        #     else:
+        #         corgi_df = self.corgi(
+        #             output_dir, contigs=contigs, min_length=contig_length
+        #         )
+        #         (
+        #             corgi_df.to_csv(corgi_data, sep="\t", index=True, header=True)
+        #             if self.save_features
+        #             else None
+        #         )
 
-            # Apply L2 normalization BEFORE concatenation (matching old behavior)
-            if self.corgi_l2_normalize:
-                corgi_df = pd.DataFrame(
-                    normalize(corgi_df), index=corgi_df.index, columns=corgi_df.columns
-                )
-            if self.corgi_reduction:
-                corgi_df = pd.DataFrame(
-                    self.dim_reduce(corgi_df.values, n_components=50),
-                    index=corgi_df.index,
-                )
-                corgi_df.columns = [str(col) for col in corgi_df.columns]
+        #     # Apply L2 normalization BEFORE concatenation (matching old behavior)
+        #     if self.corgi_l2_normalize:
+        #         corgi_df = pd.DataFrame(
+        #             normalize(corgi_df), index=corgi_df.index, columns=corgi_df.columns
+        #         )
+        #     if self.corgi_reduction:
+        #         corgi_df = pd.DataFrame(
+        #             self.dim_reduce(corgi_df.values, n_components=50),
+        #             index=corgi_df.index,
+        #         )
+        #         corgi_df.columns = [str(col) for col in corgi_df.columns]
 
-            canonical_features = pd.concat(
-                [canonical_features, corgi_df], axis=1
-            )  # Now: [coverage, corgi]
-        elif self.use_dnabert_s:
-            logger.info("Generating DNABERT-S features...")
-            dnabert_s_data = output_dir / "dnabert_s_features.tsv"
-            if dnabert_s_data.exists():
-                logger.info("Loading existing DNABERT-S features...")
-                dnabert_s_df = pd.read_csv(
-                    dnabert_s_data, sep="\t", index_col=0, header=0
-                )
-            else:
-                dnabert_s_df = self.dnabert_s(
-                    fragments=All_Fragments,
-                    logger=logger,
-                )
-                (
-                    dnabert_s_df.to_csv(
-                        dnabert_s_data, sep="\t", index=True, header=True
-                    )
-                    if self.save_features
-                    else None
-                )
+        #     canonical_features = pd.concat(
+        #         [canonical_features, corgi_df], axis=1
+        #     )  # Now: [coverage, corgi]
+        # elif self.use_dnabert_s:
+        #     logger.info("Generating DNABERT-S features...")
+        #     dnabert_s_data = output_dir / "dnabert_s_features.tsv"
+        #     if dnabert_s_data.exists():
+        #         logger.info("Loading existing DNABERT-S features...")
+        #         dnabert_s_df = pd.read_csv(
+        #             dnabert_s_data, sep="\t", index_col=0, header=0
+        #         )
+        #     else:
+        #         dnabert_s_df = self.dnabert_s(
+        #             fragments=All_Fragments,
+        #             logger=logger,
+        #         )
+        #         (
+        #             dnabert_s_df.to_csv(
+        #                 dnabert_s_data, sep="\t", index=True, header=True
+        #             )
+        #             if self.save_features
+        #             else None
+        #         )
 
-            dnabert_s_df = pd.DataFrame(
-                normalize(dnabert_s_df),
-                index=dnabert_s_df.index,
-                columns=dnabert_s_df.columns,
-            )
-            canonical_features = pd.concat(
-                [canonical_features, dnabert_s_df], axis=1
-            )  # Now: [coverage, dnabert_s]
+        #     dnabert_s_df = pd.DataFrame(
+        #         normalize(dnabert_s_df),
+        #         index=dnabert_s_df.index,
+        #         columns=dnabert_s_df.columns,
+        #     )
+        #     canonical_features = pd.concat(
+        #         [canonical_features, dnabert_s_df], axis=1
+        #     )  # Now: [coverage, dnabert_s]
 
         # STEP 3: Load KMER features LAST
         kmer_df = None
@@ -282,7 +278,7 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
 
             canonical_features = pd.concat(
                 [canonical_features, kmer_df], axis=1
-            )  # Final: [coverage, corgi/dnabert_s/taxonomy, kmer]
+            )  # Final canonical features: [coverage, kmer]
 
         # STEP 4: Enforce exact alignment before saving. Pandas concatenation
         # otherwise turns missing feature rows into silent NaNs.
@@ -307,15 +303,13 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
 
         kmer_dim = self._get_kmer_dim()
         coverage_dim = coverage_df.shape[1] if coverage_df is not None else 0
-        corgi_dim = corgi_df.shape[1] if corgi_df is not None else 0
-        dnabert_s_dim = dnabert_s_df.shape[1] if dnabert_s_df is not None else 0
         taxonomy_dim = (
             contig_taxonomy_df.shape[1] if contig_taxonomy_df is not None else 0
         )
 
         logger.info(
             f"Generated unified features with dimensions - \
-            Coverage: {coverage_dim}, Corgi: {corgi_dim}, DNABERT-S: {dnabert_s_dim}, \
+            Coverage: {coverage_dim}, \
             Taxonomy (separate): {taxonomy_dim}, Kmer: {kmer_dim}. \
             Canonical dimensions: {canonical_features.shape[1]}"
         )

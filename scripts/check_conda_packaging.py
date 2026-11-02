@@ -1,6 +1,7 @@
 """Check recipe/metadata parity and built wheel contents without runtime dependencies."""
 from pathlib import Path
 import sys
+import re
 import tomllib
 import zipfile
 from configparser import ConfigParser
@@ -17,6 +18,10 @@ recipe = yaml.safe_load(jinja2.Template((root / 'recipe/meta.yaml').read_text())
 assert recipe['package']['name'] == project['name']
 assert str(recipe['package']['version']) == project['version']
 assert recipe['build']['noarch'] == 'python'
+assert 'path' not in recipe['source'], 'Publication requires an immutable source URL'
+assert re.search(r'/archive/[0-9a-f]{40}\.tar\.gz$', recipe['source']['url'])
+assert re.fullmatch(r'[0-9a-f]{64}', recipe['source']['sha256'])
+assert 'bio-corgi' not in {canonicalize_name(Requirement(d).name) for d in project['dependencies']}
 assert recipe['build']['entry_points'] == ['binferno = binferno.main:main']
 
 # Conda uses different names for these PyPI distributions.

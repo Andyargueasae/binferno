@@ -8,12 +8,20 @@ import shutil
 from collections import defaultdict
 import subprocess
 import csv
+from importlib.metadata import version
 
 import loguru
 import pandas as pd
 from typing import Dict, List, Tuple, Iterator, TextIO, Optional
 
 from ..clustering.base import ClusterResult
+from .profile_cache import (
+    database_signature,
+    file_digest,
+    job_signature,
+    read_state,
+    write_state,
+)
 from .scripts.unitem_markers import Markers, PltdMarkers
 from .scripts.unitem_defaults import *
 
@@ -31,6 +39,14 @@ class GenomeProfiler:
         self.logger = logger
         check_on_path("checkm")
         self.cpus = cpus
+        self._database_signature = None
+        self._tools_signature = {"checkm_version": version("checkm-genome")}
+        for tool in ("checkm", "prodigal", "hmmsearch"):
+            executable = shutil.which(tool)
+            self._tools_signature[tool] = (
+                (str(Path(executable).resolve()), file_digest(executable))
+                if executable else None
+            )
 
     def profile_setup(self, database: Path):
         """
@@ -43,6 +59,7 @@ class GenomeProfiler:
         cmd = ["checkm", "data", "setRoot", str(database)]
         self.logger.info(f"Setting up CheckM database with command: {' '.join(cmd)}")
         subprocess.run(cmd, check=True)
+        self._database_signature = database_signature(database)
 
     def _run_cmd(self, cmd: List[str], step_name: str) -> None:
         """
@@ -58,6 +75,7 @@ class GenomeProfiler:
         marker_set_file: str,
         output_dir: str,
         skip_existing: bool = True,
+        quality_reports: bool = True,
     ) -> Tuple[str, str]:
         """
         Run CheckM analyze + qa outputs for a single marker-set job.
@@ -65,62 +83,80 @@ class GenomeProfiler:
         Returns
         -------
         marker_gene_table, genome_quality_table
+            The quality table is only generated when quality_reports is True.
         """
-        make_sure_path_exists(output_dir)
+        if self._database_signature is None:
+            raise RuntimeError("Call profile_setup before running CheckM profiling")
 
-        marker_gene_table = os.path.join(output_dir, MARKER_GENE_TABLE)
-        genome_quality_table = os.path.join(output_dir, GENOME_QUALITY_TABLE)
+        signature = job_signature(
+            bin_dir,
+            bin_ext,
+            marker_set_file,
+            self._database_signature,
+            self._tools_signature,
+        )
+        output = Path(output_dir)
+        state_path = output / "profile_state.json"
+        state = read_state(state_path)
+        if not skip_existing or state.get("signature") != signature:
+            if output.exists():
+                shutil.rmtree(output)
+            state = {"signature": signature}
+        output.mkdir(parents=True, exist_ok=True)
 
-        analyze_done = os.path.exists(output_dir) and len(os.listdir(output_dir)) > 0
-        marker_done = os.path.exists(marker_gene_table)
-        quality_done = os.path.exists(genome_quality_table)
+        marker_gene_table = str(output / MARKER_GENE_TABLE)
+        genome_quality_table = str(output / GENOME_QUALITY_TABLE)
 
-        if not (skip_existing and analyze_done and marker_done and quality_done):
-            if not (skip_existing and analyze_done):
-                analyze_cmd = [
-                    "checkm",
-                    "analyze",
-                    "-t",
-                    str(self.cpus),
-                    "-x",
-                    str(bin_ext),
-                    str(marker_set_file),
-                    str(bin_dir),
-                    str(output_dir),
-                ]
-                self._run_cmd(analyze_cmd, "checkm analyze")
+        def completed(step, path):
+            return (
+                state.get(step) is True
+                and Path(path).is_file()
+                and Path(path).stat().st_size > 0
+            )
 
-            if not (skip_existing and marker_done):
-                marker_cmd = [
-                    "checkm",
-                    "qa",
-                    "-t",
-                    str(self.cpus),
-                    "-o",
-                    "5",
-                    "--tab_table",
-                    "-f",
-                    str(marker_gene_table),
-                    str(marker_set_file),
-                    str(output_dir),
-                ]
-                self._run_cmd(marker_cmd, "checkm qa marker_gene_table")
+        marker_done = completed("markers", marker_gene_table)
+        quality_done = not quality_reports or completed("quality", genome_quality_table)
+        if marker_done and quality_done:
+            self.logger.info(f"Reusing CheckM profile: {output_dir}")
+            return marker_gene_table, genome_quality_table
 
-            if not (skip_existing and quality_done):
-                quality_cmd = [
-                    "checkm",
-                    "qa",
-                    "-t",
-                    str(self.cpus),
-                    "-o",
-                    "2",
-                    "--tab_table",
-                    "-f",
-                    str(genome_quality_table),
-                    str(marker_set_file),
-                    str(output_dir),
-                ]
-                self._run_cmd(quality_cmd, "checkm qa genome_quality_table")
+        # Directory existence alone does not prove that analyze succeeded.
+        analyze_done = (
+            state.get("analyze") is True
+            and (output / "storage" / "bin_stats.analyze.tsv").is_file()
+            and (output / "storage" / "checkm_hmm_info.pkl.gz").is_file()
+        )
+        if not analyze_done:
+            # Remove partial analysis artifacts before restarting a failed job.
+            shutil.rmtree(output)
+            output.mkdir(parents=True)
+            state = {"signature": signature}
+            self._run_cmd([
+                "checkm", "analyze", "-t", str(self.cpus), "-x", str(bin_ext),
+                str(marker_set_file), str(bin_dir), str(output_dir),
+            ], "checkm analyze")
+            state["analyze"] = True
+            write_state(state_path, state)
+            marker_done = False
+            quality_done = not quality_reports
+
+        for step, done, output_format, table in (
+            ("markers", marker_done, "5", marker_gene_table),
+            ("quality", quality_done, "2", genome_quality_table),
+        ):
+            if done:
+                continue
+            # Invalidate completion before a command that could leave partial output.
+            state.pop(step, None)
+            write_state(state_path, state)
+            self._run_cmd([
+                "checkm", "qa", "-t", str(self.cpus), "-o", output_format,
+                "--tab_table", "-f", table, str(marker_set_file), str(output_dir),
+            ], f"checkm qa {step}")
+            if not Path(table).is_file() or Path(table).stat().st_size == 0:
+                raise RuntimeError(f"CheckM qa did not produce a nonempty table: {table}")
+            state[step] = True
+            write_state(state_path, state)
 
         return marker_gene_table, genome_quality_table
 
@@ -279,6 +315,7 @@ class GenomeProfiler:
         marker_jobs: List[Tuple[str, str]],
         plastid_mode: bool = False,
         skip_existing: bool = True,
+        quality_reports: bool = True,
     ):
         """
         Shared implementation for bacterial/archaeal/plastid profiling.
@@ -311,8 +348,12 @@ class GenomeProfiler:
                     marker_set_file=marker_set_file,
                     output_dir=cur_output_dir,
                     skip_existing=skip_existing,
+                    quality_reports=quality_reports,
                 )
                 quality_tables[subdir_name] = genome_quality_table
+
+            if not quality_reports:
+                continue
 
             if plastid_mode:
                 pltd_quality_table = quality_tables[CHECKM_PLTD_DIR]
@@ -343,9 +384,16 @@ class GenomeProfiler:
                     ar_quality_table,
                 )
 
-        self._report_genome_quality(genome_quality, output_dir)
+        if quality_reports:
+            self._report_genome_quality(genome_quality, output_dir)
 
-    def run(self, bin_dirs: str, output_dir: str, skip_existing: bool = True):
+    def run(
+        self,
+        bin_dirs: str,
+        output_dir: str,
+        skip_existing: bool = True,
+        quality_reports: bool = True,
+    ):
         """
         Profile bins with bacterial and archaeal marker sets.
         """
@@ -359,9 +407,16 @@ class GenomeProfiler:
             marker_jobs=marker_jobs,
             plastid_mode=False,
             skip_existing=skip_existing,
+            quality_reports=quality_reports,
         )
 
-    def run_pltd(self, bin_dirs: str, output_dir: str, skip_existing: bool = True):
+    def run_pltd(
+        self,
+        bin_dirs: str,
+        output_dir: str,
+        skip_existing: bool = True,
+        quality_reports: bool = True,
+    ):
         """
         Profile bins with plastid marker set.
         """
@@ -374,6 +429,7 @@ class GenomeProfiler:
             marker_jobs=marker_jobs,
             plastid_mode=True,
             skip_existing=skip_existing,
+            quality_reports=quality_reports,
         )
 
 
@@ -423,11 +479,14 @@ def compute_bin_quality_cache(
     Compute and cache (completeness, contamination) for every bin of every method.
     """
     quality_cache: QualityCache = defaultdict(dict)
+    scores_by_contigs = {}
 
     for method_id in methods_sorted:
         for bin_id, contig_names in bins[method_id].items():
-            comp, cont = get_binstats(contig_names, markers)
-            quality_cache[method_id][bin_id] = (comp, cont)
+            key = frozenset(contig_names)
+            if key not in scores_by_contigs:
+                scores_by_contigs[key] = get_binstats(contig_names, markers)
+            quality_cache[method_id][bin_id] = scores_by_contigs[key]
 
     return quality_cache
 

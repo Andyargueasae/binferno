@@ -177,25 +177,44 @@ def test_esmc_disabled_by_default_and_nested_config_available():
 
 
 @pytest.mark.parametrize('ids', [[3, 0, 2, 1, 0], [2, 2]])
+@pytest.mark.parametrize('coordinate', [False, True])
 @pytest.mark.parametrize('device', ['cpu', pytest.param(
     'cuda', marks=pytest.mark.skipif(not torch.cuda.is_available(), reason='needs CUDA')
 )])
-def test_packed_attention_matches_padded_outputs_and_gradients(protein_table, ids, device):
+def test_packed_attention_matches_padded_outputs_and_gradients(protein_table, ids, device, coordinate):
     from copy import deepcopy
     from torch.nn.utils.rnn import pad_sequence
 
     proteins, offsets = protein_table
+    view_rows = None
+    if coordinate:
+        view_rows = {
+            (index, view): np.arange(start + (view if end > start else 0), end)
+            for index, (start, end) in enumerate(zip(offsets[:-1], offsets[1:]))
+            for view in (0, 1)
+        }
     encoder = esmc.ContigProteinEncoder(
-        proteins, offsets, 8, esmc.ESMCConfig(pooling='attention', num_heads=2)
+        proteins, offsets, 8, esmc.ESMCConfig(
+            pooling='attention', num_heads=2,
+            pool_max_padded_tokens=4, pool_max_proteins=4, pool_max_views=2,
+        ), view_rows=view_rows,
     ).to(device)
     reference = deepcopy(encoder)
     ids = torch.tensor(ids)
-    unique, inverse = torch.unique(ids, return_inverse=True)
-    lengths = np.diff(offsets)[unique.numpy()]
+    views = torch.arange(len(ids)) % 2 if coordinate else torch.zeros_like(ids)
+    unique, inverse = torch.unique(
+        torch.stack((ids, views), dim=-1), dim=0, return_inverse=True
+    )
+    rows = [
+        view_rows[(index, view)] if coordinate
+        else np.arange(offsets[index], offsets[index + 1])
+        for index, view in unique.tolist()
+    ]
+    lengths = np.array([len(selected) for selected in rows])
     sequences = [
-        reference.proteins[offsets[index]:offsets[index + 1]]
+        reference.proteins[selected]
         if length else reference.proteins.new_zeros((1, proteins.shape[1]))
-        for index, length in zip(unique.tolist(), lengths)
+        for selected, length in zip(rows, lengths)
     ]
     tokens = reference.projection(pad_sequence(sequences, batch_first=True).to(device))
     mask = torch.arange(tokens.shape[1], device=device)[None, :] >= torch.tensor(
@@ -210,10 +229,11 @@ def test_packed_attention_matches_padded_outputs_and_gradients(protein_table, id
     hook = encoder.projection.register_forward_pre_hook(
         lambda module, args: projected_shapes.append(args[0].shape)
     )
-    actual = encoder(ids.to(device))
+    actual = encoder(ids.to(device), views.to(device))
     hook.remove()
     # Duplicated views and padding must not add projection work.
-    assert projected_shapes == [torch.Size((int(lengths.sum()), proteins.shape[1]))]
+    assert sum(shape[0] for shape in projected_shapes) == int(lengths.sum())
+    assert all(shape[1] == proteins.shape[1] for shape in projected_shapes)
     torch.testing.assert_close(actual, expected)
     weights = torch.randn_like(actual)
     (actual * weights).sum().backward()
@@ -223,6 +243,69 @@ def test_packed_attention_matches_padded_outputs_and_gradients(protein_table, id
     ):
         assert name == other_name
         torch.testing.assert_close(parameter.grad, other.grad, atol=1e-6, rtol=1e-5)
+
+
+@pytest.mark.parametrize('limits', [
+    dict(pool_max_padded_tokens=12),
+    dict(pool_max_proteins=12),
+    dict(pool_max_views=1),
+])
+def test_pool_groups_cover_nonempty_views_within_each_budget(protein_table, limits):
+    proteins, offsets = protein_table
+    config = esmc.ESMCConfig(pooling='attention', num_heads=2, **limits)
+    encoder = esmc.ContigProteinEncoder(proteins, offsets, 8, config)
+    lengths = np.array([0, 9, 5, 3, 0, 8, 6, 7, 4, 1, 2])
+    groups = list(encoder._pool_groups(lengths))
+    flattened = [index for group in groups for index in group]
+    assert sorted(flattened) == np.flatnonzero(lengths > 0).tolist()
+    for group in groups:
+        selected = lengths[group]
+        assert len(group) * int(selected.max()) <= config.pool_max_padded_tokens
+        assert int(selected.sum()) <= config.pool_max_proteins
+        assert len(group) <= config.pool_max_views
+        assert len({(int(length) - 1).bit_length() for length in selected}) == 1
+    assert list(encoder._pool_groups(np.zeros(3, dtype=np.int64))) == []
+
+
+@pytest.mark.parametrize('limit', ['pool_max_padded_tokens', 'pool_max_proteins'])
+def test_attention_rejects_view_exceeding_single_view_budget(protein_table, limit):
+    proteins, offsets = protein_table
+    encoder = esmc.ContigProteinEncoder(
+        proteins, offsets, 8, esmc.ESMCConfig(pooling='attention', num_heads=2, **{limit: 2})
+    )
+    with pytest.raises(ValueError, match='has 3 proteins'):
+        encoder(torch.tensor([0]))
+
+
+@pytest.mark.parametrize('device', ['cpu', pytest.param(
+    'cuda', marks=pytest.mark.skipif(not torch.cuda.is_available(), reason='needs CUDA')
+)])
+def test_attention_isolates_long_view_and_backpropagates(device):
+    lengths = np.array([4576] + [1] * 32)
+    offsets = np.concatenate(([0], np.cumsum(lengths)))
+    proteins = np.random.default_rng(8).normal(size=(int(lengths.sum()), 8)).astype(np.float32)
+    config = esmc.ESMCConfig(
+        pooling='attention',
+        pool_max_padded_tokens=8192, pool_max_proteins=8192, pool_max_views=16,
+    )
+    encoder = esmc.ContigProteinEncoder(proteins, offsets, 128, config).to(device)
+    padded_shapes = []
+    hook = encoder.attention.register_forward_pre_hook(
+        lambda module, args: padded_shapes.append(args[1].shape)
+    )
+    try:
+        output = encoder(torch.arange(len(lengths), device=device))
+    finally:
+        hook.remove()
+    assert output.shape == (len(lengths), 128)
+    assert torch.isfinite(output).all()
+    assert any(shape[:2] == (1, 4576) for shape in padded_shapes)
+    assert all(shape[0] * shape[1] <= config.pool_max_padded_tokens for shape in padded_shapes)
+    assert all(shape[0] <= config.pool_max_views for shape in padded_shapes)
+    output.square().mean().backward()
+    for parameter in encoder.parameters():
+        assert parameter.grad is not None
+        assert torch.isfinite(parameter.grad).all()
 
 
 @pytest.fixture
@@ -318,7 +401,8 @@ def test_shared_residual_matches_original_formula_and_checkpoint(pooling, protei
 
 
 @pytest.mark.parametrize('taxonomy', [False, True])
-def test_simclr_coordinate_training_export_and_reload(tmp_path, monkeypatch, coordinate_table, taxonomy):
+@pytest.mark.parametrize('fusion', ['residual', 'concat'])
+def test_simclr_coordinate_training_export_and_reload(tmp_path, monkeypatch, coordinate_table, taxonomy, fusion):
     from loguru import logger
     from binferno.training.models.simclr import RankTaxonomyEncoder
     monkeypatch.setattr(esmc, 'build_protein_latents', lambda *args: coordinate_table)
@@ -339,15 +423,21 @@ def test_simclr_coordinate_training_export_and_reload(tmp_path, monkeypatch, coo
     tax_df = pd.DataFrame([[1, 1], [0, 0]] * 2, index=index) if taxonomy else None
     model = SimCLRNet(in_sz=8, out_sz=4, emb_szs=[8, 8], ps=[0.],
                       cov_model=nn.Linear(2, 4), protein_encoder=encoder,
+                      fusion=fusion,
                       tax_model=RankTaxonomyEncoder([2], 4) if taxonomy else None)
     loader, optimizer, scheduler, inference = trainer.prepare_trainer(
         df, tax_df=tax_df, batch_size=2, contig_length=1000, model=model,
         n_views=2, simclrnet=True, contigs=fasta, num_workers=0, epochs=1,
     )
     seen = []
-    hook = encoder.register_forward_pre_hook(
-        lambda module, args: seen.append((args[0].clone(), args[1].clone()))
-    )
+    original_pool = encoder.pool_with_presence
+
+    def record_pool(ids, view_ids=None):
+        seen.append((ids.clone(), view_ids.clone()))
+        return original_pool(ids, view_ids)
+
+    # Both fusion modes call this method; concat bypasses Module.forward hooks.
+    monkeypatch.setattr(encoder, 'pool_with_presence', record_pool)
     trainer.simclrnet_train(loader, optimizer, scheduler, torch.device('cpu'),
                             epochs=1, model=model, n_cov=2, n_views=2,
                             output_dir=tmp_path, logger=logger)
@@ -366,7 +456,6 @@ def test_simclr_coordinate_training_export_and_reload(tmp_path, monkeypatch, coo
         expected = model(original[:, 2:], original[:, :2],
                          torch.tensor(tax_df.iloc[:2].values).float() if taxonomy else None)[0]
     np.testing.assert_allclose(exported.values, expected.numpy(), rtol=1e-6, atol=1e-6)
-    hook.remove()
 
 
 @pytest.mark.parametrize('workers', [0, 1])

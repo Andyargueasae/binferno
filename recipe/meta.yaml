@@ -5,9 +5,10 @@ package:
   name: {{ name }}
   version: {{ version }}
 
-# Builds the current checkout. Replace with a release URL and SHA256 for Bioconda.
+# Immutable post-CORGI-removal source, including the fixes merged in PR #7.
 source:
-  path: ..
+  url: https://github.com/Andyargueasae/binferno/archive/b6207a7eaea2f192ca2cde9f2c50cc2c9a0d202c.tar.gz
+  sha256: 6873d7ee42c8a886e0e5d86fd0fed5cf20588a9d92e465427c37b8644f222c4f
 
 build:
   number: 0
@@ -45,15 +46,14 @@ requirements:
     - scikit-learn >=1.7.2,<2.0.0
     - seaborn >=0.13.2,<0.14.0
     - pytorch >=2.5.1,<=2.6.0
-    - bio-corgi >=0.5.1,<0.6.0
     - tyro >=1.0.13,<2.0.0
     - pydantic >=2.13.3,<3.0.0
     - pyrodigal >=3.6.3,<=3.7.1
     - pyhmmer >=0.10.15,<=0.12.0
     - loguru >=0.7.3,<0.8.0
-    # Direct imports currently supplied transitively by the pip dependencies.
-    - rich
-    - tqdm
+    - rich ==13.9.4
+    - tqdm ==4.66.5
+    # Direct typing_extensions imports are also declared explicitly.
     - typing_extensions
     # Executables are not supplied by Python package metadata.
     - fraggenescan >=1.32
@@ -61,6 +61,11 @@ requirements:
 
 # These tests run in the installed conda environment, outside the source tree.
 test:
+  requires:
+    - pytest >=9.0.1
+  source_files:
+    - tests
+    - pyproject.toml
   imports:
     - binferno.main
     - binferno.features
@@ -72,6 +77,7 @@ test:
     - python -c "from importlib.resources import files; root = files('binferno'); assert all(root.joinpath('auxiliary', f).is_file() for f in ('marker.hmm', 'bacar_marker.hmm', 'pltd_marker.hmm')); assert all(root.joinpath('postprocessing', 'scripts', 'checkm_ms', f).is_file() for f in ('archaea.ms', 'bacteria.ms', 'plastid.ms'))"
     - command -v run_FragGeneScan.pl
     - hmmsearch -h
+    - pytest -q tests
 
 about:
   home: https://github.com/Andyargueasae/binferno

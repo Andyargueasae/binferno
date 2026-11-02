@@ -68,10 +68,10 @@ def test_postprocessor_calls_expected_pipeline_non_plastid(tmp_path, monkeypatch
         def profile_setup(self, database):
             calls["profile_setup"] += 1
 
-        def run(self, bin_dirs, out_dir):
+        def run(self, bin_dirs, out_dir, skip_existing=True, quality_reports=True):
             calls["run"] += 1
 
-        def run_pltd(self, bin_dirs, out_dir):
+        def run_pltd(self, bin_dirs, out_dir, skip_existing=True, quality_reports=True):
             calls["run_pltd"] += 1
 
     def fake_estimate_bins_quality_nobins(
@@ -133,10 +133,10 @@ def test_postprocessor_calls_expected_pipeline_plastid(tmp_path, monkeypatch):
         def profile_setup(self, database):
             pass
 
-        def run(self, bin_dirs, out_dir):
+        def run(self, bin_dirs, out_dir, skip_existing=True, quality_reports=True):
             calls["run"] += 1
 
-        def run_pltd(self, bin_dirs, out_dir):
+        def run_pltd(self, bin_dirs, out_dir, skip_existing=True, quality_reports=True):
             calls["run_pltd"] += 1
 
     def fake_estimate_bins_quality_nobins_pltd(pltd_mg_table, res_path, cluster_result):

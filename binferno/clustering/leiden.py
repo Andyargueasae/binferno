@@ -160,16 +160,32 @@ class LeidenClustering(BaseClustering):
         num_workers = max(1, int(threads or 1))
 
         if not self.CPM:
-            parameter_list = [0.5, 1, 5, 10, 30]
+            parameter_list = [
+                0.5,
+                1, 
+                5, 
+                10, 
+                30
+            ]
         else:
-            parameter_list = [0.001, 0.005, 0.01, 0.05, 0.1]
+            parameter_list = [
+                0.001,
+                0.005, 
+                0.01, 
+                0.05, 
+                0.1
+            ]
         bandwidth_list = [
             0.05,
             0.1,
             0.2,
             0.3,
         ]  # we may have to replace this by actual-data driven sweeping.
-        partgraph_ratio_list = [50, 80, 100]
+        partgraph_ratio_list = [
+            50, 
+            80, 
+            100
+        ]
         max_edges_list = [15, 100]  # [15 may not always be optimal]
 
         seed_indices = gen_seed_idx(seed_file, contig_id_list=namelist)
@@ -210,12 +226,12 @@ class LeidenClustering(BaseClustering):
 
         jobs = []
         # after the last two runs, update clustering. Also, debug the "both" mode, and add-corgi mode.
-        with mp.Pool(processes=num_workers) as pool:
+        with mp.Pool(processes=2) as pool:
             for max_edges in max_edges_list:
                 index = self.fit_hnsw_index(
                     logger=logger,
                     features=norm_embeddings,
-                    num_threads=num_workers,
+                    num_threads=2,
                     ef=max_edges * 10,
                     M=16,
                     space="l2",

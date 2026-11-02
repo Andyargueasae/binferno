@@ -36,12 +36,19 @@ and pip for the Python package:
     python -m pip check
     binferno --help
 
-A development conda recipe is provided in ``recipe/meta.yaml``. Binferno is not
-yet published to Bioconda: its required ``bio-corgi`` dependency and any missing
-transitive dependencies must be packaged first. See ``recipe/README.md`` for
-build checks and the publication procedure. The environment above is a mixed
-conda/pip installation. Reference databases and optional model weights are
-configured separately.
+Conda packaging
+---------------
+
+A publication recipe is provided in ``recipe/meta.yaml``, with an immutable
+source archive and SHA256. It includes Binferno's Python dependencies,
+FragGeneScan and HMMER; CORGI is no longer required by the current pipeline.
+The Conda packaging workflow builds and tests the installed package and provides
+a downloadable conda artifact. See ``recipe/README.md`` for build commands and
+Bioconda or personal-channel publication instructions.
+
+Binferno is not yet advertised as available from Bioconda. The environment above
+is a mixed conda/pip installation from a checkout. Reference databases and
+optional ESM-C model weights are configured separately.
 
 Input features
 ================
