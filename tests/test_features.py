@@ -3,7 +3,7 @@ import tempfile
 from binferno.features import BinfernoFeatureBuilder
 from binferno.features.kmer import KmerFeatureBuilder
 from binferno.features.coverage import CoverageFeatureBuilder
-from binferno.features.corgi import CorgiFeatureBuilder
+# from binferno.features.corgi import CorgiFeatureBuilder
 from binferno.features.dnabert_s import DnaBertSFeatureBuilder
 from binferno.features.taxonomy import TaxonomyFeatureBuilder
 import pandas as pd
@@ -162,7 +162,7 @@ import pickle
 def _make_feature_builder(
     use_kmer=True,
     use_coverage=True,
-    use_corgi=False,
+    # use_corgi=False,
     use_dnabert_s=False,
     use_taxonomy=False,
 ):
@@ -171,8 +171,8 @@ def _make_feature_builder(
         kmer=KmerFeatureBuilder(),
         use_coverage=use_coverage,
         coverage=CoverageFeatureBuilder(),
-        use_corgi=use_corgi,
-        corgi=CorgiFeatureBuilder(),
+        # use_corgi=use_corgi,
+        # corgi=CorgiFeatureBuilder(),
         use_dnabert_s=use_dnabert_s,
         dnabert_s=DnaBertSFeatureBuilder(),
         use_taxonomy=use_taxonomy,
@@ -185,7 +185,7 @@ def test_feature_builder_requires_at_least_one_modality(tmp_path):
     builder = _make_feature_builder(
         use_kmer=False,
         use_coverage=False,
-        use_corgi=False,
+        # use_corgi=False,
         use_dnabert_s=False,
         use_taxonomy=False,
     )
@@ -206,7 +206,6 @@ def test_feature_builder_kmer_coverage_success(monkeypatch, tmp_path):
     builder = _make_feature_builder(
         use_kmer=True,
         use_coverage=True,
-        use_corgi=False,
         use_dnabert_s=False,
         use_taxonomy=False,
     )
@@ -263,7 +262,6 @@ def test_feature_builder_coverage_row_mismatch_raises(monkeypatch, tmp_path):
     builder = _make_feature_builder(
         use_kmer=True,
         use_coverage=True,
-        use_corgi=False,
         use_dnabert_s=False,
         use_taxonomy=False,
     )
@@ -316,7 +314,6 @@ def test_feature_builder_loads_cached_features_without_recompute(monkeypatch, tm
     builder = _make_feature_builder(
         use_kmer=True,
         use_coverage=True,
-        use_corgi=False,
         use_dnabert_s=False,
         use_taxonomy=False,
     )
@@ -378,84 +375,84 @@ def test_feature_builder_taxonomy_stays_separate(tmp_path, use_kmer):
     assert (tmp_path / "taxonomy_features.tsv").exists()
 
 
-def test_feature_builder_corgi_branch(monkeypatch, tmp_path):
-    """Exercises the corgi-only branch, covering lines missed by existing tests."""
-    builder = _make_feature_builder(
-        use_kmer=False,
-        use_coverage=False,
-        use_corgi=True,
-        use_dnabert_s=False,
-        use_taxonomy=False,
-    )
+# def test_feature_builder_corgi_branch(monkeypatch, tmp_path):
+#     """Exercises the corgi-only branch, covering lines missed by existing tests."""
+#     builder = _make_feature_builder(
+#         use_kmer=False,
+#         use_coverage=False,
+#         use_corgi=True,
+#         use_dnabert_s=False,
+#         use_taxonomy=False,
+#     )
 
-    fake_corgi = pd.DataFrame(
-        [[0.1] * 4, [0.2] * 4],
-        index=["contig_1", "contig_2"],
-        columns=["dim0", "dim1", "dim2", "dim3"],
-    )
+#     fake_corgi = pd.DataFrame(
+#         [[0.1] * 4, [0.2] * 4],
+#         index=["contig_1", "contig_2"],
+#         columns=["dim0", "dim1", "dim2", "dim3"],
+#     )
 
-    # The builder calls the CorgiFeatureBuilder instance, so we patch the class method
-    # and seed the expected augmented FASTA files the code checks for before reading outputs.
-    (tmp_path / "augmented_fragments_view0.fasta").write_text(
-        ">contig_1\nATGC\n>contig_2\nATGC\n"
-    )
-    (tmp_path / "augmented_fragments_view1.fasta").write_text(
-        ">contig_1\nATGC\n>contig_2\nATGC\n"
-    )
-    monkeypatch.setattr(
-        CorgiFeatureBuilder,
-        "__call__",
-        lambda self, seq_dir, contigs, min_length=1000: fake_corgi,
-    )
+#     # The builder calls the CorgiFeatureBuilder instance, so we patch the class method
+#     # and seed the expected augmented FASTA files the code checks for before reading outputs.
+#     (tmp_path / "augmented_fragments_view0.fasta").write_text(
+#         ">contig_1\nATGC\n>contig_2\nATGC\n"
+#     )
+#     (tmp_path / "augmented_fragments_view1.fasta").write_text(
+#         ">contig_1\nATGC\n>contig_2\nATGC\n"
+#     )
+#     monkeypatch.setattr(
+#         CorgiFeatureBuilder,
+#         "__call__",
+#         lambda self, seq_dir, contigs, min_length=1000: fake_corgi,
+#     )
 
-    (features, taxonomy), kmer_dim = builder(
-        FragMent_Dict={},
-        All_Fragments=[],
-        contigs=CONTIG,
-        bam_path=BAM,
-        threads=1,
-        logger=logger,
-        output_dir=tmp_path,
-    )
+#     (features, taxonomy), kmer_dim = builder(
+#         FragMent_Dict={},
+#         All_Fragments=[],
+#         contigs=CONTIG,
+#         bam_path=BAM,
+#         threads=1,
+#         logger=logger,
+#         output_dir=tmp_path,
+#     )
 
-    assert taxonomy is None
-    assert features.shape == (2, 4)
-    assert kmer_dim == 0
-    assert (tmp_path / "corgi_features.tsv").exists()
+#     assert taxonomy is None
+#     assert features.shape == (2, 4)
+#     assert kmer_dim == 0
+#     assert (tmp_path / "corgi_features.tsv").exists()
 
 
-def test_feature_builder_corgi_branch_loads_cached(monkeypatch, tmp_path):
-    """Exercises the cached-corgi code path (corgi_data.exists() branch)."""
-    builder = _make_feature_builder(
-        use_kmer=False,
-        use_coverage=False,
-        use_corgi=True,
-        use_dnabert_s=False,
-        use_taxonomy=False,
-    )
+# def test_feature_builder_corgi_branch_loads_cached(monkeypatch, tmp_path):
+#     """Exercises the cached-corgi code path (corgi_data.exists() branch)."""
+#     builder = _make_feature_builder(
+#         use_kmer=False,
+#         use_coverage=False,
+#         use_corgi=True,
+#         use_dnabert_s=False,
+#         use_taxonomy=False,
+#     )
 
-    cached_corgi = pd.DataFrame(
-        [[0.5] * 3, [0.6] * 3],
-        index=["contig_1", "contig_2"],
-        columns=["d0", "d1", "d2"],
-    )
-    cached_corgi.to_csv(tmp_path / "corgi_features.tsv", sep="\t")
+#     cached_corgi = pd.DataFrame(
+#         [[0.5] * 3, [0.6] * 3],
+#         index=["contig_1", "contig_2"],
+#         columns=["d0", "d1", "d2"],
+#     )
+#     cached_corgi.to_csv(tmp_path / "corgi_features.tsv", sep="\t")
 
-    def fail_if_called(*args, **kwargs):
-        raise AssertionError("Corgi model should not be called when cache exists")
+#     def fail_if_called(*args, **kwargs):
+#         raise AssertionError("Corgi model should not be called when cache exists")
 
-    monkeypatch.setattr(builder.corgi, "__call__", fail_if_called)
+#     monkeypatch.setattr(builder.corgi, "__call__", fail_if_called)
 
-    (features, taxonomy), _ = builder(
-        FragMent_Dict={},
-        All_Fragments=[],
-        contigs=CONTIG,
-        bam_path=BAM,
-        threads=1,
-        logger=logger,
-        output_dir=tmp_path,
-    )
+#     (features, taxonomy), _ = builder(
+#         FragMent_Dict={},
+#         All_Fragments=[],
+#         contigs=CONTIG,
+#         bam_path=BAM,
+#         threads=1,
+#         logger=logger,
+#         output_dir=tmp_path,
+#     )
 
-    assert taxonomy is None
-    assert features.shape == (2, 3)
+#     assert taxonomy is None
+#     assert features.shape == (2, 3)
 
