@@ -4,7 +4,6 @@ from binferno.features import BinfernoFeatureBuilder
 from binferno.features.kmer import KmerFeatureBuilder
 from binferno.features.coverage import CoverageFeatureBuilder
 # from binferno.features.corgi import CorgiFeatureBuilder
-from binferno.features.dnabert_s import DnaBertSFeatureBuilder
 from binferno.features.taxonomy import TaxonomyFeatureBuilder
 import pandas as pd
 
@@ -163,7 +162,6 @@ def _make_feature_builder(
     use_kmer=True,
     use_coverage=True,
     # use_corgi=False,
-    use_dnabert_s=False,
     use_taxonomy=False,
 ):
     return BinfernoFeatureBuilder(
@@ -173,8 +171,6 @@ def _make_feature_builder(
         coverage=CoverageFeatureBuilder(),
         # use_corgi=use_corgi,
         # corgi=CorgiFeatureBuilder(),
-        use_dnabert_s=use_dnabert_s,
-        dnabert_s=DnaBertSFeatureBuilder(),
         use_taxonomy=use_taxonomy,
         taxonomy=TaxonomyFeatureBuilder(),
         save_features=True,
@@ -186,11 +182,10 @@ def test_feature_builder_requires_at_least_one_modality(tmp_path):
         use_kmer=False,
         use_coverage=False,
         # use_corgi=False,
-        use_dnabert_s=False,
         use_taxonomy=False,
     )
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="At least one feature type"):
         builder(
             FragMent_Dict={},
             All_Fragments=[],
@@ -206,7 +201,6 @@ def test_feature_builder_kmer_coverage_success(monkeypatch, tmp_path):
     builder = _make_feature_builder(
         use_kmer=True,
         use_coverage=True,
-        use_dnabert_s=False,
         use_taxonomy=False,
     )
 
@@ -262,7 +256,6 @@ def test_feature_builder_coverage_row_mismatch_raises(monkeypatch, tmp_path):
     builder = _make_feature_builder(
         use_kmer=True,
         use_coverage=True,
-        use_dnabert_s=False,
         use_taxonomy=False,
     )
 
@@ -314,7 +307,6 @@ def test_feature_builder_loads_cached_features_without_recompute(monkeypatch, tm
     builder = _make_feature_builder(
         use_kmer=True,
         use_coverage=True,
-        use_dnabert_s=False,
         use_taxonomy=False,
     )
 

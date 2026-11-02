@@ -252,7 +252,7 @@ def test_packed_attention_matches_padded_outputs_and_gradients(protein_table, id
 ])
 def test_pool_groups_cover_nonempty_views_within_each_budget(protein_table, limits):
     proteins, offsets = protein_table
-    config = esmc.ESMCConfig(num_heads=2, **limits)
+    config = esmc.ESMCConfig(pooling='attention', num_heads=2, **limits)
     encoder = esmc.ContigProteinEncoder(proteins, offsets, 8, config)
     lengths = np.array([0, 9, 5, 3, 0, 8, 6, 7, 4, 1, 2])
     groups = list(encoder._pool_groups(lengths))
@@ -271,7 +271,7 @@ def test_pool_groups_cover_nonempty_views_within_each_budget(protein_table, limi
 def test_attention_rejects_view_exceeding_single_view_budget(protein_table, limit):
     proteins, offsets = protein_table
     encoder = esmc.ContigProteinEncoder(
-        proteins, offsets, 8, esmc.ESMCConfig(num_heads=2, **{limit: 2})
+        proteins, offsets, 8, esmc.ESMCConfig(pooling='attention', num_heads=2, **{limit: 2})
     )
     with pytest.raises(ValueError, match='has 3 proteins'):
         encoder(torch.tensor([0]))
@@ -285,6 +285,7 @@ def test_attention_isolates_long_view_and_backpropagates(device):
     offsets = np.concatenate(([0], np.cumsum(lengths)))
     proteins = np.random.default_rng(8).normal(size=(int(lengths.sum()), 8)).astype(np.float32)
     config = esmc.ESMCConfig(
+        pooling='attention',
         pool_max_padded_tokens=8192, pool_max_proteins=8192, pool_max_views=16,
     )
     encoder = esmc.ContigProteinEncoder(proteins, offsets, 128, config).to(device)

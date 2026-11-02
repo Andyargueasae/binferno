@@ -71,15 +71,13 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
 
         if (
             (not self.use_kmer)
-            and (not self.use_corgi)
             and (not self.use_coverage)
-            and (not self.use_dnabert_s)
             and (not self.use_taxonomy)
         ):
             raise ValueError(
-                "At least one feature type must be selected for training. \
-                Please set at least one of use_kmer, use_corgi, use_coverage, \
-                use_dnabert_s, or use_taxonomy to True."
+                "At least one feature type must be selected for training. "
+                "Please set at least one of use_kmer, use_coverage, "
+                "or use_taxonomy to True."
             )
         feature_path = output_dir / "features.tsv"
         taxonomy_path = output_dir / "taxonomy_features.tsv"
@@ -149,7 +147,7 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
                 [canonical_features, coverage_df], axis=1
             )  # Start with: [coverage]
 
-        # STEP 2: Load CORGI/TAXONOMY features and INTEGRATE into main matrix
+        # STEP 2: Load taxonomy separately from the continuous feature matrix
         # corgi_df = None
         # dnabert_s_df = None
         contig_taxonomy_df = None
@@ -280,7 +278,7 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
 
             canonical_features = pd.concat(
                 [canonical_features, kmer_df], axis=1
-            )  # Final: [coverage, corgi/dnabert_s/taxonomy, kmer]
+            )  # Final canonical features: [coverage, kmer]
 
         # STEP 4: Enforce exact alignment before saving. Pandas concatenation
         # otherwise turns missing feature rows into silent NaNs.
@@ -313,7 +311,7 @@ class BinfernoFeatureBuilder(BaseFeatureBuilder):
 
         logger.info(
             f"Generated unified features with dimensions - \
-            Coverage: {coverage_dim}, Corgi: {corgi_dim}, DNABERT-S: {dnabert_s_dim}, \
+            Coverage: {coverage_dim}, \
             Taxonomy (separate): {taxonomy_dim}, Kmer: {kmer_dim}. \
             Canonical dimensions: {canonical_features.shape[1]}"
         )
