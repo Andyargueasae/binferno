@@ -26,6 +26,60 @@ from .taxonomy_cluster import penalize_taxonomy_conflicts, prepare_taxonomy_arra
 from ..features.taxonomy import TAXONOMIC_RANKS
 
 
+def _available_memory_bytes(proc_root: Path = Path("/proc")) -> Optional[int]:
+    """Remaining host/job RAM, including limits on ancestor cgroups (v1/v2)."""
+    headrooms = []
+    job_limit_found = False
+    try:
+        for line in (proc_root / "meminfo").read_text().splitlines():
+            if line.startswith("MemAvailable:"):
+                headrooms.append(int(line.split()[1]) * 1024)
+        memberships = []
+        for line in (proc_root / "self/cgroup").read_text().splitlines():
+            _, controllers, member = line.split(":", 2)
+            if not controllers or "memory" in controllers.split(","):
+                memberships.append((not controllers, Path(member)))
+        for line in (proc_root / "self/mountinfo").read_text().splitlines():
+            before, after = line.split(" - ", 1)
+            fields, fs = before.split(), after.split()
+            for v2, member in memberships:
+                if fs[0] != ("cgroup2" if v2 else "cgroup"):
+                    continue
+                if not v2 and "memory" not in fs[2].split(","):
+                    continue
+                mount = Path(fields[4].replace(r"\040", " "))
+                root = Path(fields[3].replace(r"\040", " "))
+                try:
+                    relative = member.relative_to(root)
+                except ValueError:
+                    # Cgroup namespaces can report membership relative to the mount.
+                    relative = member.relative_to("/")
+                if ".." in relative.parts:
+                    continue
+                group = mount / relative
+                while True:
+                    limit_name = "memory.max" if v2 else "memory.limit_in_bytes"
+                    usage_name = "memory.current" if v2 else "memory.usage_in_bytes"
+                    try:
+                        limit = int((group / limit_name).read_text().strip())
+                        usage = int((group / usage_name).read_text().strip())
+                        # v1 represents unlimited RAM with a near-int64-max value.
+                        if 0 <= limit < (1 << 60):
+                            headrooms.append(max(0, limit - usage))
+                            job_limit_found = True
+                    except (OSError, ValueError):
+                        pass
+                    if group == mount:
+                        break
+                    group = group.parent
+    except (OSError, ValueError, IndexError):
+        pass
+    if os.environ.get("SLURM_JOB_ID") and not job_limit_found:
+        # Node RAM alone does not establish a Slurm job's remaining allocation.
+        return None
+    return min(headrooms) if headrooms else None
+
+
 class LeidenClustering(BaseClustering):
     seed: int = 42
     mutual: bool = Field(
@@ -47,6 +101,69 @@ class LeidenClustering(BaseClustering):
         le=1.0,
         description="Genus conflict edge multiplier; 1.0 disables taxonomy refinement.",
     )
+
+    max_workers: int = Field(
+        default=0,
+        ge=0,
+        description="Maximum concurrent Leiden runs; 0 selects from CPU and RAM budgets.",
+    )
+    worker_memory_gb: float = Field(
+        default=0.0,
+        ge=0.0,
+        description="Estimated peak additional GiB per Leiden worker; 0 estimates from graph size.",
+    )
+    memory_reserve_fraction: float = Field(
+        default=0.25,
+        ge=0.0,
+        lt=1.0,
+        description="Fraction of remaining RAM reserved when selecting Leiden workers.",
+    )
+
+    def _select_workers(
+        self,
+        n_contigs: int,
+        max_edges: int,
+        cpu_budget: int,
+        pending_jobs: int,
+        logger: Any,
+    ) -> int:
+        """Choose concurrency before each graph sweep; estimates are not an OOM guarantee."""
+        # Heuristic for array copies, Python edge tuples, igraph and optimiser state.
+        # Mutual filtering also builds a Python set of the directed edges.
+        bytes_per_edge = 1024 if self.mutual else 768
+        estimate = (
+            max(1, int(self.worker_memory_gb * 2**30))
+            if self.worker_memory_gb
+            else 512 * 2**20 + n_contigs * (256 + max_edges * bytes_per_edge)
+        )
+        available = _available_memory_bytes()
+        cap = min(cpu_budget, pending_jobs, self.max_workers or cpu_budget)
+        if available is None:
+            workers = min(cap, 2)
+            logger.warning(
+                "Job RAM headroom unavailable; limiting Leiden to {} workers.", workers
+            )
+        else:
+            usable = int(available * (1.0 - self.memory_reserve_fraction))
+            workers = min(cap, usable // estimate)
+            if workers < 1:
+                raise MemoryError(
+                    f"Insufficient RAM for one estimated Leiden worker: "
+                    f"{usable / 2**30:.2f} GiB usable, {estimate / 2**30:.2f} GiB needed. "
+                    "Request more job RAM or reduce graph size; worker_memory_gb "
+                    "can override the estimate if measured usage is available."
+                )
+        logger.info(
+            "Leiden max_edges={}: {} workers / {} CPUs; estimated {:.2f} GiB per worker; "
+            "RAM headroom {} GiB (reserve {:.0%}).",
+            max_edges,
+            workers,
+            cpu_budget,
+            estimate / 2**30,
+            f"{available / 2**30:.2f}" if available is not None else "unknown",
+            self.memory_reserve_fraction,
+        )
+        return workers
 
     def __call__(
         self,
@@ -157,35 +274,25 @@ class LeidenClustering(BaseClustering):
         for key, val in kmeans_out.items():
             result.clusters[key] = val
 
-        num_workers = max(1, int(threads or 1))
+        cpu_budget = max(1, int(threads or 1))
+        if hasattr(os, "sched_getaffinity"):
+            cpu_budget = min(cpu_budget, len(os.sched_getaffinity(0)))
+        slurm_cpus = os.environ.get("SLURM_CPUS_PER_TASK")
+        if slurm_cpus and slurm_cpus.isdigit():
+            cpu_budget = min(cpu_budget, max(1, int(slurm_cpus)))
+        logger.info("HNSW construction and query CPU budget: {}", cpu_budget)
 
         if not self.CPM:
-            parameter_list = [
-                0.5,
-                1, 
-                5, 
-                10, 
-                30
-            ]
+            parameter_list = [0.5, 1, 5, 10, 30]
         else:
-            parameter_list = [
-                0.001,
-                0.005, 
-                0.01, 
-                0.05, 
-                0.1
-            ]
+            parameter_list = [0.001, 0.005, 0.01, 0.05, 0.1]
         bandwidth_list = [
             0.05,
             0.1,
             0.2,
             0.3,
         ]  # we may have to replace this by actual-data driven sweeping.
-        partgraph_ratio_list = [
-            50, 
-            80, 
-            100
-        ]
+        partgraph_ratio_list = [50, 80, 100]
         max_edges_list = [15, 100]  # [15 may not always be optimal]
 
         seed_indices = gen_seed_idx(seed_file, contig_id_list=namelist)
@@ -221,82 +328,91 @@ class LeidenClustering(BaseClustering):
 
         output_prefix = (
             f"Leiden_taxedge_genus_factor_{self.taxonomy_edge_factor:g}_"
-            if use_taxonomy else "Leiden_"
+            if use_taxonomy
+            else "Leiden_"
         )
 
-        jobs = []
-        # after the last two runs, update clustering. Also, debug the "both" mode, and add-corgi mode.
-        with mp.Pool(processes=2) as pool:
-            for max_edges in max_edges_list:
-                index = self.fit_hnsw_index(
-                    logger=logger,
-                    features=norm_embeddings,
-                    num_threads=2,
-                    ef=max_edges * 10,
-                    M=16,
-                    space="l2",
+        for max_edges in max_edges_list:
+            index = self.fit_hnsw_index(
+                logger=logger,
+                features=norm_embeddings,
+                num_threads=cpu_budget,
+                ef=max_edges * 10,
+                M=16,
+                space="l2",
+            )
+
+            ann_neighbor_indices, ann_distances = index.knn_query(
+                norm_embeddings,
+                k=max_edges + 1,
+                num_threads=cpu_budget,
+            )
+
+            neighbor_path = memmap_dir / f"neighbors_maxedges_{max_edges}.npy"
+            distance_path = memmap_dir / f"distances_maxedges_{max_edges}.npy"
+
+            np.save(neighbor_path, ann_neighbor_indices)
+            np.save(distance_path, ann_distances)
+
+            del ann_neighbor_indices, ann_distances, index
+
+            pending = []
+
+            for partgraph_ratio, bandwidth, resolution in itertools.product(
+                partgraph_ratio_list,
+                bandwidth_list,
+                parameter_list,
+            ):
+                output_file = (
+                    output_path
+                    / f"{output_prefix}bandwidth_{bandwidth}_maxedges_{max_edges}"
+                    f"_respara_{resolution}_partgraph_ratio_{partgraph_ratio}.tsv"
                 )
 
-                ann_neighbor_indices, ann_distances = index.knn_query(
-                    norm_embeddings,
-                    k=max_edges + 1,
-                    num_threads=num_workers,
+                if output_file.exists():
+                    logger.warning(
+                        f"Output file {output_file} already exists. Skipping Leiden run and save to ClusterResult."
+                    )
+                    df = pd.read_csv(
+                        output_file,
+                        sep="\t",
+                        header=None,
+                        names=["contig_id", "cluster_id"],
+                    )
+                    result.clusters[output_file.name] = df
+                    continue
+
+                pending.append(
+                    {
+                        "output_file": output_file,
+                        "namelist": namelist,
+                        "neighbor_path": str(neighbor_path),
+                        "distance_path": str(distance_path),
+                        "length_weight_path": str(length_weight_path),
+                        "bandwidth": bandwidth,
+                        "lmode": "l2",
+                        "initial_list": initial_list,
+                        "is_membership_fixed_path": str(fixed_path),
+                        "resolution_parameter": resolution,
+                        "partgraph_ratio": partgraph_ratio,
+                        "ids_path": ids_path,
+                        "masks_path": masks_path,
+                    }
                 )
 
-                neighbor_path = memmap_dir / f"neighbors_maxedges_{max_edges}.npy"
-                distance_path = memmap_dir / f"distances_maxedges_{max_edges}.npy"
-
-                np.save(neighbor_path, ann_neighbor_indices)
-                np.save(distance_path, ann_distances)
-
-                del ann_neighbor_indices, ann_distances
-
-                for partgraph_ratio, bandwidth, resolution in itertools.product(
-                    partgraph_ratio_list,
-                    bandwidth_list,
-                    parameter_list,
-                ):
-                    output_file = (
-                        output_path
-                        / f"{output_prefix}bandwidth_{bandwidth}_maxedges_{max_edges}"
-                        f"_respara_{resolution}_partgraph_ratio_{partgraph_ratio}.tsv"
-                    )
-
-                    if output_file.exists():
-                        logger.warning(
-                            f"Output file {output_file} already exists. Skipping Leiden run and save to ClusterResult."
-                        )
-                        df = pd.read_csv(
-                            output_file,
-                            sep="\t",
-                            header=None,
-                            names=["contig_id", "cluster_id"],
-                        )
-                        result.clusters[output_file.name] = df
-                        continue
-
-                    cluster_res = pool.apply_async(
-                        self.run_leiden_memmap,
-                        kwds={
-                            "output_file": output_file,
-                            "namelist": namelist,
-                            "neighbor_path": str(neighbor_path),
-                            "distance_path": str(distance_path),
-                            "length_weight_path": str(length_weight_path),
-                            "bandwidth": bandwidth,
-                            "lmode": "l2",
-                            "initial_list": initial_list,
-                            "is_membership_fixed_path": str(fixed_path),
-                            "resolution_parameter": resolution,
-                            "partgraph_ratio": partgraph_ratio,
-                            "ids_path": ids_path,
-                            "masks_path": masks_path,
-                        },
-                    )
-                    jobs.append(cluster_res)
-
-            for cluster_res in jobs:
-                cluster_res.get()
+            if not pending:
+                continue
+            workers = self._select_workers(
+                len(namelist), max_edges, cpu_budget, len(pending), logger
+            )
+            # Do not overlap multithreaded HNSW with memory-heavy Leiden runs.
+            with mp.Pool(processes=workers) as pool:
+                jobs = [
+                    pool.apply_async(self.run_leiden_memmap, kwds=kwds)
+                    for kwds in pending
+                ]
+                for cluster_res in jobs:
+                    cluster_res.get()
 
         # save the leiden clustering results to ClusterResult.
         for file in output_path.glob(f"{output_prefix}*.tsv"):
@@ -415,7 +531,7 @@ class LeidenClustering(BaseClustering):
         distances = neighbor_distances.reshape(-1)
 
         # global distance prune (existing behaviour)
-        dist_cutoff = np.percentile(distances, partgraph_ratio)
+        dist_cutoff = np.percentile(distances, partgraph_ratio) # what is this? partgraph_ratio is a percentile threshold for pruning edges based on their distances. It calculates the distance value below which a certain percentage (partgraph_ratio) of the distances fall. Edges with distances greater than this cutoff are filtered out, effectively reducing the number of edges in the graph and focusing on closer neighbors for clustering.
         keep = distances <= dist_cutoff
         sources, targets, distances = sources[keep], targets[keep], distances[keep]
 
@@ -447,7 +563,7 @@ class LeidenClustering(BaseClustering):
         upper = sources < targets
         sources, targets, distances = sources[upper], targets[upper], distances[upper]
 
-        # the similarity weighting scheme.
+        # the similarity weighting scheme. bandwidth is a hyperparameter that controls the scale of the similarity function. lmode determines the type of distance metric used to compute the weights. The weights are computed using an exponential decay function based on the distances and bandwidth.
         if lmode == "l1":
             weights = np.exp(-np.sqrt(distances) / bandwidth)
         elif lmode == "l2":
@@ -517,7 +633,9 @@ class LeidenClustering(BaseClustering):
         length_weight = np.load(length_weight_path, mmap_mode="r")
         is_membership_fixed = np.load(is_membership_fixed_path, mmap_mode="r")
 
-        taxonomy_ids = np.load(ids_path, mmap_mode="r") if ids_path is not None else None
+        taxonomy_ids = (
+            np.load(ids_path, mmap_mode="r") if ids_path is not None else None
+        )
         taxonomy_mask = (
             np.load(masks_path, mmap_mode="r") if masks_path is not None else None
         )
