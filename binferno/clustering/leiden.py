@@ -130,6 +130,7 @@ class LeidenClustering(BaseClustering):
         """Choose concurrency before each graph sweep; estimates are not an OOM guarantee."""
         # Heuristic for array copies, Python edge tuples, igraph and optimiser state.
         # Mutual filtering also builds a Python set of the directed edges.
+        default_workers=6
         bytes_per_edge = 1024 if self.mutual else 768
         estimate = (
             max(1, int(self.worker_memory_gb * 2**30))
@@ -139,7 +140,7 @@ class LeidenClustering(BaseClustering):
         available = _available_memory_bytes()
         cap = min(cpu_budget, pending_jobs, self.max_workers or cpu_budget)
         if available is None:
-            workers = min(cap, 2)
+            workers = min(cap, default_workers)
             logger.warning(
                 "Job RAM headroom unavailable; limiting Leiden to {} workers.", workers
             )
