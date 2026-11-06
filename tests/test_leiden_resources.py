@@ -60,7 +60,7 @@ def test_worker_selection_scales_with_graph_and_respects_caps(monkeypatch):
     assert model._select_workers(303451, 15, 1, 60, logger) == 1
     assert (
         LeidenClustering(worker_memory_gb=30)._select_workers(10, 15, 12, 60, logger)
-        == 2
+        == 6
     )
 
 

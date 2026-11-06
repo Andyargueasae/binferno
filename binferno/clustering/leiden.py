@@ -118,6 +118,10 @@ class LeidenClustering(BaseClustering):
         lt=1.0,
         description="Fraction of remaining RAM reserved when selecting Leiden workers.",
     )
+    sweep_config: str = Field(
+        default="default",
+        description="Sweep configuration for Leiden clustering; 'default' or 'mini'.",
+    )
 
     def _select_workers(
         self,
@@ -433,15 +437,23 @@ class LeidenClustering(BaseClustering):
             ]
         # Seven explicit configurations retain the best (num_905, sum_cont5)
         # pair in each of the eight benchmark tables; do not expand as a grid.
-        return [
-            (0.1, 15, 1, 100),
-            (0.1, 15, 5, 100),
-            (0.1, 15, 1, 80),
-            (0.2, 15, 1, 100),
-            (0.05, 15, 0.5, 100),
-            (0.05, 100, 0.5, 50),
-            (0.05, 100, 1, 50),
-        ]
+        if self.sweep_config == "mini":
+            return [
+                (0.1, 15, 1, 100),
+                (0.1, 15, 5, 100),
+                (0.1, 15, 1, 80),
+                (0.2, 15, 1, 100),
+                (0.05, 15, 0.5, 100),
+                (0.05, 100, 0.5, 50),
+                (0.05, 100, 1, 50),
+            ] # smaller sweep for testing and debugging.
+        return [(bandwidth, neighbors, resolution, percentile)
+                for bandwidth, neighbors, resolution, percentile in itertools.product(
+                    [0.05, 0.1, 0.2, 0.3],
+                    [15, 100],
+                    [0.5, 1, 5, 10, 30],
+                    [50, 80, 100],
+                )] # original 120-configuration sweep
 
     def run_leiden(
         self,
