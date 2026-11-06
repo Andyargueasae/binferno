@@ -74,7 +74,8 @@ def test_low_and_unknown_memory(monkeypatch):
     assert model._select_workers(303451, 100, 1, 60, logger) == 1
 
 
-def test_hnsw_and_leiden_have_separate_cpu_budgets(tmp_path, monkeypatch):
+@pytest.mark.parametrize("cpm", [False, True])
+def test_hnsw_and_leiden_have_separate_cpu_budgets(tmp_path, monkeypatch, cpm):
     monkeypatch.setenv("SLURM_CPUS_PER_TASK", "6")
     monkeypatch.setattr(module.os, "sched_getaffinity", lambda _: set(range(4)))
     monkeypatch.setattr(module, "_available_memory_bytes", lambda: 100 * 2**30)
@@ -93,6 +94,7 @@ def test_hnsw_and_leiden_have_separate_cpu_budgets(tmp_path, monkeypatch):
         ),
     )
     events = []
+    submitted = []
     active = False
 
     def fit(self, **kw):
@@ -123,17 +125,69 @@ def test_hnsw_and_leiden_have_separate_cpu_budgets(tmp_path, monkeypatch):
 
         def apply_async(self, fn, kwds):
             assert active
-            kwds["output_file"].write_text("c0\tgroup0\n")
+            submitted.append(kwds)
+            for output_file, resolution in kwds["runs"]:
+                output_file.write_text("c0\tgroup0\n")
             return SimpleNamespace(get=lambda: None)
 
     monkeypatch.setattr(LeidenClustering, "fit_hnsw_index", fit)
     monkeypatch.setattr(module.mp, "Pool", Pool)
-    result = LeidenClustering(max_workers=2)(
+    out = tmp_path / "out"
+    out.mkdir()
+    # A previous sweep's extra candidates must not enter the reduced sweep.
+    unrelated = (
+        out / "Leiden_bandwidth_0.3_maxedges_15_respara_30_partgraph_ratio_80.tsv"
+    )
+    unrelated.write_text("c0\told\n")
+    model = LeidenClustering(max_workers=2, CPM=cpm)
+    result = model(
         contigs=tmp_path / "contigs.fa",
-        output_path=tmp_path / "out",
+        output_path=out,
         embeddings=pd.DataFrame([[0.0]]),
         threads=8,
         logger=logger,
     )
-    assert events == [("build", 4), ("query", 4), ("pool", 2)] * 2
-    assert len(result.clusters) == 120
+    assert events == [
+        ("build", 4),
+        ("query", 4),
+        ("pool", 2),
+        ("build", 4),
+        ("query", 4),
+        ("pool", 2 if cpm else 1),
+    ]
+    assert len(result.clusters) == (120 if cpm else 7)
+    assert len(submitted) == (24 if cpm else 5)
+    assert unrelated.name not in result.clusters
+    expected = {
+        f"Leiden_bandwidth_{b}_maxedges_{k}_respara_{r}_partgraph_ratio_{p}.tsv"
+        for b, k, r, p in model._sweep_configurations()
+    }
+    assert set(result.clusters) == expected
+
+    # Fully cached outputs are returned without submitting graph jobs.
+    submitted.clear()
+    reloaded = model(
+        contigs=tmp_path / "contigs.fa",
+        output_path=out,
+        embeddings=pd.DataFrame([[0.0]]),
+        threads=8,
+        logger=logger,
+    )
+    assert not submitted
+    assert set(reloaded.clusters) == expected
+
+    # Resume only one missing resolution, preserving its cached graph sibling.
+    missing = out / (
+        "Leiden_bandwidth_0.05_maxedges_100_respara_"
+        f"{'0.005' if cpm else '1'}_partgraph_ratio_50.tsv"
+    )
+    missing.unlink()
+    model(
+        contigs=tmp_path / "contigs.fa",
+        output_path=out,
+        embeddings=pd.DataFrame([[0.0]]),
+        threads=8,
+        logger=logger,
+    )
+    assert len(submitted) == 1
+    assert [p for p, _ in submitted[0]["runs"]] == [missing]
