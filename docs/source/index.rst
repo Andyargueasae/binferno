@@ -15,8 +15,9 @@ Table of contents
 
     main/installation
     main/inputs_outputs
-    main/run
     main/cli
+    main/run
+    main/faster_clustering.md
     main/credits
 
 Indices and tables
