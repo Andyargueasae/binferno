@@ -58,9 +58,10 @@ def test_worker_selection_scales_with_graph_and_respects_caps(monkeypatch):
     )
     assert model._select_workers(303451, 15, 12, 1, logger) == 1
     assert model._select_workers(303451, 15, 1, 60, logger) == 1
+    # The 25% reserve leaves 75 GiB for workers that each require 30 GiB.
     assert (
         LeidenClustering(worker_memory_gb=30)._select_workers(10, 15, 12, 60, logger)
-        == 6
+        == 2
     )
 
 
@@ -70,12 +71,21 @@ def test_low_and_unknown_memory(monkeypatch):
     with pytest.raises(MemoryError, match="Insufficient RAM"):
         model._select_workers(303451, 100, 12, 60, logger)
     monkeypatch.setattr(module, "_available_memory_bytes", lambda: None)
-    assert model._select_workers(303451, 100, 12, 60, logger) == 2
+    assert model._select_workers(303451, 100, 12, 60, logger) == 6
     assert model._select_workers(303451, 100, 1, 60, logger) == 1
 
 
-@pytest.mark.parametrize("cpm", [False, True])
-def test_hnsw_and_leiden_have_separate_cpu_budgets(tmp_path, monkeypatch, cpm):
+@pytest.mark.parametrize(
+    ("settings", "candidate_count", "graph_job_count", "second_pool_size"),
+    [
+        pytest.param({"sweep_config": "mini"}, 7, 5, 1, id="rber-mini"),
+        pytest.param({}, 120, 24, 2, id="rber-default"),
+        pytest.param({"CPM": True}, 120, 24, 2, id="cpm"),
+    ],
+)
+def test_hnsw_and_leiden_have_separate_cpu_budgets(
+    tmp_path, monkeypatch, settings, candidate_count, graph_job_count, second_pool_size
+):
     monkeypatch.setenv("SLURM_CPUS_PER_TASK", "6")
     monkeypatch.setattr(module.os, "sched_getaffinity", lambda _: set(range(4)))
     monkeypatch.setattr(module, "_available_memory_bytes", lambda: 100 * 2**30)
@@ -134,12 +144,14 @@ def test_hnsw_and_leiden_have_separate_cpu_budgets(tmp_path, monkeypatch, cpm):
     monkeypatch.setattr(module.mp, "Pool", Pool)
     out = tmp_path / "out"
     out.mkdir()
-    # A previous sweep's extra candidates must not enter the reduced sweep.
-    unrelated = (
-        out / "Leiden_bandwidth_0.3_maxedges_15_respara_30_partgraph_ratio_80.tsv"
+    model = LeidenClustering(max_workers=2, **settings)
+    # Seed a cached candidate from outside the active sweep.
+    unrelated_resolution = "30" if model.CPM or model.sweep_config == "mini" else "0.001"
+    unrelated = out / (
+        f"Leiden_bandwidth_0.3_maxedges_15_respara_{unrelated_resolution}"
+        "_partgraph_ratio_80.tsv"
     )
     unrelated.write_text("c0\told\n")
-    model = LeidenClustering(max_workers=2, CPM=cpm)
     result = model(
         contigs=tmp_path / "contigs.fa",
         output_path=out,
@@ -153,10 +165,10 @@ def test_hnsw_and_leiden_have_separate_cpu_budgets(tmp_path, monkeypatch, cpm):
         ("pool", 2),
         ("build", 4),
         ("query", 4),
-        ("pool", 2 if cpm else 1),
+        ("pool", second_pool_size),
     ]
-    assert len(result.clusters) == (120 if cpm else 7)
-    assert len(submitted) == (24 if cpm else 5)
+    assert len(result.clusters) == candidate_count
+    assert len(submitted) == graph_job_count
     assert unrelated.name not in result.clusters
     expected = {
         f"Leiden_bandwidth_{b}_maxedges_{k}_respara_{r}_partgraph_ratio_{p}.tsv"
@@ -179,7 +191,7 @@ def test_hnsw_and_leiden_have_separate_cpu_budgets(tmp_path, monkeypatch, cpm):
     # Resume only one missing resolution, preserving its cached graph sibling.
     missing = out / (
         "Leiden_bandwidth_0.05_maxedges_100_respara_"
-        f"{'0.005' if cpm else '1'}_partgraph_ratio_50.tsv"
+        f"{'0.005' if model.CPM else '1'}_partgraph_ratio_50.tsv"
     )
     missing.unlink()
     model(

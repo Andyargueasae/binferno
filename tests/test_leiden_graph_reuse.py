@@ -25,7 +25,7 @@ def test_shortlist_runs_in_process_pool(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "seed_kmeans_full", lambda **kwargs: {})
     monkeypatch.setattr(module, "_available_memory_bytes", lambda: 100 * 2**30)
     features = np.random.default_rng(17).normal(size=(120, 8)).astype(np.float32)
-    result = LeidenClustering(max_workers=2)(
+    result = LeidenClustering(max_workers=2, sweep_config="mini")(
         contigs=contigs,
         output_path=output,
         embeddings=pd.DataFrame(features, index=names),
