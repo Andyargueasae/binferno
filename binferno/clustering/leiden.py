@@ -118,6 +118,10 @@ class LeidenClustering(BaseClustering):
         lt=1.0,
         description="Fraction of remaining RAM reserved when selecting Leiden workers.",
     )
+    sweep_config: str = Field(
+        default="default",
+        description="Sweep configuration for Leiden clustering; 'default' or 'mini'.",
+    )
 
     def _select_workers(
         self,
@@ -130,6 +134,7 @@ class LeidenClustering(BaseClustering):
         """Choose concurrency before each graph sweep; estimates are not an OOM guarantee."""
         # Heuristic for array copies, Python edge tuples, igraph and optimiser state.
         # Mutual filtering also builds a Python set of the directed edges.
+        default_workers=6
         bytes_per_edge = 1024 if self.mutual else 768
         estimate = (
             max(1, int(self.worker_memory_gb * 2**30))
@@ -139,7 +144,7 @@ class LeidenClustering(BaseClustering):
         available = _available_memory_bytes()
         cap = min(cpu_budget, pending_jobs, self.max_workers or cpu_budget)
         if available is None:
-            workers = min(cap, 2)
+            workers = min(cap, default_workers)
             logger.warning(
                 "Job RAM headroom unavailable; limiting Leiden to {} workers.", workers
             )
@@ -282,18 +287,8 @@ class LeidenClustering(BaseClustering):
             cpu_budget = min(cpu_budget, max(1, int(slurm_cpus)))
         logger.info("HNSW construction and query CPU budget: {}", cpu_budget)
 
-        if not self.CPM:
-            parameter_list = [0.5, 1, 5, 10, 30]
-        else:
-            parameter_list = [0.001, 0.005, 0.01, 0.05, 0.1]
-        bandwidth_list = [
-            0.05,
-            0.1,
-            0.2,
-            0.3,
-        ]  # we may have to replace this by actual-data driven sweeping.
-        partgraph_ratio_list = [50, 80, 100]
-        max_edges_list = [15, 100]  # [15 may not always be optimal]
+        configurations = self._sweep_configurations()
+        max_edges_list = sorted({config[1] for config in configurations})
 
         seed_indices = gen_seed_idx(seed_file, contig_id_list=namelist)
         initial_list = list(np.arange(len(namelist), dtype=int))
@@ -332,6 +327,7 @@ class LeidenClustering(BaseClustering):
             else "Leiden_"
         )
 
+        output_files = []
         for max_edges in max_edges_list:
             index = self.fit_hnsw_index(
                 logger=logger,
@@ -356,18 +352,17 @@ class LeidenClustering(BaseClustering):
 
             del ann_neighbor_indices, ann_distances, index
 
-            pending = []
+            pending = {}
 
-            for partgraph_ratio, bandwidth, resolution in itertools.product(
-                partgraph_ratio_list,
-                bandwidth_list,
-                parameter_list,
-            ):
+            for bandwidth, neighbors, resolution, partgraph_ratio in configurations:
+                if neighbors != max_edges:
+                    continue
                 output_file = (
                     output_path
                     / f"{output_prefix}bandwidth_{bandwidth}_maxedges_{max_edges}"
                     f"_respara_{resolution}_partgraph_ratio_{partgraph_ratio}.tsv"
                 )
+                output_files.append(output_file)
 
                 if output_file.exists():
                     logger.warning(
@@ -382,9 +377,12 @@ class LeidenClustering(BaseClustering):
                     result.clusters[output_file.name] = df
                     continue
 
-                pending.append(
+                # Resolutions share the weighted graph, but start from fresh
+                # partitions and optimiser state inside the worker.
+                group = pending.setdefault(
+                    (bandwidth, partgraph_ratio),
                     {
-                        "output_file": output_file,
+                        "runs": [],
                         "namelist": namelist,
                         "neighbor_path": str(neighbor_path),
                         "distance_path": str(distance_path),
@@ -393,12 +391,12 @@ class LeidenClustering(BaseClustering):
                         "lmode": "l2",
                         "initial_list": initial_list,
                         "is_membership_fixed_path": str(fixed_path),
-                        "resolution_parameter": resolution,
                         "partgraph_ratio": partgraph_ratio,
                         "ids_path": ids_path,
                         "masks_path": masks_path,
-                    }
+                    },
                 )
+                group["runs"].append((output_file, resolution))
 
             if not pending:
                 continue
@@ -408,22 +406,54 @@ class LeidenClustering(BaseClustering):
             # Do not overlap multithreaded HNSW with memory-heavy Leiden runs.
             with mp.Pool(processes=workers) as pool:
                 jobs = [
-                    pool.apply_async(self.run_leiden_memmap, kwds=kwds)
-                    for kwds in pending
+                    pool.apply_async(self.run_leiden_resolutions_memmap, kwds=kwds)
+                    for kwds in pending.values()
                 ]
                 for cluster_res in jobs:
                     cluster_res.get()
 
-        # save the leiden clustering results to ClusterResult.
-        for file in output_path.glob(f"{output_prefix}*.tsv"):
-            if not use_taxonomy and file.name.startswith("Leiden_taxedge_"):
-                continue
+        # Only return this sweep's candidates, including when an earlier full
+        # sweep left additional TSV files in the same output directory.
+        for file in output_files:
             df = pd.read_csv(
                 file, sep="\t", header=None, names=["contig_id", "cluster_id"]
             )
             result.clusters[file.name] = df
 
         return result
+
+    def _sweep_configurations(self) -> list[tuple[float, int, float, int]]:
+        """Return (bandwidth, neighbours, resolution, pruning percentile) tuples."""
+        if self.CPM:
+            # The eight RBER quality tables do not justify reducing CPM's grid.
+            return [
+                (bandwidth, neighbors, resolution, percentile)
+                for neighbors, percentile, bandwidth, resolution in itertools.product(
+                    [15, 100],
+                    [50, 80, 100],
+                    [0.05, 0.1, 0.2, 0.3],
+                    [0.001, 0.005, 0.01, 0.05, 0.1],
+                )
+            ]
+        # Seven explicit configurations retain the best (num_905, sum_cont5)
+        # pair in each of the eight benchmark tables; do not expand as a grid.
+        if self.sweep_config == "mini":
+            return [
+                (0.1, 15, 1, 100),
+                (0.1, 15, 5, 100),
+                (0.1, 15, 1, 80),
+                (0.2, 15, 1, 100),
+                (0.05, 15, 0.5, 100),
+                (0.05, 100, 0.5, 50),
+                (0.05, 100, 1, 50),
+            ] # smaller sweep for testing and debugging.
+        return [(bandwidth, neighbors, resolution, percentile)
+                for bandwidth, neighbors, resolution, percentile in itertools.product(
+                    [0.05, 0.1, 0.2, 0.3],
+                    [15, 100],
+                    [0.5, 1, 5, 10, 30],
+                    [50, 80, 100],
+                )] # original 120-configuration sweep
 
     def run_leiden(
         self,
@@ -444,6 +474,39 @@ class LeidenClustering(BaseClustering):
         """
         Run Leiden on a sparsified ANN graph and write TSV assignments.
         """
+        graph, weights = self._build_leiden_graph(
+            namelist,
+            ann_neighbor_indices,
+            ann_distances,
+            bandwidth,
+            lmode,
+            partgraph_ratio,
+            taxonomy_ids,
+            taxonomy_mask,
+        )
+        self._optimise_leiden_graph(
+            graph,
+            weights,
+            output_file,
+            namelist,
+            length_weight,
+            initial_list,
+            is_membership_fixed,
+            resolution_parameter,
+        )
+
+    def _build_leiden_graph(
+        self,
+        namelist: Sequence[str],
+        ann_neighbor_indices: np.ndarray,
+        ann_distances: np.ndarray,
+        bandwidth: float,
+        lmode: str,
+        partgraph_ratio: int,
+        taxonomy_ids: Optional[np.ndarray] = None,
+        taxonomy_mask: Optional[np.ndarray] = None,
+    ) -> tuple[Graph, list[float]]:
+        """Prepare one weighted graph for all resolutions with these settings."""
         sources, targets, weights = self._prepare_leiden_edges(
             ann_neighbor_indices=ann_neighbor_indices,
             ann_distances=ann_distances,
@@ -472,11 +535,24 @@ class LeidenClustering(BaseClustering):
             edges=list(zip(sources.tolist(), targets.tolist())),
             directed=False,
         )
+        return graph, weights.tolist()
 
+    def _optimise_leiden_graph(
+        self,
+        graph: Graph,
+        weights: Sequence[float],
+        output_file: Path,
+        namelist: Sequence[str],
+        length_weight: Sequence[float],
+        initial_list: Optional[List[Union[int, None]]],
+        is_membership_fixed: Optional[Sequence[bool]],
+        resolution_parameter: float,
+    ) -> None:
+        """Optimise a fresh partition; never warm-start from another resolution."""
         if not self.CPM:
             partition = leidenalg.RBERVertexPartition(
                 graph,
-                weights=weights.tolist(),
+                weights=weights,
                 initial_membership=initial_list,
                 resolution_parameter=resolution_parameter,
                 node_sizes=list(length_weight),
@@ -484,7 +560,7 @@ class LeidenClustering(BaseClustering):
         else:
             partition = leidenalg.CPMVertexPartition(
                 graph,
-                weights=weights.tolist(),
+                weights=weights,
                 initial_membership=initial_list,
                 resolution_parameter=resolution_parameter,
                 # node_sizes=list(length_weight),
@@ -628,6 +704,37 @@ class LeidenClustering(BaseClustering):
         ids_path: Optional[Path] = None,
         masks_path: Optional[Path] = None,
     ) -> None:
+        self.run_leiden_resolutions_memmap(
+            runs=[(output_file, resolution_parameter)],
+            namelist=namelist,
+            neighbor_path=neighbor_path,
+            distance_path=distance_path,
+            length_weight_path=length_weight_path,
+            bandwidth=bandwidth,
+            lmode=lmode,
+            initial_list=initial_list,
+            is_membership_fixed_path=is_membership_fixed_path,
+            partgraph_ratio=partgraph_ratio,
+            ids_path=ids_path,
+            masks_path=masks_path,
+        )
+
+    def run_leiden_resolutions_memmap(
+        self,
+        runs: Sequence[tuple[Path, float]],
+        namelist: Sequence[str],
+        neighbor_path: str,
+        distance_path: str,
+        length_weight_path: str,
+        bandwidth: float,
+        lmode: str,
+        initial_list: Optional[List[Union[int, None]]],
+        is_membership_fixed_path: str,
+        partgraph_ratio: int,
+        ids_path: Optional[Path] = None,
+        masks_path: Optional[Path] = None,
+    ) -> None:
+        """Load ANN arrays and build a graph once per group of resolutions."""
         ann_neighbor_indices = np.load(neighbor_path, mmap_mode="r")
         ann_distances = np.load(distance_path, mmap_mode="r")
         length_weight = np.load(length_weight_path, mmap_mode="r")
@@ -640,21 +747,27 @@ class LeidenClustering(BaseClustering):
             np.load(masks_path, mmap_mode="r") if masks_path is not None else None
         )
 
-        self.run_leiden(
-            output_file=output_file,
+        graph, weights = self._build_leiden_graph(
             namelist=namelist,
             ann_neighbor_indices=ann_neighbor_indices,
             ann_distances=ann_distances,
-            length_weight=length_weight,
             bandwidth=bandwidth,
             lmode=lmode,
-            initial_list=initial_list,
-            is_membership_fixed=is_membership_fixed,
-            resolution_parameter=resolution_parameter,
             partgraph_ratio=partgraph_ratio,
             taxonomy_ids=taxonomy_ids,
             taxonomy_mask=taxonomy_mask,
         )
+        for output_file, resolution in runs:
+            self._optimise_leiden_graph(
+                graph=graph,
+                weights=weights,
+                output_file=output_file,
+                namelist=namelist,
+                length_weight=length_weight,
+                initial_list=initial_list,
+                is_membership_fixed=is_membership_fixed,
+                resolution_parameter=resolution,
+            )
 
     def recruit_short(
         self,

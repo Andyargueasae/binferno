@@ -2,7 +2,7 @@ name: docs
 
 on:
   push:
-    branches: main
+    branches: main, FasterClustering
 
   # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:

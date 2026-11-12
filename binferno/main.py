@@ -1,8 +1,11 @@
+import argparse
 from pathlib import Path
 
 import tyro
 from loguru import logger
 from typing_extensions import Annotated
+
+from binferno import __version__
 
 from binferno.training import BinfernoTrainer
 from binferno.clustering import BinfernoClustering
@@ -156,7 +159,14 @@ def binferno(
 
 
 def main():
-    tyro.cli(binferno)
+    # Handle --version before Tyro validates the required pipeline arguments.
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    parser.add_argument("--version", action="version", version=f"binferno {__version__}")
+    parser.parse_known_args()
+    tyro.cli(
+        binferno,
+        description="Metagenomic binning pipeline. Use --version to print the installed version and exit.",
+    )
 
 
 if __name__ == "__main__":

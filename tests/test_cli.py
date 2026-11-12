@@ -120,3 +120,9 @@ def test_version_module_format():
     parts = __version__.split(".")
     assert len(parts) == 3
     assert all(p.isdigit() for p in parts)
+
+
+def test_cli_version():
+    result = _run(["binferno.main", "--version"])
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == f"binferno {__version__}"

@@ -3,6 +3,16 @@ name: testing
 on: [push]
 
 jobs:
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Verify package and module versions match
+        run: python scripts/check_version.py
+
   build:
     runs-on: ubuntu-latest
     env:

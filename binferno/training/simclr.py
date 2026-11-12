@@ -145,7 +145,7 @@ class SimCLRTrainer(BaseTrainer):
         output_aug_dir = output_dir / "augmentation"
         output_aug_dir.mkdir(parents=True, exist_ok=True)
         output_train_dir = output_dir / "training"
-        annotation_dir = output_train_dir / "scg"
+        annotation_dir = output_dir / "scg"
         if self._esmc.enabled:
             # Keep existing checkpoints separate from models with a protein branch.
             import hashlib
@@ -224,6 +224,7 @@ class SimCLRTrainer(BaseTrainer):
             feature_df, contigs, namelist, annotation_dir, threads, self._esmc,
             output_dim if self.simclrnet else 256, logger, fragment_dict=fragment_dict,
         )
+        
 
         corgi_dim = composition_dim - kmer_dim
 

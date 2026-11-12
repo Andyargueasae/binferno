@@ -17,6 +17,10 @@ jobs:
         with:
           python-version: 3.11
           cache: 'poetry'
+      - name: Verify release tag matches package version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python scripts/check_version.py --tag "$RELEASE_TAG"
       - run: |
           poetry install
       - name: Build library

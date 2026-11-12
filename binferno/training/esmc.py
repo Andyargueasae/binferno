@@ -128,7 +128,7 @@ def build_protein_latents(contigs, known_contigs, output_dir, threads, config, l
     if not names or len(set(names)) != len(names):
         raise ValueError("ESM-C needs nonempty, unique contig names")
     faa_path = prepare_gene_annotations(contigs, output_dir, threads)
-    fingerprint = hashlib.sha256()
+    fingerprint = hashlib.sha256() # 
     with faa_path.open("rb") as handle:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             fingerprint.update(block)
