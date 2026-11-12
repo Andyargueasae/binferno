@@ -21,72 +21,69 @@ Binferno: Contrastive Barlow-Twins metagenomic binning
 
 Binferno is a python-based metagenomic binner that handles metagenomic contigs for both prokaryotic genomes and eukaryotic plastid genomes.
 
+
 Installation
 ============
 
-Binferno can be installed from a checkout using conda for the external tools
-and pip for the Python package:
+Binferno is installable via pip:
 
 .. code-block:: bash
 
-    git clone https://github.com/Andyargueasae/binferno.git
-    cd binferno
-    conda env create -f environment.yml
-    conda activate binferno
-    python -m pip check
+    pip install binferno
+
+Or, you can install it via conda using conda-forge and bioconda channels:
+
+.. code-block:: bash
+
+    mamba create -y -n binferno-010 \
+        --override-channels --strict-channel-priority \
+        -c conda-forge -c bioconda \
+        'python=3.10' 'binferno=0.1.0'
+
+    
+To verify installation, run:
+
+.. code-block:: bash
+
     binferno --help
+    
 
-Conda packaging
----------------
-
-A publication recipe is provided in ``recipe/meta.yaml``, with an immutable
-source archive and SHA256. It includes Binferno's Python dependencies,
-FragGeneScan and HMMER; CORGI is no longer required by the current pipeline.
-The Conda packaging workflow builds and tests the installed package and provides
-a downloadable conda artifact. See ``recipe/README.md`` for build commands and
-Bioconda or personal-channel publication instructions.
-
-Binferno is not yet advertised as available from Bioconda. The environment above
-is a mixed conda/pip installation from a checkout. Reference databases and
-optional ESM-C model weights are configured separately.
-
-Input features
+Input Data
 ================
 
 Like most other metagenomic binners, Binferno uses two types of features: sequence composition and coverage. The sequence composition is represented by tetranucleotide frequencies (TNF), while the coverage is represented by the average depth of coverage across the contig.
+But we also provide options to improve the binning:
 
-For improved training, we also offer an option to use the projected kmer features: by multiplying original composition features with the kernel matrix obtained from VAMB.
-
-Corgi encoding is also supported, which is a more compact representation of the sequence composition features with hidden taxonomic information encoded in the latent space.
-
-Because running Binferno requires checkm to evaluate the quality of the bins, please specify the path to the checkm database in the command line when running Binferno.
-
-For prokaryote binning: ``checkm_data.tar.gz`` from the official checkm repository can work. For plastid binning, we curated one database with plastid protein HMMs, which can be downloaded from figshare: ...
+ - **Canonical 7-rank taxonomy**: Binferno can use the taxonomy information of contigs to improve the binning results. The taxonomy information can be obtained from tools like Kraken2 or Kaiju. The taxonomy information should be provided in a tab-delimited file with two columns: contigs and taxonomy predictions.
+ - **ESM-C protein language model**: Binferno also incorporates the ESM-C protein language model to extract features from the ORFs predicted on contigs. Through mean or attention pooling, the ESM-C features per contig can be involved in training and finally contribute to improved embeddings used for clustering.  
 
 Usage
 =====
 
-A simple usage of Binferno is as follows:
+You can check the versions of Binferno:
 
 .. code-block:: bash
 
-    binferno --contig-file contigs.fasta --bam-dir path/to/bam/files \
-        --output-dir path/to/output/dir --checkm-db path/to/checkm/db \
-        --contig-length 1000
+    binferno --version
+
+
+The simplest command to run Binferno is:
+
+.. code-block:: bash
+
+    binferno --contigs $contig_file --bam-dir $bam_dir_path --output-dir $output_dir \
+        --threads $num_threads --postprocessor.checkm-database $CHECKM_DATABASE \
+        --training.use-simclr --features.coverage.comebin
 
 Such command will run Binferno with most default parameters: encode contigs by canonical 136-dimension kmer features and coverage mean and standard deviation.
-
-For plastid binning, run with the flag ``--plastid``:
-
-.. code-block:: bash
-
-    binferno --contig-file contigs.fasta --bam-dir path/to/bam/files \
-        --output-dir path/to/output/dir --checkm-db path/to/plastid/checkm/db \
-        --contig-length 1000 --plastid
+Training takes the better-performing SimCLR contrastive learning method, and the clustering will take Leiden and postprocessing module writes the MAGs to the output directory.
 
 The output bins will be stored in the output directory specified by ``--output-dir``. The final bins will be stored in the subdirectory ``res_bins``.
 
-Besides, other steps, like augmentations, training, and clustering outputs will also be stored as intermediate results in the output directory as ``augmentations``, ``training`` and ``cluster_res`` subdirectories, respectively.
+Computing using GPU and CPU
+===========================
+
+Binferno will automatically detect if GPU is available and use it for training, we recommend using GPU as it will speed up the training process significantly. 
 
 For more details, please refer to the documentation: https://andyargueasae.github.io/binferno/Binferno.html.
 
