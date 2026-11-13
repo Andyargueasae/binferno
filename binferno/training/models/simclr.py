@@ -17,7 +17,7 @@ class ProteinConcatFusion(nn.Module):
     ):
         super().__init__()
         self.canonical_norm = nn.LayerNorm(canonical_dim)
-        self.protein_norm = nn.LayerNorm(protein_dim)
+        self.protein_norm = nn.LayerNorm(protein_dim) # K, we've done normalizations and this is still the case. 
 
         self.joint_mlp = nn.Sequential(
             nn.Linear(canonical_dim + protein_dim, hidden_dim),
