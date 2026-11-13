@@ -9,9 +9,11 @@ package:
 source:
   url: https://github.com/Andyargueasae/binferno/archive/b6207a7eaea2f192ca2cde9f2c50cc2c9a0d202c.tar.gz
   sha256: 6873d7ee42c8a886e0e5d86fd0fed5cf20588a9d92e465427c37b8644f222c4f
+  patches:
+    - relax-tqdm.patch
 
 build:
-  number: 0
+  number: 1
   noarch: python
   script: "{{ PYTHON }} -m pip install . --no-deps --no-build-isolation -vv"
   entry_points:
@@ -53,7 +55,7 @@ requirements:
     - pyhmmer >=0.10.15,<=0.12.0
     - loguru >=0.7.3,<0.8.0
     - rich ==13.9.4
-    - tqdm ==4.66.5
+    - tqdm >=4.66.5,<5
     # Direct typing_extensions imports are also declared explicitly.
     - typing_extensions
     # Executables are not supplied by Python package metadata.

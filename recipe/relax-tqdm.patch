@@ -1,0 +1,12 @@
+diff --git a/pyproject.toml b/pyproject.toml
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -49,7 +49,7 @@
+     "pyrodigal (>=3.6.3,<=3.7.1)",
+     "pyhmmer (>=0.10.15,<=0.12.0)",
+     "loguru (>=0.7.3,<0.8.0)",
+-    "tqdm==4.66.5",
++    "tqdm>=4.66.5,<5",
+     "rich==13.9.4"
+ ]
+ 
