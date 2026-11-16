@@ -82,9 +82,6 @@ def _available_memory_bytes(proc_root: Path = Path("/proc")) -> Optional[int]:
 
 class LeidenClustering(BaseClustering):
     seed: int = 42
-    mutual: bool = Field(
-        False, description="Whether to use mutual kNN filtering in Leiden clustering."
-    )
     contig_len: int = Field(
         1000, description="Minimum contig length for seed generation."
     )
@@ -133,9 +130,8 @@ class LeidenClustering(BaseClustering):
     ) -> int:
         """Choose concurrency before each graph sweep; estimates are not an OOM guarantee."""
         # Heuristic for array copies, Python edge tuples, igraph and optimiser state.
-        # Mutual filtering also builds a Python set of the directed edges.
         default_workers=6
-        bytes_per_edge = 1024 if self.mutual else 768
+        bytes_per_edge = 768
         estimate = (
             max(1, int(self.worker_memory_gb * 2**30))
             if self.worker_memory_gb
@@ -247,17 +243,6 @@ class LeidenClustering(BaseClustering):
         logger.info(f"Contigs retained after length filter: {len(namelist)}")
 
         norm_embeddings = emb_mat
-
-        # check if to apply dimension reduction.
-
-        # Two-phase clustering will incorporate shorter contigs below 2500 bp. We can first try with mutual KNN, and then decide what to do.
-        # seed_thresh = 2500  # or self.seed_len, a new param
-        # length_arr = np.asarray(length_weight)          # note: length_weight is per-contig length here
-        # long_idx = np.flatnonzero(length_arr >= seed_thresh)
-        # short_idx = np.flatnonzero(length_arr < seed_thresh)
-
-        # emb_long = norm_embeddings[long_idx]
-        # namelist_long = [namelist[i] for i in long_idx]
 
         seed_num = _read_seed_count(seed_file)
         mode = f"weight_seed_kmeans"
@@ -513,7 +498,6 @@ class LeidenClustering(BaseClustering):
             bandwidth=bandwidth,
             lmode=lmode,
             partgraph_ratio=partgraph_ratio,
-            mutual=self.mutual,
         )
 
         if taxonomy_ids is not None and self.taxonomy_edge_factor < 1.0:
@@ -591,7 +575,6 @@ class LeidenClustering(BaseClustering):
         bandwidth: float,
         lmode: str,
         partgraph_ratio: float,
-        mutual: bool = True,  # NEW, mutual-KNN filter.
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         if bandwidth <= 0:
             raise ValueError("bandwidth must be > 0")
@@ -617,23 +600,6 @@ class LeidenClustering(BaseClustering):
             targets[non_self],
             distances[non_self],
         )
-
-        # ---- NEW: mutual-kNN filter, before the upper-triangle collapse ----
-        if mutual:
-            directed = set(zip(sources.tolist(), targets.tolist()))
-            is_mutual = np.fromiter(
-                (
-                    (t, s) in directed
-                    for s, t in zip(sources.tolist(), targets.tolist())
-                ),
-                dtype=bool,
-                count=len(sources),
-            )  # this line of code checks if the reverse edge (t, s) exists in the directed set of edges (s, t). If it does, then the edge is mutual and is kept; otherwise, it is filtered out.
-            sources, targets, distances = (
-                sources[is_mutual],
-                targets[is_mutual],
-                distances[is_mutual],
-            )  # update the sources, targets, and distances arrays to only include mutual edges
 
         # collapse to undirected upper triangle (existing, will reduce the number of edges by half)
         upper = sources < targets

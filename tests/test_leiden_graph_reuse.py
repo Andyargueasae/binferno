@@ -40,10 +40,9 @@ def test_shortlist_runs_in_process_pool(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("cpm", [False, True])
-@pytest.mark.parametrize("mutual", [False, True])
 @pytest.mark.parametrize("taxonomy", [False, True])
 def test_shared_graph_matches_independent_partitions(
-    tmp_path, monkeypatch, cpm, mutual, taxonomy
+    tmp_path, monkeypatch, cpm, taxonomy
 ):
     rng = np.random.default_rng(12)
     features = rng.normal(size=(30, 4))
@@ -59,7 +58,7 @@ def test_shared_graph_matches_independent_partitions(
     ids[15:, 5] = 2
     masks = np.ones_like(ids, dtype=np.uint8)
     model = LeidenClustering(
-        CPM=cpm, mutual=mutual, taxonomy_edge_factor=0.35 if taxonomy else 1.0
+        CPM=cpm, taxonomy_edge_factor=0.35 if taxonomy else 1.0
     )
     resolutions = [0.01, 0.1, 0.5] if cpm else [0.5, 1, 5]
 
@@ -70,7 +69,6 @@ def test_shared_graph_matches_independent_partitions(
         bandwidth=0.1,
         lmode="l2",
         partgraph_ratio=80,
-        mutual=mutual,
     )
     if taxonomy:
         weights, _ = module.penalize_taxonomy_conflicts(
