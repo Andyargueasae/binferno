@@ -152,3 +152,63 @@ def test_shared_graph_matches_independent_partitions(
     assert len(penalties) == int(taxonomy)
     assert initial == list(range(30))
     assert [p.read_text() for p, _ in outputs] == expected
+
+
+@pytest.mark.parametrize("percentile", [0, 50, 80, 100])
+@pytest.mark.parametrize("lmode", ["l1", "l2"])
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_chunked_edges_match_original(percentile, lmode, dtype, tmp_path):
+    """Compare against the original vectorised algorithm across chunk boundaries."""
+    rng = np.random.default_rng(18)
+    n, k = 900, 310
+    neighbors = rng.integers(0, n, size=(n, k + 1), dtype=np.uint64)
+    # Repeated values exercise exact percentile ties; include explicit self edges.
+    distances = rng.integers(0, 20, size=neighbors.shape).astype(dtype) / 100
+    neighbors[:, 0] = np.arange(n)
+    neighbors[:, 3] = np.arange(n)
+    np.save(tmp_path / "neighbors.npy", neighbors)
+    np.save(tmp_path / "distances.npy", distances)
+    mapped_neighbors = np.load(tmp_path / "neighbors.npy", mmap_mode="r")
+    mapped_distances = np.load(tmp_path / "distances.npy", mmap_mode="r")
+
+    sources = np.repeat(np.arange(n), k)
+    targets = neighbors[:, 1:].reshape(-1)
+    values = distances[:, 1:].reshape(-1)
+    keep = values <= np.percentile(values, percentile)
+    sources, targets, values = sources[keep], targets[keep], values[keep]
+    keep = sources < targets
+    sources, targets, values = sources[keep], targets[keep], values[keep]
+    weights = np.exp(-(np.sqrt(values) if lmode == "l1" else values) / 0.1)
+
+    actual = LeidenClustering()._prepare_leiden_edges(
+        mapped_neighbors, mapped_distances, 0.1, lmode, percentile
+    )
+    for got, expected in zip(actual, (sources, targets, weights)):
+        np.testing.assert_array_equal(got, expected)
+    assert actual[0].dtype == actual[1].dtype == np.int32
+    assert actual[2].dtype == np.float64
+    np.testing.assert_array_equal(mapped_neighbors, neighbors)
+    np.testing.assert_array_equal(mapped_distances, distances)
+
+
+def test_chunked_graph_without_retained_edges():
+    model = LeidenClustering()
+    neighbors = np.array([[0, 0], [1, 0]], dtype=np.uint64)
+    graph, weights = model._build_leiden_graph(
+        ["a", "b"], neighbors, np.zeros((2, 2), dtype=np.float32), 0.1, "l2", 100
+    )
+    assert graph.vcount() == 2
+    assert graph.ecount() == len(weights) == 0
+
+
+@pytest.mark.parametrize("value", [np.inf, np.nan])
+def test_nonfinite_cutoff_preserves_numpy_percentile(value):
+    neighbors = np.array([[0, 1], [1, 0]], dtype=np.uint64)
+    distances = np.array([[0, value], [0, 0.1]], dtype=np.float32)
+    with np.errstate(invalid="ignore"):
+        cutoff = np.percentile(distances[:, 1:].reshape(-1), 100)
+        actual = LeidenClustering()._prepare_leiden_edges(
+            neighbors, distances, 0.1, "l2", 100
+        )
+    assert np.isnan(cutoff)
+    assert all(len(array) == 0 for array in actual)

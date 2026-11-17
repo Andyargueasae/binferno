@@ -1,7 +1,8 @@
 # Faster Leiden clustering
 
-The RBER sweep uses seven explicit configurations instead of the previous
-120-configuration Cartesian product:
+The default RBER sweep retains the full 120-configuration Cartesian product.
+Use `--clustering.leiden.sweep-config mini` to select these seven explicit
+configurations instead:
 
 | Bandwidth | Neighbours | Resolution | Pruning percentile |
 | --- | --- | --- | --- |
@@ -50,3 +51,32 @@ The production postprocessor still selects by `sum`, then `sum_cont5`; its
 selection policy is unchanged. CPM also retains its original 120-configuration
 sweep because these tables provide evidence for RBER only. CPM benefits from
 graph reuse across its five resolutions, reducing graph builds to 24.
+
+
+## Memory and timing diagnostics
+
+Each worker logs a `Leiden profile` line for graph construction and each
+resolution's optimisation, including elapsed seconds, PID, RSS before and after,
+and the process lifetime peak RSS. The peak is cumulative for that worker, not
+an isolated stage peak. RSS includes resident mapped input pages; peaks across
+workers must not simply be summed as though all those pages were private.
+These measurements help distinguish time spent building graphs from time
+spent optimising partitions. They do not automatically change worker counts.
+
+Edge preparation keeps the original global percentile and row-major edge order,
+but combines self-edge and upper-triangle filtering in bounded chunks. Retained
+arrays are allocated at their exact sizes. The percentile uses a single scratch
+copy for intermediate percentiles and a reduction for the 100th percentile.
+igraph receives an iterator over integer buffers instead of a materialised list
+of Python edge tuples. Weights remain in NumPy arrays through partition creation.
+The parameter grid, taxonomy penalties, seed handling, independent partitions,
+and optimisation to convergence are unchanged.
+
+The automatic worker limit still uses the conservative graph-size estimate and
+25% RAM reserve. After measuring representative dense graphs, use
+`--clustering.leiden.worker-memory-gb VALUE` to supply a conservative estimate of
+additional GiB per worker. Measure both graph creation and optimisation, include
+headroom for larger datasets and allocator retention, and validate aggregate job
+memory before increasing concurrency. `--clustering.leiden.max-workers` supplies
+an additional cap; it does not override the memory limit. No calibration from a
+small synthetic graph is automatically applied to production runs.

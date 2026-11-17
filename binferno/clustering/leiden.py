@@ -1,6 +1,9 @@
 from pathlib import Path
 import os
 import itertools
+import resource
+import sys
+from contextlib import contextmanager
 
 import numpy as np
 import pandas as pd
@@ -78,6 +81,32 @@ def _available_memory_bytes(proc_root: Path = Path("/proc")) -> Optional[int]:
         # Node RAM alone does not establish a Slurm job's remaining allocation.
         return None
     return min(headrooms) if headrooms else None
+
+
+def _rss_bytes() -> int:
+    """Current resident memory on Linux; zero when unavailable."""
+    try:
+        return int(Path("/proc/self/statm").read_text().split()[1]) * os.sysconf("SC_PAGE_SIZE")
+    except (OSError, ValueError, IndexError):
+        return 0
+
+
+@contextmanager
+def _measure_leiden_stage(stage: str):
+    """Log current RSS and the process lifetime high-water mark, not a stage peak."""
+    start = time.perf_counter()
+    before = _rss_bytes()
+    try:
+        yield
+    finally:
+        high_water = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        high_water *= 1 if sys.platform == "darwin" else 1024
+        loguru.logger.info(
+            "Leiden profile pid={} stage={} elapsed={:.3f}s RSS before={:.3f} GiB "
+            "after={:.3f} GiB process peak={:.3f} GiB",
+            os.getpid(), stage, time.perf_counter() - start,
+            before / 2**30, _rss_bytes() / 2**30, high_water / 2**30,
+        )
 
 
 class LeidenClustering(BaseClustering):
@@ -490,7 +519,7 @@ class LeidenClustering(BaseClustering):
         partgraph_ratio: int,
         taxonomy_ids: Optional[np.ndarray] = None,
         taxonomy_mask: Optional[np.ndarray] = None,
-    ) -> tuple[Graph, list[float]]:
+    ) -> tuple[Graph, np.ndarray]:
         """Prepare one weighted graph for all resolutions with these settings."""
         sources, targets, weights = self._prepare_leiden_edges(
             ann_neighbor_indices=ann_neighbor_indices,
@@ -516,10 +545,12 @@ class LeidenClustering(BaseClustering):
         vcount = len(namelist)
         graph = Graph(
             n=vcount,
-            edges=list(zip(sources.tolist(), targets.tolist())),
+            # Stream Python integers from buffers: no full endpoint lists or
+            # edge tuple list, and no igraph NumPy conversion intermediate.
+            edges=zip(memoryview(sources), memoryview(targets)),
             directed=False,
         )
-        return graph, weights.tolist()
+        return graph, weights
 
     def _optimise_leiden_graph(
         self,
@@ -579,31 +610,52 @@ class LeidenClustering(BaseClustering):
         if bandwidth <= 0:
             raise ValueError("bandwidth must be > 0")
 
-        bandwidth_weight = [0.5, 1.0, 2.0]
-
         neighbor_targets = ann_neighbor_indices[:, 1:]
         neighbor_distances = ann_distances[:, 1:]
+        n, k = neighbor_targets.shape
 
-        k = neighbor_targets.shape[1]
-        sources = np.repeat(np.arange(neighbor_targets.shape[0]), k)
-        targets = neighbor_targets.reshape(-1)
-        distances = neighbor_distances.reshape(-1)
+        # Preserve the global percentile, including ties and self distances.
+        # NumPy may copy the distances for percentile selection; avoid also
+        # materialising full N*k source and target arrays alongside that copy.
+        if partgraph_ratio == 100:
+            dist_cutoff = np.max(neighbor_distances)
+        elif partgraph_ratio == 0:
+            dist_cutoff = np.min(neighbor_distances)
+        else:
+            dist_cutoff = None
+        # Keep NumPy's interpolation behaviour for non-finite values as well.
+        if dist_cutoff is None or not np.isfinite(dist_cutoff):
+            percentile_values = np.array(neighbor_distances, order="C", copy=True)
+            dist_cutoff = np.percentile(
+                percentile_values, partgraph_ratio, overwrite_input=True
+            )
+            del percentile_values
+        rows_per_chunk = max(1, 262144 // max(1, k))
 
-        # global distance prune (existing behaviour)
-        dist_cutoff = np.percentile(distances, partgraph_ratio) # what is this? partgraph_ratio is a percentile threshold for pruning edges based on their distances. It calculates the distance value below which a certain percentage (partgraph_ratio) of the distances fall. Edges with distances greater than this cutoff are filtered out, effectively reducing the number of edges in the graph and focusing on closer neighbors for clustering.
-        keep = distances <= dist_cutoff
-        sources, targets, distances = sources[keep], targets[keep], distances[keep]
+        def retained_chunks():
+            for start in range(0, n, rows_per_chunk):
+                stop = min(n, start + rows_per_chunk)
+                rows = np.arange(start, stop)[:, None]
+                targets = neighbor_targets[start:stop]
+                distances = neighbor_distances[start:stop]
+                # Upper-triangle selection already excludes self edges.
+                keep = (distances <= dist_cutoff) & (rows < targets)
+                yield start, targets, distances, keep
 
-        non_self = sources != targets
-        sources, targets, distances = (
-            sources[non_self],
-            targets[non_self],
-            distances[non_self],
-        )
-
-        # collapse to undirected upper triangle (existing, will reduce the number of edges by half)
-        upper = sources < targets
-        sources, targets, distances = sources[upper], targets[upper], distances[upper]
+        # Count before allocating so retained arrays have exact sizes. Traversal
+        # order stays row-major, preserving graph edge order and seeded results.
+        count = sum(int(np.count_nonzero(keep)) for _, _, _, keep in retained_chunks())
+        sources = np.empty(count, dtype=np.int32)
+        targets = np.empty(count, dtype=np.int32)
+        distances = np.empty(count, dtype=neighbor_distances.dtype)
+        offset = 0
+        for start, chunk_targets, chunk_distances, keep in retained_chunks():
+            row, col = np.nonzero(keep)
+            stop = offset + len(row)
+            sources[offset:stop] = row + start
+            targets[offset:stop] = chunk_targets[row, col]
+            distances[offset:stop] = chunk_distances[row, col]
+            offset = stop
 
         # the similarity weighting scheme. bandwidth is a hyperparameter that controls the scale of the similarity function. lmode determines the type of distance metric used to compute the weights. The weights are computed using an exponential decay function based on the distances and bandwidth.
         if lmode == "l1":
@@ -614,8 +666,8 @@ class LeidenClustering(BaseClustering):
             raise ValueError(f"Unsupported lmode: {lmode}")
 
         return (
-            sources.astype(np.int32),
-            targets.astype(np.int32),
+            sources,
+            targets,
             weights.astype(np.float64),
         )
 
@@ -713,27 +765,31 @@ class LeidenClustering(BaseClustering):
             np.load(masks_path, mmap_mode="r") if masks_path is not None else None
         )
 
-        graph, weights = self._build_leiden_graph(
-            namelist=namelist,
-            ann_neighbor_indices=ann_neighbor_indices,
-            ann_distances=ann_distances,
-            bandwidth=bandwidth,
-            lmode=lmode,
-            partgraph_ratio=partgraph_ratio,
-            taxonomy_ids=taxonomy_ids,
-            taxonomy_mask=taxonomy_mask,
-        )
-        for output_file, resolution in runs:
-            self._optimise_leiden_graph(
-                graph=graph,
-                weights=weights,
-                output_file=output_file,
+        with _measure_leiden_stage(
+            f"graph bandwidth={bandwidth} percentile={partgraph_ratio}"
+        ):
+            graph, weights = self._build_leiden_graph(
                 namelist=namelist,
-                length_weight=length_weight,
-                initial_list=initial_list,
-                is_membership_fixed=is_membership_fixed,
-                resolution_parameter=resolution,
+                ann_neighbor_indices=ann_neighbor_indices,
+                ann_distances=ann_distances,
+                bandwidth=bandwidth,
+                lmode=lmode,
+                partgraph_ratio=partgraph_ratio,
+                taxonomy_ids=taxonomy_ids,
+                taxonomy_mask=taxonomy_mask,
             )
+        for output_file, resolution in runs:
+            with _measure_leiden_stage(f"optimise {output_file.name}"):
+                self._optimise_leiden_graph(
+                    graph=graph,
+                    weights=weights,
+                    output_file=output_file,
+                    namelist=namelist,
+                    length_weight=length_weight,
+                    initial_list=initial_list,
+                    is_membership_fixed=is_membership_fixed,
+                    resolution_parameter=resolution,
+                )
 
     def recruit_short(
         self,
